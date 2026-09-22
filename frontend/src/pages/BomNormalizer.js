@@ -117,11 +117,12 @@ const emptyRoles = ROLE_FIELDS.reduce((acc, field) => {
 
 const ALTERNATE_INHERIT_FIELD_OPTIONS = [
   { value: 'cpn', label: 'CPN / customer part number' },
+  { value: 'manufacturer', label: 'Manufacturer' },
   { value: 'description', label: 'Description / item name' },
   { value: 'quantity', label: 'Quantity' },
   { value: 'uom', label: 'UOM' },
   { value: 'level', label: 'BOM level' },
-  { value: 'parent', label: 'Parent / group key' },
+  { value: 'parent', label: 'Parent' },
   { value: 'notes', label: 'Notes' },
   { value: 'internalNotes', label: 'Internal notes' },
 ];
@@ -138,7 +139,7 @@ const TEACH_PATTERN_ROLE_LABELS = {
   quantity: 'Quantity',
   uom: 'UOM',
   level: 'Level',
-  parent: 'Parent / group key',
+  parent: 'Parent',
   notes: 'Notes',
   internalNotes: 'Internal notes',
 };
@@ -150,6 +151,29 @@ const alternateInheritFieldsFromConfig = (config = {}) => {
   }
   return [];
 };
+
+export const mergeInferredAlternateInheritFields = (
+  currentConfig = {},
+  inferredConfig = {},
+  userTouched = false
+) => {
+  if (userTouched || !Array.isArray(inferredConfig?.alternateInheritFields)) {
+    return currentConfig;
+  }
+  return {
+    ...currentConfig,
+    alternateInheritFields: alternateInheritFieldsFromConfig(inferredConfig),
+  };
+};
+
+export const requiresExplicitGroupKey = (config = {}, headers = []) => (
+  config.alternateLayout === 'same_group_rows'
+  && (!config.bomLayout || config.bomLayout === 'none')
+  && (
+    !config.sameGroupKeyColumn
+    || (headers.length > 0 && !headers.includes(config.sameGroupKeyColumn))
+  )
+);
 
 const SUPPORTED_SOURCE_EXTENSIONS = ['.xlsx', '.xls', '.xlsm', '.csv', '.pdf'];
 
@@ -215,6 +239,7 @@ const persistBomNormalizerWorkspaceSnapshot = (snapshot) => {
       sheetHeaderRowOverride: snapshot.sheetHeaderRowOverride || '',
       delimiterTouched: Boolean(snapshot.delimiterTouched),
       parserTouched: Boolean(snapshot.parserTouched),
+      alternateInheritFieldsTouched: Boolean(snapshot.alternateInheritFieldsTouched),
       roleColumnLabelModes: snapshot.roleColumnLabelModes || {},
     }));
   } catch (draftError) {
@@ -580,6 +605,23 @@ const sanitizeNormalizerConfig = (savedConfig = {}) => {
   delete rest.documentTypeValues;
   return rest;
 };
+
+const CONDITIONAL_FIELD_OPERATORS = [
+  { value: 'is_empty', label: 'is empty', needsValue: false },
+  { value: 'is_not_empty', label: 'is not empty', needsValue: false },
+  { value: 'equals', label: 'equals', needsValue: true },
+  { value: 'not_equals', label: 'does not equal', needsValue: true },
+  { value: 'contains', label: 'contains', needsValue: true },
+  { value: 'not_contains', label: 'does not contain', needsValue: true },
+];
+
+const conditionalFieldMappingDraft = (rule = {}, fallbackColumn = '') => ({
+  conditionColumn: rule?.if?.sourceColumn || fallbackColumn || '',
+  operator: rule?.if?.operator || 'is_empty',
+  comparisonValue: rule?.if?.value || '',
+  thenColumn: rule?.then?.sourceColumn || '',
+  elseColumn: rule?.else?.sourceColumn || fallbackColumn || '',
+});
 
 const resolveSavedAlternateGroups = (groups = [], currentHeaders = []) => (
   (Array.isArray(groups) ? groups : [])
@@ -5137,52 +5179,6 @@ const normalizeMultiBlockAssembly = (rows, roles, config = {}) => {
   return output;
 };
 
-const normalizeSameGroupRows = (rows, roles, config = {}) => {
-  const seenByGroup = new Map();
-
-  const getGroupKey = (row, rowIndex) => {
-    const sourceRow = row.__sourceRow || rowIndex + 1;
-    const contextualParts = [
-      getCell(row, roles.parent),
-      getCell(row, roles.description),
-      getCell(row, roles.quantity),
-      getCell(row, roles.uom),
-      getCell(row, roles.level),
-    ].filter((value) => !isPlaceholderCell(value));
-    const fallback = getCell(row, roles.cpn) || getCell(row, roles.mpn) || getCell(row, roles.manufacturer) || `Source row ${sourceRow}`;
-    const parts = contextualParts.length ? contextualParts : [fallback];
-    return parts.map(normalizeKey).filter(Boolean).join('::') || `row-${sourceRow}`;
-  };
-
-  return rows.map((row, rowIndex) => {
-    const sourceRow = row.__sourceRow || rowIndex + 1;
-    const mpn = stripVendorPrefix(getCell(row, roles.mpn));
-    const manufacturer = getCell(row, roles.manufacturer);
-    const groupKey = getGroupKey(row, rowIndex);
-    const groupIndex = seenByGroup.get(groupKey) || 0;
-    seenByGroup.set(groupKey, groupIndex + 1);
-    const parentKey = alternatesKey(row, roles, sourceRow);
-    const parent = hierarchyParent(row, roles);
-
-    return withSourceColumns({
-      sourceRow,
-      parentKey,
-      parent,
-      relation: groupIndex === 0 ? 'Primary' : `Alternate ${groupIndex}`,
-      level: rowLevel(row, roles) || '1',
-      cpn: getCell(row, roles.cpn),
-      description: getCell(row, roles.description),
-      mpn,
-      manufacturer,
-      quantity: getCell(row, roles.quantity),
-      uom: getCell(row, roles.uom),
-      rule: 'same_group_rows_rebalance',
-      confidence: Math.min(confidenceForRow(mpn, manufacturer, 'same_group_rows') + (groupIndex > 0 ? 12 : 6), 98),
-      discardedText: '',
-    }, row, config);
-  }).filter((row) => row.mpn || row.manufacturer || row.description);
-};
-
 const normalizeManufacturerOnly = (rows, roles, config, splitCells) => {
   const output = [];
   rows.forEach((row, rowIndex) => {
@@ -5670,7 +5666,6 @@ const normalizeRows = (rows, headers, roles, config, prepared = false) => {
   if (config.structure === 'mpn_only_rows') return finish(normalizeOnePerRow(rows, roles, configWithSourceHeaders));
   if (config.structure === 'mfr_only_same_cell') return finish(normalizeManufacturerOnly(rows, roles, configWithSourceHeaders, true));
   if (config.structure === 'mfr_only_rows') return finish(normalizeManufacturerOnly(rows, roles, configWithSourceHeaders, false));
-  if (config.alternateLayout === 'same_group_rows') return finish(normalizeSameGroupRows(rows, roles, configWithSourceHeaders));
   if (config.alternateLayout === 'already_separate_rows') return finish(normalizeOnePerRow(rows, roles, configWithSourceHeaders));
   if (config.structure === 'same_cell') return finish(normalizeSameCell(rows, roles, configWithSourceHeaders));
   if (config.structure === 'one_per_row') {
@@ -7987,7 +7982,8 @@ const SourcePreview = ({ headers, rows, getHeaderLabel = (header) => header, ass
 
 const NORMALIZED_TABLE_BASE_COLUMNS = [
   { key: 'sourceRow', label: 'Source row', editable: false, width: 86 },
-  { key: 'parentKey', label: 'Parent / group', editable: true, width: 190 },
+  { key: 'parentKey', label: 'Group key', editable: true, width: 190 },
+  { key: 'parent', label: 'Parent', editable: true, width: 190 },
   { key: 'relation', label: 'Relation', editable: true, width: 115 },
   { key: 'level', label: 'Level', editable: true, width: 70 },
   { key: 'cpn', label: 'CPN', editable: true, width: 150 },
@@ -8138,7 +8134,7 @@ const buildNormalizerSuggestedMappings = (columns = [], rows = []) => {
     { source: 'Internal notes', targets: ['Internal notes'] },
     { source: 'level', targets: ['Level', 'BOM level'] },
     { source: 'Item code', targets: ['Item code'] },
-    { source: 'parentKey', targets: ['Parent / group key', 'Parent group key', 'Sub BOM ID', 'BOM ID'] },
+    { source: 'parent', targets: ['Parent', 'Sub BOM ID', 'BOM ID'] },
     ...dynamicCandidates,
     ...(hasManufacturerValues(rows)
       ? [{ source: 'manufacturer', targets: [`Tag_${manufacturerTagSlot}`, 'Tag'] }]
@@ -8807,10 +8803,9 @@ const NORMALIZED_FIELD_BY_PARSER_TARGET = {
   'bom level': 'level',
   notes: 'Notes',
   'internal notes': 'Internal notes',
-  'parent group key': 'parentKey',
-  'parent / group key': 'parentKey',
-  'sub bom id': 'parentKey',
-  'bom id': 'parentKey',
+  parent: 'parent',
+  'sub bom id': 'parent',
+  'bom id': 'parent',
   'item code': 'Item code',
 };
 
@@ -8830,7 +8825,7 @@ const FACTWISE_PARSE_FIELDS = [
   { key: 'quantity', label: 'Quantity', aliases: ['quantity', 'qty'] },
   { key: 'uom', label: 'UOM', aliases: ['uom', 'unit', 'measurement unit'] },
   { key: 'level', label: 'Level', aliases: ['level', 'bom level'] },
-  { key: 'parent', label: 'Parent / group key', aliases: ['parent', 'parent group key', 'parent / group key', 'sub bom id', 'bom id'] },
+  { key: 'parent', label: 'Parent', aliases: ['parent', 'sub bom id', 'bom id'] },
   { key: 'notes', label: 'Notes', aliases: ['notes', 'note'] },
   { key: 'internalNotes', label: 'Internal notes', aliases: ['internal notes', 'internal note'] },
 ];
@@ -8880,7 +8875,7 @@ const NORMALIZED_FIELD_BY_FACTWISE_KEY = {
   quantity: 'quantity',
   uom: 'uom',
   level: 'level',
-  parent: 'parentKey',
+  parent: 'parent',
   notes: 'Notes',
   internalNotes: 'Internal notes',
 };
@@ -8913,6 +8908,28 @@ export const visualTeachEntriesFromBackend = (entries = [], fieldList = FACTWISE
     sourceColumns: sourceColumnsFromBackendFields(entry?.fields || {}, fieldList),
   }))
 );
+
+export const visualTeachSeedEntries = ({
+  backendEntries = [],
+  sampleEdit = {},
+  confirmedEntries = [],
+  confirmationMatchesSample = false,
+} = {}) => {
+  if (confirmationMatchesSample && confirmedEntries.length) return confirmedEntries;
+  if (sampleEdit?.manuallyEdited && sampleEdit.entries?.length) return sampleEdit.entries;
+  return backendEntries;
+};
+
+export const visualTeachMappedFieldKeysFromBackend = ({
+  workflowFields = [],
+  patternFields = [],
+  occurrenceFields = [],
+  roleFields = [],
+} = {}) => {
+  const fields = [workflowFields, patternFields, occurrenceFields, roleFields]
+    .find((candidate) => Array.isArray(candidate) && candidate.length) || [];
+  return [...new Set(fields.map(fmt).filter(Boolean))];
+};
 
 // Backend owns row construction. This overlay only keeps unsaved user edits
 // visible until they are submitted back to the backend.
@@ -9619,7 +9636,13 @@ const BomNormalizer = () => {
     followingItemRowsMpnColumn: '',
     followingItemRowsManufacturerColumn: '',
     followingItemRowsCpnMode: 'primary',
+    sameGroupKeyColumn: '',
+    conditionalFieldMappings: {},
   });
+  const [conditionalMappingField, setConditionalMappingField] = useState(null);
+  const [conditionalMappingDraft, setConditionalMappingDraft] = useState(
+    conditionalFieldMappingDraft()
+  );
   const [normalizedRows, setNormalizedRows] = useState([]);
   const [cleanupDetections, setCleanupDetections] = useState({
     skipTitleRows: 0,
@@ -9634,6 +9657,7 @@ const BomNormalizer = () => {
   const [progress, setProgress] = useState({ processed: 0, total: 0, outputRows: 0, skippedRows: 0 });
   const [delimiterTouched, setDelimiterTouched] = useState(false);
   const [parserTouched, setParserTouched] = useState(false);
+  const [alternateInheritFieldsTouched, setAlternateInheritFieldsTouched] = useState(false);
   const [skipSourceSetupForMerge, setSkipSourceSetupForMerge] = useState(false);
   const [normalizationSummary, setNormalizationSummary] = useState(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -9958,30 +9982,38 @@ const BomNormalizer = () => {
         const same = Object.keys(emptyRoles).every((key) => (prev[key] || '') === (nextRoles[key] || ''));
         return same ? prev : nextRoles;
       });
-      if (!parserTouched) {
-        const backendConfig = backendSuggestedConfigRef.current;
+      const backendConfig = backendSuggestedConfigRef.current;
+      if (backendConfig) {
+        const savedConfig = sanitizeNormalizerConfig(backendConfig);
         setConfig((prev) => {
-          if (backendConfig) {
-            const savedConfig = sanitizeNormalizerConfig(backendConfig);
+          if (!parserTouched) {
             return {
               ...prev,
               ...savedConfig,
               alternateColumnGroups: resolveSavedAlternateGroups(savedConfig.alternateColumnGroups || [], headers),
             };
           }
-          return nextConfigForDetectedStructure(prev, detectBestStructure(headers, nextRoles, dataRows.slice(0, 40)), {
+          return mergeInferredAlternateInheritFields(
+            prev,
+            savedConfig,
+            alternateInheritFieldsTouched
+          );
+        });
+      } else if (!parserTouched) {
+        setConfig((prev) => (
+          nextConfigForDetectedStructure(prev, detectBestStructure(headers, nextRoles, dataRows.slice(0, 40)), {
             headers,
             rows: dataRows.slice(0, 120),
             roles: nextRoles,
-          });
-        });
+          })
+        ));
       }
     });
 
     return () => {
       cancelled = true;
     };
-  }, [config, currentStep, dataRows, headerRowIndex, headers, inferNormalizerRoles, parserTouched, restoreInferenceNonce, sheetName, sheetScope, sourceEndRow]);
+  }, [alternateInheritFieldsTouched, config, currentStep, dataRows, headerRowIndex, headers, inferNormalizerRoles, parserTouched, restoreInferenceNonce, sheetName, sheetScope, sourceEndRow]);
 
   const sourceRowsExcludedByLimit = Math.max(0, sourceDataRows.length - dataRows.length);
   const sourceLimitActive = Boolean(sourceEndRow && sourceRowsExcludedByLimit > 0);
@@ -10141,6 +10173,7 @@ const BomNormalizer = () => {
   );
   const activeBomLayout = selectedBomLayout(config);
   const bomLayoutActive = Boolean(activeBomLayout);
+  const groupKeyRequired = requiresExplicitGroupKey(config, headers);
   const showAlternateInheritanceControl = Boolean(
     config.alternateLayout &&
     config.alternateLayout !== 'already_separate_rows' &&
@@ -10749,10 +10782,17 @@ const BomNormalizer = () => {
   const visualTeachMappedFields = useMemo(() => {
     const sourceColumn = fmt(visualTeachContext?.sourceColumn);
     const workflowFields = visualTeachContext?.workflowStep?.mappedFields || [];
+    const patternFields = visualTeachContext?.group?.mappedFields || [];
+    const occurrenceFields = visualTeachContext?.occurrence?.mappedFields || [];
     const roleFields = Object.entries(roles || {})
       .filter(([, header]) => fmt(header) === sourceColumn)
       .map(([field]) => field);
-    const requested = new Set(workflowFields.length ? workflowFields : roleFields);
+    const requested = new Set(visualTeachMappedFieldKeysFromBackend({
+      workflowFields,
+      patternFields,
+      occurrenceFields,
+      roleFields,
+    }));
     return FACTWISE_PARSE_FIELDS.filter((field) => requested.has(field.key));
   }, [roles, visualTeachContext]);
   const visualTeachMappedFieldKeys = useMemo(
@@ -11150,6 +11190,7 @@ const BomNormalizer = () => {
     progress,
     delimiterTouched,
     parserTouched,
+    alternateInheritFieldsTouched,
     skipSourceSetupForMerge,
     normalizationSummary,
     lowConfidenceOnly,
@@ -11175,6 +11216,7 @@ const BomNormalizer = () => {
   }), [
     bomStructureAnswers,
     bomStructureSeed,
+    alternateInheritFieldsTouched,
     combineError,
     combineItems,
     config,
@@ -11572,6 +11614,7 @@ const BomNormalizer = () => {
       setProgress(snapshot.progress || { processed: 0, total: 0, outputRows: 0, skippedRows: 0 });
       setDelimiterTouched(Boolean(restoredConfigure.delimiterTouched));
       setParserTouched(Boolean(restoredConfigure.parserTouched));
+      setAlternateInheritFieldsTouched(Boolean(restoredConfigure.alternateInheritFieldsTouched));
       setSkipSourceSetupForMerge(Boolean(snapshot.skipSourceSetupForMerge));
       setNormalizationSummary(snapshot.normalizationSummary || null);
       setLowConfidenceOnly(Boolean(snapshot.lowConfidenceOnly));
@@ -11936,7 +11979,7 @@ const BomNormalizer = () => {
       ? sanitizeNormalizerConfig(restoredConfigure.config || {})
       : {};
     const nextSourceEndRow = hasMatchingConfigureDraft ? (restoredConfigure.sourceEndRow || '') : '';
-    const nextConfig = {
+    let nextConfig = {
       ...config,
       ...detectedConfig,
       ...restoredConfig,
@@ -11944,6 +11987,11 @@ const BomNormalizer = () => {
         alternateColumnGroups: resolveSavedAlternateGroups(restoredConfig.alternateColumnGroups, nextHeaders),
       } : {}),
     };
+    nextConfig = mergeInferredAlternateInheritFields(
+      nextConfig,
+      backendSuggestedConfigRef.current || {},
+      hasMatchingConfigureDraft && Boolean(restoredConfigure.alternateInheritFieldsTouched)
+    );
 
     // The workbook load already completed role inference for this exact
     // Configure state. Seed the effect's key so mounting the page does not
@@ -11980,6 +12028,9 @@ const BomNormalizer = () => {
     setProgress({ processed: 0, total: 0, outputRows: 0, skippedRows: 0 });
     setDelimiterTouched(hasMatchingConfigureDraft && Boolean(restoredConfigure.delimiterTouched));
     setParserTouched(hasMatchingConfigureDraft && Boolean(restoredConfigure.parserTouched));
+    setAlternateInheritFieldsTouched(
+      hasMatchingConfigureDraft && Boolean(restoredConfigure.alternateInheritFieldsTouched)
+    );
     setRoleColumnLabelModes(hasMatchingConfigureDraft ? (restoredConfigure.roleColumnLabelModes || {}) : {});
     setSkipSourceSetupForMerge(false);
     setNormalizationSummary(null);
@@ -13056,6 +13107,7 @@ const BomNormalizer = () => {
     setProgress({ processed: 0, total: 0, outputRows: 0, skippedRows: 0 });
     setDelimiterTouched(false);
     setParserTouched(false);
+    setAlternateInheritFieldsTouched(false);
     setSkipSourceSetupForMerge(false);
     setNormalizationSummary(null);
     setConfirmOpen(false);
@@ -13097,6 +13149,7 @@ const BomNormalizer = () => {
     setProgress({ processed: 0, total: 0, outputRows: 0, skippedRows: 0 });
     setDelimiterTouched(false);
     setParserTouched(false);
+    setAlternateInheritFieldsTouched(false);
     setSkipSourceSetupForMerge(false);
     setNormalizationSummary(null);
     setConfirmOpen(false);
@@ -13142,6 +13195,7 @@ const BomNormalizer = () => {
       setProgress({ processed: 0, total: 0, outputRows: 0, skippedRows: 0 });
       setNormalizationSummary(null);
       setParserTouched(false);
+      setAlternateInheritFieldsTouched(false);
       setSkipSourceSetupForMerge(false);
       setConfirmOpen(false);
       return;
@@ -13215,6 +13269,69 @@ const BomNormalizer = () => {
     setFieldPatternEdits({});
     setRoles((prev) => ({ ...prev, [role]: header }));
   }, []);
+
+  const openConditionalFieldMapping = useCallback((field) => {
+    const existingRule = config.conditionalFieldMappings?.[field.key] || {};
+    setConditionalMappingField(field);
+    setConditionalMappingDraft(conditionalFieldMappingDraft(
+      existingRule,
+      roles[field.key] || ''
+    ));
+  }, [config.conditionalFieldMappings, roles]);
+
+  const closeConditionalFieldMapping = useCallback(() => {
+    setConditionalMappingField(null);
+    setConditionalMappingDraft(conditionalFieldMappingDraft());
+  }, []);
+
+  const saveConditionalFieldMapping = useCallback(() => {
+    if (!conditionalMappingField) return;
+    const {
+      conditionColumn,
+      operator,
+      comparisonValue,
+      thenColumn,
+      elseColumn,
+    } = conditionalMappingDraft;
+    if (!conditionColumn || !thenColumn || !elseColumn) {
+      setError('Select the IF, THEN, and ELSE client columns.');
+      return;
+    }
+    setParserTouched(true);
+    setConfig((prev) => ({
+      ...prev,
+      conditionalFieldMappings: {
+        ...(prev.conditionalFieldMappings || {}),
+        [conditionalMappingField.key]: {
+          if: {
+            sourceColumn: conditionColumn,
+            operator,
+            value: comparisonValue,
+          },
+          then: { sourceColumn: thenColumn },
+          else: { sourceColumn: elseColumn },
+        },
+      },
+    }));
+    setFieldPatternGroups([]);
+    setFieldPatternReviewRows([]);
+    setFieldPatternEdits({});
+    closeConditionalFieldMapping();
+  }, [closeConditionalFieldMapping, conditionalMappingDraft, conditionalMappingField]);
+
+  const removeConditionalFieldMapping = useCallback(() => {
+    if (!conditionalMappingField) return;
+    setParserTouched(true);
+    setConfig((prev) => {
+      const nextMappings = { ...(prev.conditionalFieldMappings || {}) };
+      delete nextMappings[conditionalMappingField.key];
+      return { ...prev, conditionalFieldMappings: nextMappings };
+    });
+    setFieldPatternGroups([]);
+    setFieldPatternReviewRows([]);
+    setFieldPatternEdits({});
+    closeConditionalFieldMapping();
+  }, [closeConditionalFieldMapping, conditionalMappingField]);
 
   const getSourceColumnName = useCallback((header, fallbackIndex = -1) => {
     const sourceIndex = Number.isFinite(sourceColumnIndexByHeader[header])
@@ -13579,6 +13696,10 @@ const BomNormalizer = () => {
       setError('No data rows found below the selected header row.');
       return;
     }
+    if (requiresExplicitGroupKey(normalizerConfig, headers)) {
+      setError('Select a group key column before normalization.');
+      return;
+    }
     // A hierarchical BOM is valid input with no MPN or manufacturer column at
     // all: SAFRAN-style sheets carry internal part codes and keep manufacturers
     // in a separate AVL sheet. Requiring MPN/MFR here blocked every multi-level
@@ -13695,6 +13816,10 @@ const BomNormalizer = () => {
       setError('Upload a sheet before teaching field patterns.');
       return;
     }
+    if (requiresExplicitGroupKey(normalizerConfig, headers)) {
+      setError('Select a group key column before reviewing patterns.');
+      return;
+    }
     const activeRuleDrafts = ruleOverride && !ruleOverride?.nativeEvent && !ruleOverride?.currentTarget
       ? ruleOverride
       : (Object.keys(fieldPatternRuleDrafts || {}).length ? fieldPatternRuleDrafts : (normalizerConfig.fieldPatternRules || {}));
@@ -13727,6 +13852,11 @@ const BomNormalizer = () => {
       };
       const response = await api.inferBomFieldPatterns(inferencePayload);
       const responseData = response.data || {};
+      setConfig((prev) => mergeInferredAlternateInheritFields(
+        prev,
+        responseData.config || {},
+        alternateInheritFieldsTouched
+      ));
       const review = responseData.review;
       if (!review || Number(review.contractVersion || 0) < 3) {
         throw new Error('Backend did not return the required pattern review contract.');
@@ -13839,7 +13969,7 @@ const BomNormalizer = () => {
     } finally {
       setFieldPatternLoading(false);
     }
-  }, [dataRows, fieldPatternEdits, fieldPatternGroups, fieldPatternRuleDrafts, headerRowIndex, headers, normalizerConfig, roles]);
+  }, [alternateInheritFieldsTouched, dataRows, fieldPatternEdits, fieldPatternGroups, fieldPatternRuleDrafts, headerRowIndex, headers, normalizerConfig, roles]);
 
   const handleOpenVisualTeachPattern = useCallback((group, sample, workflowStep = null, options = {}) => {
     const workflowSourceColumn = fmt(workflowStep?.sourceColumn);
@@ -13877,9 +14007,12 @@ const BomNormalizer = () => {
     );
     const sampleEdit = fieldPatternEdits[group.id]?.[fieldPatternSampleKey(sample)] || {};
     const backendEntries = visualTeachEntriesFromBackend(sample.entries, fieldPatternFields);
-    const baseEntries = confirmationMatchesSample && confirmedInterpretation.entries?.length
-      ? confirmedInterpretation.entries
-      : sampleEdit.entries?.length ? sampleEdit.entries : backendEntries;
+    const baseEntries = visualTeachSeedEntries({
+      backendEntries,
+      sampleEdit,
+      confirmedEntries: confirmedInterpretation?.entries || [],
+      confirmationMatchesSample,
+    });
     const backendManufacturerHints = (baseEntries.length ? baseEntries : backendEntries)
       .map((entry) => fmt(
         typeof entry?.fields?.manufacturer === 'object'
@@ -14806,7 +14939,7 @@ const BomNormalizer = () => {
       setRoleFromParserOutput('quantity', ['Quantity']);
       setRoleFromParserOutput('uom', ['UOM', 'Measurement unit']);
       setRoleFromParserOutput('level', ['Level', 'BOM level']);
-      setRoleFromParserOutput('parent', ['Parent / group key', 'Parent group key', 'Sub BOM ID', 'BOM ID']);
+      setRoleFromParserOutput('parent', ['Parent', 'Sub BOM ID', 'BOM ID']);
       setRoleFromParserOutput('notes', ['Notes']);
       setRoleFromParserOutput('internalNotes', ['Internal notes']);
       return nextRoles;
@@ -14980,12 +15113,15 @@ const BomNormalizer = () => {
       followingItemRowsMpnColumn: '',
       followingItemRowsManufacturerColumn: '',
       followingItemRowsCpnMode: 'primary',
+      sameGroupKeyColumn: '',
+      conditionalFieldMappings: {},
     });
     setNormalizedRows([]);
     setCurrentStep(0);
     setProgress({ processed: 0, total: 0, outputRows: 0, skippedRows: 0 });
     setDelimiterTouched(false);
     setParserTouched(false);
+    setAlternateInheritFieldsTouched(false);
     setSkipSourceSetupForMerge(false);
     setNormalizationSummary(null);
     setConfirmOpen(false);
@@ -15105,6 +15241,8 @@ const BomNormalizer = () => {
       followingItemRowsMpnColumn: '',
       followingItemRowsManufacturerColumn: '',
       followingItemRowsCpnMode: 'primary',
+      sameGroupKeyColumn: '',
+      conditionalFieldMappings: {},
     });
     setNormalizedRows([]);
     setCurrentStep(0);
@@ -16457,105 +16595,96 @@ const BomNormalizer = () => {
                   {ROLE_FIELDS.map((field) => {
                     const selectedHeader = roles[field.key] || '';
                     const roleHeaderOptions = ['', ...visibleSourceHeaders];
+                    const conditionalRule = config.conditionalFieldMappings?.[field.key];
                     return (
                       <Grid item xs={12} md={6} key={field.key}>
-                        <Autocomplete
-                          fullWidth
-                          size="small"
-                          options={roleHeaderOptions}
-                          value={roleHeaderOptions.includes(selectedHeader) ? selectedHeader : ''}
-                          onChange={(_, nextValue) => handleRoleChange(field.key, nextValue || '')}
-                          getOptionLabel={(option) => (
-                            option ? getSourceColumnLabel(option, field.key) : 'None'
-                          )}
-                          isOptionEqualToValue={(option, value) => option === value}
-                          filterOptions={(options, state) => {
-                            const query = normalizeKey(state.inputValue);
-                            if (!query) return options;
-                            return options.filter((option) => {
-                              if (!option) return 'none'.includes(query);
+                        <Stack direction="row" gap={0.75} alignItems="flex-start">
+                          <Autocomplete
+                            fullWidth
+                            size="small"
+                            options={roleHeaderOptions}
+                            value={roleHeaderOptions.includes(selectedHeader) ? selectedHeader : ''}
+                            onChange={(_, nextValue) => handleRoleChange(field.key, nextValue || '')}
+                            getOptionLabel={(option) => (
+                              option ? getSourceColumnLabel(option, field.key) : 'None'
+                            )}
+                            isOptionEqualToValue={(option, value) => option === value}
+                            filterOptions={(options, state) => {
+                              const query = normalizeKey(state.inputValue);
+                              if (!query) return options;
+                              return options.filter((option) => {
+                                if (!option) return 'none'.includes(query);
+                                const columnIndex = visibleSourceHeaders.indexOf(option);
+                                const columnName = getSourceColumnName(option, columnIndex);
+                                return normalizeKey(`${option} ${columnName ? `column ${columnName}` : ''}`).includes(query);
+                              });
+                            }}
+                            renderInput={(params) => (
+                              <TextField {...params} label={field.label} />
+                            )}
+                            renderOption={(props, option) => {
+                              if (!option) {
+                                return (
+                                  <Box component="li" {...props}>
+                                    <Typography sx={{ fontSize: 14, fontWeight: 600 }}>None</Typography>
+                                  </Box>
+                                );
+                              }
                               const columnIndex = visibleSourceHeaders.indexOf(option);
+                              const isSelected = selectedHeader === option;
                               const columnName = getSourceColumnName(option, columnIndex);
-                              return normalizeKey(`${option} ${columnName ? `column ${columnName}` : ''}`).includes(query);
-                            });
-                          }}
-                          renderInput={(params) => (
-                            <TextField {...params} label={field.label} />
-                          )}
-                          renderOption={(props, option) => {
-                            if (!option) {
+                              const showColumnLabel = Boolean(roleColumnLabelModes[field.key] && columnName);
                               return (
                                 <Box component="li" {...props}>
-                                  <Typography sx={{ fontSize: 14, fontWeight: 600 }}>None</Typography>
-                                </Box>
-                              );
-                            }
-                            const columnIndex = visibleSourceHeaders.indexOf(option);
-                            const isSelected = selectedHeader === option;
-                            const columnName = getSourceColumnName(option, columnIndex);
-                            const showColumnLabel = Boolean(roleColumnLabelModes[field.key] && columnName);
-                            return (
-                              <Box component="li" {...props}>
-                                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, width: '100%', minWidth: 0 }}>
-                                  <Box sx={{ minWidth: 0, maxWidth: isSelected && columnName ? '62%' : '100%' }}>
-                                    <Typography noWrap sx={{ fontSize: 14, fontWeight: isSelected ? 800 : 600 }}>
-                                      {isSelected && showColumnLabel ? `Column ${columnName}` : option}
-                                    </Typography>
-                                    {isSelected && showColumnLabel && (
-                                      <Typography noWrap sx={{ mt: 0.2, fontSize: 11.5, color: normalizerTheme.muted }}>
-                                        {option}
+                                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, width: '100%', minWidth: 0 }}>
+                                    <Box sx={{ minWidth: 0, maxWidth: isSelected && columnName ? '62%' : '100%' }}>
+                                      <Typography noWrap sx={{ fontSize: 14, fontWeight: isSelected ? 800 : 600 }}>
+                                        {isSelected && showColumnLabel ? `Column ${columnName}` : option}
                                       </Typography>
+                                      {isSelected && showColumnLabel && (
+                                        <Typography noWrap sx={{ mt: 0.2, fontSize: 11.5, color: normalizerTheme.muted }}>
+                                          {option}
+                                        </Typography>
+                                      )}
+                                    </Box>
+                                    {isSelected && columnName && (
+                                      <Box
+                                        onClick={(event) => event.stopPropagation()}
+                                        onMouseDown={(event) => event.stopPropagation()}
+                                        sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.55, flexShrink: 0, px: 0.75, py: 0.25, borderRadius: 999, border: `1px solid ${normalizerTheme.borderStrong}`, bgcolor: isDarkMode ? 'rgba(15, 23, 42, 0.34)' : 'rgba(248, 250, 252, 0.92)' }}
+                                      >
+                                        <Typography sx={{ fontSize: 11, lineHeight: 1, fontWeight: 800, color: normalizerTheme.muted, whiteSpace: 'nowrap' }}>
+                                          Column {columnName}
+                                        </Typography>
+                                        <Switch
+                                          size="small"
+                                          checked={Boolean(roleColumnLabelModes[field.key])}
+                                          onChange={(event) => toggleRoleColumnLabelMode(field.key, event.target.checked)}
+                                          sx={{ width: 30, height: 18, p: 0, '& .MuiSwitch-switchBase': { p: '2px', '&.Mui-checked': { transform: 'translateX(12px)' } }, '& .MuiSwitch-thumb': { width: 14, height: 14 }, '& .MuiSwitch-track': { borderRadius: 999 } }}
+                                        />
+                                      </Box>
                                     )}
                                   </Box>
-                                  {isSelected && columnName && (
-                                    <Box
-                                      onClick={(event) => event.stopPropagation()}
-                                      onMouseDown={(event) => event.stopPropagation()}
-                                      sx={{
-                                        display: 'inline-flex',
-                                        alignItems: 'center',
-                                        gap: 0.55,
-                                        flexShrink: 0,
-                                        px: 0.75,
-                                        py: 0.25,
-                                        borderRadius: 999,
-                                        border: `1px solid ${normalizerTheme.borderStrong}`,
-                                        bgcolor: isDarkMode ? 'rgba(15, 23, 42, 0.34)' : 'rgba(248, 250, 252, 0.92)',
-                                      }}
-                                    >
-                                      <Typography sx={{ fontSize: 11, lineHeight: 1, fontWeight: 800, color: normalizerTheme.muted, whiteSpace: 'nowrap' }}>
-                                        Column {columnName}
-                                      </Typography>
-                                      <Switch
-                                        size="small"
-                                        checked={Boolean(roleColumnLabelModes[field.key])}
-                                        onChange={(event) => toggleRoleColumnLabelMode(field.key, event.target.checked)}
-                                        sx={{
-                                          width: 30,
-                                          height: 18,
-                                          p: 0,
-                                          '& .MuiSwitch-switchBase': {
-                                            p: '2px',
-                                            '&.Mui-checked': {
-                                              transform: 'translateX(12px)',
-                                            },
-                                          },
-                                          '& .MuiSwitch-thumb': {
-                                            width: 14,
-                                            height: 14,
-                                          },
-                                          '& .MuiSwitch-track': {
-                                            borderRadius: 999,
-                                          },
-                                        }}
-                                      />
-                                    </Box>
-                                  )}
                                 </Box>
-                              </Box>
-                            );
-                          }}
-                        />
+                              );
+                            }}
+                          />
+                          <Tooltip title={`Conditional mapping for ${field.label}`}>
+                            <Button
+                              size="small"
+                              variant={conditionalRule ? 'contained' : 'outlined'}
+                              onClick={() => openConditionalFieldMapping(field)}
+                              sx={{ minWidth: 72, height: 40, px: 1, whiteSpace: 'nowrap' }}
+                            >
+                              IF / ELSE
+                            </Button>
+                          </Tooltip>
+                        </Stack>
+                        {conditionalRule && (
+                          <Typography sx={{ mt: 0.45, fontSize: 11, color: normalizerTheme.muted }}>
+                            If {conditionalRule.if?.sourceColumn} {CONDITIONAL_FIELD_OPERATORS.find((item) => item.value === conditionalRule.if?.operator)?.label || conditionalRule.if?.operator}, use {conditionalRule.then?.sourceColumn}; otherwise use {conditionalRule.else?.sourceColumn}.
+                          </Typography>
+                        )}
                       </Grid>
                     );
                   })}
@@ -16751,6 +16880,29 @@ const BomNormalizer = () => {
                         </Select>
                       </FormControl>
                     </Grid>
+                    {config.alternateLayout === 'same_group_rows' && !bomLayoutActive && (
+                      <Grid item xs={12} md={3}>
+                        <FormControl fullWidth size="small" error={groupKeyRequired}>
+                          <InputLabel>Group key column</InputLabel>
+                          <Select
+                            value={config.sameGroupKeyColumn || ''}
+                            label="Group key column"
+                            onChange={(event) => {
+                              setParserTouched(true);
+                              setConfig((prev) => ({
+                                ...prev,
+                                sameGroupKeyColumn: event.target.value,
+                              }));
+                            }}
+                          >
+                            <MenuItem value="">Select column</MenuItem>
+                            {visibleSourceHeaders.map((header) => (
+                              <MenuItem key={header} value={header}>{header}</MenuItem>
+                            ))}
+                          </Select>
+                        </FormControl>
+                      </Grid>
+                    )}
                     {config.alternateLayout === 'following_rows' && !bomLayoutActive && (
                       <Grid item xs={12} md={3}>
                         <FormControl fullWidth size="small">
@@ -16865,6 +17017,7 @@ const BomNormalizer = () => {
                               const nextFields = shouldToggleAll
                                 ? (allAlternateInheritFieldsSelected ? [] : allAlternateInheritFieldValues)
                                 : rawFields;
+                              setAlternateInheritFieldsTouched(true);
                               setParserTouched(true);
                               setConfig((prev) => ({
                                 ...prev,
@@ -17062,9 +17215,9 @@ const BomNormalizer = () => {
                     {!bomLayoutActive && selectedAlternateOption?.description ? ` ${selectedAlternateOption.description}` : ''}
                     {' '}Blank BOM levels will be treated as level 1.
                   </Typography>
-                  {config.alternateLayout === 'same_group_rows' && !roles.parent && !bomLayoutActive && (
-                    <Alert severity="info" sx={{ mt: 1 }}>
-                      Select a Parent / group key such as Ref Designator for best results. Without it, grouping falls back to description, quantity, UOM, and level.
+                  {config.alternateLayout === 'same_group_rows' && groupKeyRequired && !bomLayoutActive && (
+                    <Alert severity="error" sx={{ mt: 1 }}>
+                      Select the group key column. Review and normalization cannot continue without it.
                     </Alert>
                   )}
                   {config.alternateLayout === 'following_rows' && !config.followingRowAlternateColumn && !bomLayoutActive && (
@@ -17109,7 +17262,7 @@ const BomNormalizer = () => {
                   <Stack direction="row" gap={1}>
                     <ShadcnButton
                       variant="outline"
-                      disabled={fieldPatternLoading || !headers.length || !dataRows.length}
+                      disabled={fieldPatternLoading || !headers.length || !dataRows.length || groupKeyRequired}
                       onClick={() => handleTeachFieldPattern()}
                       className="border-blue-200 text-blue-700 hover:bg-blue-50"
                     >
@@ -18261,6 +18414,89 @@ const BomNormalizer = () => {
               Apply pairing decisions
             </Button>
           </Stack>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={Boolean(conditionalMappingField)}
+        onClose={closeConditionalFieldMapping}
+        fullWidth
+        maxWidth="sm"
+        PaperProps={{ sx: { borderRadius: '8px' } }}
+      >
+        <DialogTitle sx={{ pb: 1 }}>
+          Conditional mapping: {conditionalMappingField?.label || ''}
+        </DialogTitle>
+        <DialogContent>
+          <Stack gap={1.5} sx={{ pt: 1 }}>
+            <Stack direction={{ xs: 'column', sm: 'row' }} gap={1} alignItems={{ sm: 'center' }}>
+              <Typography sx={{ width: 48, fontSize: 12, fontWeight: 900 }}>IF</Typography>
+              <FormControl fullWidth size="small">
+                <InputLabel>Client column</InputLabel>
+                <Select
+                  label="Client column"
+                  value={conditionalMappingDraft.conditionColumn}
+                  onChange={(event) => setConditionalMappingDraft((prev) => ({ ...prev, conditionColumn: event.target.value }))}
+                >
+                  {visibleSourceHeaders.map((header) => <MenuItem key={header} value={header}>{header}</MenuItem>)}
+                </Select>
+              </FormControl>
+              <FormControl fullWidth size="small">
+                <InputLabel>Condition</InputLabel>
+                <Select
+                  label="Condition"
+                  value={conditionalMappingDraft.operator}
+                  onChange={(event) => setConditionalMappingDraft((prev) => ({ ...prev, operator: event.target.value }))}
+                >
+                  {CONDITIONAL_FIELD_OPERATORS.map((operator) => (
+                    <MenuItem key={operator.value} value={operator.value}>{operator.label}</MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+            </Stack>
+            {CONDITIONAL_FIELD_OPERATORS.find((operator) => operator.value === conditionalMappingDraft.operator)?.needsValue && (
+              <TextField
+                size="small"
+                label="Comparison value"
+                value={conditionalMappingDraft.comparisonValue}
+                onChange={(event) => setConditionalMappingDraft((prev) => ({ ...prev, comparisonValue: event.target.value }))}
+              />
+            )}
+            <Stack direction={{ xs: 'column', sm: 'row' }} gap={1} alignItems={{ sm: 'center' }}>
+              <Typography sx={{ width: 48, fontSize: 12, fontWeight: 900 }}>THEN</Typography>
+              <FormControl fullWidth size="small">
+                <InputLabel>Use client column</InputLabel>
+                <Select
+                  label="Use client column"
+                  value={conditionalMappingDraft.thenColumn}
+                  onChange={(event) => setConditionalMappingDraft((prev) => ({ ...prev, thenColumn: event.target.value }))}
+                >
+                  {visibleSourceHeaders.map((header) => <MenuItem key={header} value={header}>{header}</MenuItem>)}
+                </Select>
+              </FormControl>
+            </Stack>
+            <Stack direction={{ xs: 'column', sm: 'row' }} gap={1} alignItems={{ sm: 'center' }}>
+              <Typography sx={{ width: 48, fontSize: 12, fontWeight: 900 }}>ELSE</Typography>
+              <FormControl fullWidth size="small">
+                <InputLabel>Use client column</InputLabel>
+                <Select
+                  label="Use client column"
+                  value={conditionalMappingDraft.elseColumn}
+                  onChange={(event) => setConditionalMappingDraft((prev) => ({ ...prev, elseColumn: event.target.value }))}
+                >
+                  {visibleSourceHeaders.map((header) => <MenuItem key={header} value={header}>{header}</MenuItem>)}
+                </Select>
+              </FormControl>
+            </Stack>
+          </Stack>
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2 }}>
+          {conditionalMappingField && config.conditionalFieldMappings?.[conditionalMappingField.key] && (
+            <Button color="error" onClick={removeConditionalFieldMapping}>Remove rule</Button>
+          )}
+          <Box sx={{ flex: 1 }} />
+          <Button onClick={closeConditionalFieldMapping}>Cancel</Button>
+          <Button variant="contained" onClick={saveConditionalFieldMapping}>Save rule</Button>
         </DialogActions>
       </Dialog>
 

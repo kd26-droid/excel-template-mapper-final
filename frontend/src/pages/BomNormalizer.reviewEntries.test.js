@@ -1,7 +1,11 @@
 import {
   canUseVisualTeachInterpretation,
+  mergeInferredAlternateInheritFields,
+  requiresExplicitGroupKey,
   reviewEntriesWithUserEdits,
   visualTeachEntriesFromBackend,
+  visualTeachMappedFieldKeysFromBackend,
+  visualTeachSeedEntries,
 } from './BomNormalizer';
 
 const backendEntry = {
@@ -142,6 +146,49 @@ describe('canUseVisualTeachInterpretation', () => {
   });
 });
 
+describe('mergeInferredAlternateInheritFields', () => {
+  test('hydrates backend autofill fields after unrelated parser changes', () => {
+    expect(mergeInferredAlternateInheritFields(
+      { alternateInheritFields: [] },
+      { alternateInheritFields: ['cpn', 'manufacturer', 'quantity', 'uom'] },
+      false
+    ).alternateInheritFields).toEqual(['cpn', 'manufacturer', 'quantity', 'uom']);
+  });
+
+  test('preserves an explicit user selection', () => {
+    expect(mergeInferredAlternateInheritFields(
+      { alternateInheritFields: ['description'] },
+      { alternateInheritFields: ['cpn', 'quantity'] },
+      true
+    ).alternateInheritFields).toEqual(['description']);
+  });
+});
+
+describe('requiresExplicitGroupKey', () => {
+  test('requires a valid, separately selected group-key column', () => {
+    expect(requiresExplicitGroupKey(
+      { alternateLayout: 'same_group_rows', bomLayout: 'none' },
+      ['Ref Des', 'Parent']
+    )).toBe(true);
+    expect(requiresExplicitGroupKey(
+      {
+        alternateLayout: 'same_group_rows',
+        bomLayout: 'none',
+        sameGroupKeyColumn: 'Ref Des',
+      },
+      ['Ref Des', 'Parent']
+    )).toBe(false);
+    expect(requiresExplicitGroupKey(
+      {
+        alternateLayout: 'same_group_rows',
+        bomLayout: 'none',
+        sameGroupKeyColumn: 'Missing',
+      },
+      ['Ref Des', 'Parent']
+    )).toBe(true);
+  });
+});
+
 describe('visualTeachEntriesFromBackend', () => {
   const fields = [
     { key: 'mpn' },
@@ -183,5 +230,41 @@ describe('visualTeachEntriesFromBackend', () => {
         sourceColumns: { mpn: 'Combined', manufacturer: 'Combined' },
       },
     ]);
+  });
+});
+
+describe('visualTeachSeedEntries', () => {
+  const interpretedEntries = [{ relation: 'Primary', fields: { mpn: 'C0603X103K2RAC' } }];
+  const staleReviewEntries = [{ relation: 'Primary', fields: { mpn: 'C0603X103K2RAC@ (/TU/7411)' } }];
+
+  test('does not replace backend pattern entries with unedited review-row state', () => {
+    expect(visualTeachSeedEntries({
+      backendEntries: interpretedEntries,
+      sampleEdit: { entries: staleReviewEntries, manuallyEdited: false },
+    })).toEqual(interpretedEntries);
+  });
+
+  test('preserves an explicit manual edit', () => {
+    expect(visualTeachSeedEntries({
+      backendEntries: interpretedEntries,
+      sampleEdit: { entries: staleReviewEntries, manuallyEdited: true },
+    })).toEqual(staleReviewEntries);
+  });
+});
+
+describe('visualTeachMappedFieldKeysFromBackend', () => {
+  test('uses backend pattern fields when the workflow step has no fields', () => {
+    expect(visualTeachMappedFieldKeysFromBackend({
+      workflowFields: [],
+      patternFields: ['mpn', 'manufacturer'],
+      roleFields: [],
+    })).toEqual(['mpn', 'manufacturer']);
+  });
+
+  test('keeps workflow fields authoritative when supplied', () => {
+    expect(visualTeachMappedFieldKeysFromBackend({
+      workflowFields: ['quantity', 'uom'],
+      patternFields: ['mpn', 'manufacturer'],
+    })).toEqual(['quantity', 'uom']);
   });
 });
