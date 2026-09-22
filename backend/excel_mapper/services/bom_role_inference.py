@@ -4219,7 +4219,7 @@ def _copy_inheritable_fields(fields, config=None):
 
     copied = {}
     for key in FACTWISE_FIELD_LABELS:
-        if key in {"mpn", "manufacturer"}:
+        if key == "mpn":
             continue
         value = (fields or {}).get(key) or _blank_factwise_field()
         if key in inherit_fields and value.get("value"):
@@ -4560,7 +4560,6 @@ def _infer_separate_column_entries(row, headers, roles, config, primary_fields, 
         for value_index in range(mpn_part_count):
             alt_fields = _copy_inheritable_fields(primary_fields, config)
             alt_fields["mpn"] = _blank_factwise_field()
-            alt_fields["manufacturer"] = _blank_factwise_field()
 
             for role, details in group_values.items():
                 _apply_alternate_group_field(
@@ -4653,10 +4652,14 @@ def _pair_semantic_entries_with_separate_manufacturers(
     headers,
     roles,
     semantic_source_columns,
+    config=None,
 ):
     """Pair semantic MPN rows with a separately mapped MFR cell by position."""
     entries = list(entries or [])
     manufacturer_header = clean((roles or {}).get("manufacturer"))
+    semantic_source_columns = {
+        clean(column) for column in (semantic_source_columns or []) if clean(column)
+    }
     if (
         not entries
         or not manufacturer_header
@@ -4671,6 +4674,16 @@ def _pair_semantic_entries_with_separate_manufacturers(
             not entry.get("ignoredIdentity")
             and clean(entry.get("relation")) != "Ignored"
             and clean(_review_entry_field_value((entry.get("fields") or {}).get("mpn")))
+            and (
+                not clean(
+                    ((entry.get("fields") or {}).get("mpn") or {}).get("sourceColumn")
+                    if isinstance((entry.get("fields") or {}).get("mpn"), dict)
+                    else ""
+                )
+                or clean(
+                    ((entry.get("fields") or {}).get("mpn") or {}).get("sourceColumn")
+                ) in semantic_source_columns
+            )
         )
     ]
     if not mpn_entries:
@@ -4685,15 +4698,38 @@ def _pair_semantic_entries_with_separate_manufacturers(
     manufacturer_slots = _positional_newline_values(manufacturer_value)
     if not manufacturer_slots and not is_blankish(manufacturer_value):
         manufacturer_slots = [clean(manufacturer_value)]
+    configured_inherit_fields = (config or {}).get("alternateInheritFields")
+    if not isinstance(configured_inherit_fields, list):
+        configured_inherit_fields = (config or {}).get("alternate_inherit_fields")
+    inherit_primary_manufacturer = "manufacturer" in set(
+        configured_inherit_fields or []
+    )
 
     unknown_manufacturers = []
     for index, entry in enumerate(mpn_entries):
         fields = entry.setdefault("fields", {})
-        manufacturer = (
+        existing_manufacturer = clean(
+            _review_entry_field_value(fields.get("manufacturer"))
+        )
+        collapsed_source_manufacturer = clean(manufacturer_value)
+        preserve_existing_manufacturer = (
+            existing_manufacturer
+            and (
+                len(manufacturer_slots) <= 1
+                or existing_manufacturer != collapsed_source_manufacturer
+            )
+        )
+        manufacturer = existing_manufacturer if preserve_existing_manufacturer else (
             manufacturer_slots[index]
             if index < len(manufacturer_slots)
             else ""
         )
+        if (
+            not manufacturer
+            and inherit_primary_manufacturer
+            and manufacturer_slots
+        ):
+            manufacturer = manufacturer_slots[0]
         if not manufacturer:
             fields["manufacturer"] = _blank_factwise_field()
             continue
@@ -8012,6 +8048,7 @@ def _infer_semantic_pattern_entries_for_row(row, headers, roles, selected_column
         headers,
         roles,
         semantic_source_columns,
+        config=config,
     )
 
 
@@ -8357,7 +8394,6 @@ def _infer_field_entries_for_row(row, headers, roles, selected_columns, config=N
     for entry_index in range(1, entry_count):
         alt_fields = _copy_inheritable_fields(fields, config)
         alt_fields["mpn"] = _blank_factwise_field()
-        alt_fields["manufacturer"] = _blank_factwise_field()
         if entry_index < len(cpn_parts):
             alt_fields["cpn"] = _direct_factwise_field(
                 cpn_parts[entry_index],
@@ -12147,6 +12183,8 @@ def _build_flat_pattern_review_rows(
     groups=None,
     roles=None,
     config=None,
+    source_rows_by_number=None,
+    headers=None,
     include_display_entries=False,
 ):
     """Return complete source rows for the UI without exposing combination navigation."""
@@ -12306,6 +12344,21 @@ def _build_flat_pattern_review_rows(
                     occurrences,
                     interpreted_entries,
                 ) if interpreted_entries else complete_entries
+                primary_mpn_column = clean((roles or {}).get("mpn"))
+                raw_source_row = (source_rows_by_number or {}).get(str(source_row))
+                if (
+                    source_entries
+                    and raw_source_row is not None
+                    and primary_mpn_column
+                ):
+                    source_entries = _pair_semantic_entries_with_separate_manufacturers(
+                        source_entries,
+                        raw_source_row,
+                        headers or [],
+                        roles or {},
+                        {primary_mpn_column},
+                        config=config,
+                    )
                 if source_entries:
                     for entry_index, entry in enumerate(_display_review_entries(
                         source_entries,
@@ -12491,6 +12544,7 @@ def _apply_following_item_row_review_relations(
     inherit_fields = set(configured_inherit_fields or [])
     context_roles = (
         "cpn",
+        "manufacturer",
         "description",
         "quantity",
         "uom",
@@ -12564,7 +12618,15 @@ def _apply_following_item_row_review_relations(
                     if role == "cpn" and cpn_mode != "column":
                         should_inherit = True
                     context_field_value = context_fields.get(role)
-                    if should_inherit and not is_blankish(context_field_value):
+                    has_explicit_manufacturer = (
+                        role == "manufacturer"
+                        and not is_blankish(entry_fields.get(role))
+                    )
+                    if (
+                        should_inherit
+                        and not has_explicit_manufacturer
+                        and not is_blankish(context_field_value)
+                    ):
                         entry_fields[role] = context_field_value
                         context_source_column = clean(
                             context_source_columns.get(role)
@@ -12572,6 +12634,17 @@ def _apply_following_item_row_review_relations(
                         if context_source_column:
                             entry_source_columns[role] = context_source_column
                 if has_context:
+                    if (
+                        is_primary
+                        and "manufacturer" in inherit_fields
+                        and not is_blankish(entry_fields.get("manufacturer"))
+                    ):
+                        context_fields["manufacturer"] = entry_fields["manufacturer"]
+                        primary_manufacturer_source = clean(
+                            entry_source_columns.get("manufacturer")
+                        )
+                        if primary_manufacturer_source:
+                            context_source_columns["manufacturer"] = primary_manufacturer_source
                     emitted_identity_count += 1
 
     return review_rows
@@ -12628,7 +12701,11 @@ def _apply_same_group_row_review_relations(review_rows, config):
                 primary_sources = primary.get("sourceColumns") or {}
                 for role in inherit_fields:
                     primary_value = primary_fields.get(role)
-                    if not is_blankish(primary_value):
+                    has_explicit_manufacturer = (
+                        role == "manufacturer"
+                        and not is_blankish(fields.get(role))
+                    )
+                    if not has_explicit_manufacturer and not is_blankish(primary_value):
                         fields[role] = primary_value
                         primary_source = clean(primary_sources.get(role))
                         if primary_source:
@@ -13108,6 +13185,15 @@ def build_bom_field_pattern_groups(headers, rows, roles=None, config=None, selec
         groups=groups,
         roles=safe_roles,
         config=config,
+        source_rows_by_number={
+            str(_source_row_number(
+                row,
+                index,
+                int(options.get("headerRowIndex") or 0),
+            )): row
+            for index, row in enumerate(safe_rows)
+        },
+        headers=safe_headers,
         include_display_entries=review_contract_version >= 3,
     )
     review_rows = _apply_following_item_row_review_relations(
@@ -13697,6 +13783,7 @@ def _normalize_following_item_row_groups(normalized_rows, source_rows, headers, 
     inherit_fields = set(configured_inherit_fields or [])
     output_field_by_role = {
         "cpn": "cpn",
+        "manufacturer": "manufacturer",
         "description": "description",
         "quantity": "quantity",
         "uom": "uom",
@@ -13728,7 +13815,15 @@ def _normalize_following_item_row_groups(normalized_rows, source_rows, headers, 
             if role == "cpn" and cpn_mode != "column":
                 should_inherit = True
             context_value = current_context.get(output_key) if current_context else ""
-            if should_inherit and not is_blankish(context_value):
+            has_explicit_manufacturer = (
+                role == "manufacturer"
+                and not is_blankish(merged.get(output_key))
+            )
+            if (
+                should_inherit
+                and not has_explicit_manufacturer
+                and not is_blankish(context_value)
+            ):
                 merged[output_key] = context_value
         if current_context:
             merged["parentKey"] = current_context.get("parentKey") or merged.get("parentKey")
@@ -13757,7 +13852,14 @@ def _normalize_following_item_row_groups(normalized_rows, source_rows, headers, 
 
         if identity_entries and current_context is not None:
             for entry in identity_entries:
-                output.append(with_context(entry, emitted_identity_count))
+                merged_entry = with_context(entry, emitted_identity_count)
+                output.append(merged_entry)
+                if (
+                    emitted_identity_count == 0
+                    and "manufacturer" in inherit_fields
+                    and not is_blankish(merged_entry.get("manufacturer"))
+                ):
+                    current_context["manufacturer"] = merged_entry["manufacturer"]
                 emitted_identity_count += 1
             continue
 
@@ -13780,6 +13882,7 @@ def _normalize_same_group_rows(normalized_rows, config):
     inherit_fields = set(configured_inherit_fields or [])
     output_field_by_role = {
         "cpn": "cpn",
+        "manufacturer": "manufacturer",
         "description": "description",
         "quantity": "quantity",
         "uom": "uom",
@@ -13813,7 +13916,15 @@ def _normalize_same_group_rows(normalized_rows, config):
             primary = primary_by_group.get(group_key) or {}
             for role, output_field in output_field_by_role.items():
                 primary_value = primary.get(output_field)
-                if role in inherit_fields and not is_blankish(primary_value):
+                has_explicit_manufacturer = (
+                    role == "manufacturer"
+                    and not is_blankish(grouped.get(output_field))
+                )
+                if (
+                    role in inherit_fields
+                    and not has_explicit_manufacturer
+                    and not is_blankish(primary_value)
+                ):
                     grouped[output_field] = primary_value
         seen_by_group[group_key] = group_index + 1
         output.append(grouped)
@@ -14193,6 +14304,17 @@ def normalize_bom_rows(headers, rows, roles=None, config=None):
                 entries = merged_entries
             elif isinstance(override.get("entries"), list) and override.get("entries"):
                 entries = override.get("entries")
+
+        primary_mpn_column = clean(safe_roles.get("mpn"))
+        if primary_mpn_column:
+            entries = _pair_semantic_entries_with_separate_manufacturers(
+                entries,
+                row,
+                safe_headers,
+                safe_roles,
+                {primary_mpn_column},
+                config=safe_config,
+            )
 
         non_ignored_index = 0
         for entry in entries:

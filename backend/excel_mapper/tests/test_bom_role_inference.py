@@ -42,6 +42,7 @@ from excel_mapper.services.bom_role_inference import (
     _mpn_position_prefix_rule,
     _mpn_source_fragment_pattern,
     _pattern_shape_for_row,
+    _pair_semantic_entries_with_separate_manufacturers,
     _same_cell_parenthesized_patterns_from_entries,
     _same_cell_parenthesized_mpn_manufacturer_pairs,
     _semantic_interpretation_coverage,
@@ -49,6 +50,7 @@ from excel_mapper.services.bom_role_inference import (
     _semantic_pattern_key,
     _validate_semantic_pattern_mpns,
     _build_split_field_review_step,
+    _build_flat_pattern_review_rows,
     _build_pattern_review_summary,
     _build_bom_field_review_workflow,
     _bom_pattern_structure_scope,
@@ -424,7 +426,7 @@ class BomFieldPatternTeachApiTests(TestCase):
                     {
                         "CPN": "",
                         "MPN": "XYZ987",
-                        "MFR": "AVX",
+                        "MFR": "",
                         "Qty": "",
                         "Group ID": "G1",
                         "Parent": "ASSY-A",
@@ -450,7 +452,7 @@ class BomFieldPatternTeachApiTests(TestCase):
                 "config": {
                     "alternateLayout": "same_group_rows",
                     "sameGroupKeyColumn": "Group ID",
-                    "alternateInheritFields": ["cpn", "quantity"],
+                    "alternateInheritFields": ["cpn", "manufacturer", "quantity"],
                 },
             },
             content_type="application/json",
@@ -467,6 +469,7 @@ class BomFieldPatternTeachApiTests(TestCase):
             ["ASSY-A", "ASSY-A", "ASSY-B"],
         )
         self.assertEqual(rows[1]["cpn"], "C-100")
+        self.assertEqual(rows[1]["manufacturer"], "KEMET")
         self.assertEqual(rows[1]["quantity"], "4")
 
     def test_missing_alternate_separator_stays_empty(self):
@@ -3577,12 +3580,21 @@ class VisualPatternMpnExtractionTests(SimpleTestCase):
             },
             {
                 "Item": "",
+                "Description": "",
+                "MPN": "LMN555",
+                "MFR": "",
+                "Qty": "",
+                "UOM": "",
+                "__sourceRow": 5,
+            },
+            {
+                "Item": "",
                 "Description": "Supplementary text only",
                 "MPN": "",
                 "MFR": "",
                 "Qty": "",
                 "UOM": "",
-                "__sourceRow": 5,
+                "__sourceRow": 6,
             },
         ]
         result = normalize_bom_rows(
@@ -3602,18 +3614,18 @@ class VisualPatternMpnExtractionTests(SimpleTestCase):
                 "followingItemRowsMpnColumn": "MPN",
                 "followingItemRowsManufacturerColumn": "MFR",
                 "followingItemRowsCpnMode": "primary",
-                "alternateInheritFields": ["cpn", "description", "quantity", "uom"],
+                "alternateInheritFields": ["cpn", "manufacturer", "description", "quantity", "uom"],
             },
         )
 
         normalized = result["normalizedRows"]
-        self.assertEqual(len(normalized), 2)
+        self.assertEqual(len(normalized), 3)
         self.assertEqual(
             [row["relation"] for row in normalized],
-            ["Primary", "Alternate 1"],
+            ["Primary", "Alternate 1", "Alternate 2"],
         )
-        self.assertEqual([row["mpn"] for row in normalized], ["ABC123", "XYZ987"])
-        self.assertEqual([row["manufacturer"] for row in normalized], ["KEMET", "AVX"])
+        self.assertEqual([row["mpn"] for row in normalized], ["ABC123", "XYZ987", "LMN555"])
+        self.assertEqual([row["manufacturer"] for row in normalized], ["KEMET", "AVX", "KEMET"])
         self.assertTrue(all(row["cpn"] == "CPN-100" for row in normalized))
         self.assertTrue(all(row["description"] == "Chip capacitor" for row in normalized))
         self.assertTrue(all(row["quantity"] == "4" for row in normalized))
@@ -3636,7 +3648,7 @@ class VisualPatternMpnExtractionTests(SimpleTestCase):
                 "followingItemRowsMpnColumn": "MPN",
                 "followingItemRowsManufacturerColumn": "MFR",
                 "followingItemRowsCpnMode": "primary",
-                "alternateInheritFields": ["cpn", "description", "quantity", "uom"],
+                "alternateInheritFields": ["cpn", "manufacturer", "description", "quantity", "uom"],
             },
             options={"includeAllRows": True, "reviewContractVersion": 3},
         )["review"]
@@ -3646,16 +3658,20 @@ class VisualPatternMpnExtractionTests(SimpleTestCase):
         }
         self.assertEqual(relation_by_source_row[3], ["Primary"])
         self.assertEqual(relation_by_source_row[4], ["Alternate 1"])
+        self.assertEqual(relation_by_source_row[5], ["Alternate 2"])
         entries_by_source_row = {
             row["sourceRow"]: row["entries"]
             for row in review["rows"]
         }
-        for source_row in (3, 4):
+        for source_row in (3, 4, 5):
             fields = entries_by_source_row[source_row][0]["fields"]
             self.assertEqual(fields["cpn"], "CPN-100")
             self.assertEqual(fields["description"], "Chip capacitor")
             self.assertEqual(fields["quantity"], "4")
             self.assertEqual(fields["uom"], "EA")
+        self.assertEqual(entries_by_source_row[3][0]["fields"]["manufacturer"], "KEMET")
+        self.assertEqual(entries_by_source_row[4][0]["fields"]["manufacturer"], "AVX")
+        self.assertEqual(entries_by_source_row[5][0]["fields"]["manufacturer"], "KEMET")
 
     @patch(
         "excel_mapper.services.bom_role_inference.load_saved_bom_pattern_interpretations",
@@ -4736,6 +4752,7 @@ class SemanticIdentityFragmentTests(SimpleTestCase):
             {"mpn": "MPN", "manufacturer": "MFR"},
             ["MPN", "MFR"],
             config={
+                "alternateInheritFields": ["manufacturer"],
                 "_activeFieldPatternRule": {
                     "fields": {
                         "mpn": {"delimiter": "\\n"},
@@ -4755,6 +4772,25 @@ class SemanticIdentityFragmentTests(SimpleTestCase):
         self.assertEqual(entries[0]["pairingCheck"]["mpnCount"], 2)
         self.assertEqual(entries[0]["pairingCheck"]["manufacturerCount"], 2)
         self.assertFalse(entries[0]["pairingCheck"]["hasPairingMismatch"])
+
+    def test_single_primary_manufacturer_can_fill_split_mpn_alternates(self):
+        entries = _infer_field_entries_for_row(
+            {"MPN": "MPN-A1\nMPN-B2\nMPN-C3", "MFR": "KEMET"},
+            ["MPN", "MFR"],
+            {"mpn": "MPN", "manufacturer": "MFR"},
+            ["MPN", "MFR"],
+            config={
+                "alternateInheritFields": ["manufacturer"],
+                "_activeFieldPatternRule": {
+                    "fields": {"mpn": {"delimiter": "\\n"}},
+                },
+            },
+        )
+
+        self.assertEqual(
+            [entry["fields"]["manufacturer"]["value"] for entry in entries],
+            ["KEMET", "KEMET", "KEMET"],
+        )
 
     def _semantic_entries_with_separate_manufacturers(self, mpns, manufacturers):
         mpn_value = "\n".join(mpns)
@@ -4836,6 +4872,149 @@ class SemanticIdentityFragmentTests(SimpleTestCase):
         self.assertTrue(entries[0]["pairingCheck"]["hasPairingMismatch"])
         self.assertEqual(entries[0]["pairingCheck"]["mpnCount"], 3)
         self.assertEqual(entries[0]["pairingCheck"]["manufacturerCount"], 2)
+
+    def test_positional_pairing_preserves_explicit_alternate_manufacturer(self):
+        entries = [
+            {
+                "fields": {
+                    "mpn": {"value": "MPN-A1", "sourceColumn": "MPN"},
+                    "manufacturer": {"value": "KEMET", "sourceColumn": "MFR"},
+                },
+            },
+            {
+                "fields": {
+                    "mpn": {"value": "MPN-B2", "sourceColumn": "MPN"},
+                    "manufacturer": {"value": "USER CORRECTED", "sourceColumn": "MFR"},
+                },
+            },
+        ]
+
+        paired = _pair_semantic_entries_with_separate_manufacturers(
+            entries,
+            {"MPN": "MPN-A1\nMPN-B2", "MFR": "KEMET\nYAGEO"},
+            ["MPN", "MFR"],
+            {"mpn": "MPN", "manufacturer": "MFR"},
+            {"MPN"},
+        )
+
+        self.assertEqual(
+            [entry["fields"]["manufacturer"]["value"] for entry in paired],
+            ["KEMET", "USER CORRECTED"],
+        )
+
+    def test_review_rows_repair_collapsed_manufacturers_by_source_position(self):
+        collapsed_manufacturers = "KEMET YAGEO VISHAY"
+        interpreted_entries = [
+            {
+                "occurrenceId": "occurrence-1",
+                "fields": {
+                    "mpn": {"value": mpn, "sourceColumn": "MPN"},
+                },
+            }
+            for mpn in ("MPN-A1", "MPN-B2", "MPN-C3")
+        ]
+        review_rows = _build_flat_pattern_review_rows(
+            patterns=[{
+                "patternKey": "pattern-1",
+                "interpretationPattern": "<MPN>",
+                "sourceColumn": "MPN",
+                "mappedFields": ["mpn"],
+                "recognized": True,
+            }],
+            combinations=[{
+                "id": "combination-1",
+                "samples": [{
+                    "sourceRow": 11,
+                    "left": [],
+                    "entries": interpreted_entries,
+                    "occurrences": [{
+                        "occurrenceId": "occurrence-1",
+                        "patternKey": "pattern-1",
+                        "sourceColumn": "MPN",
+                        "mappedFields": ["mpn"],
+                        "entries": interpreted_entries,
+                    }],
+                }],
+            }],
+            groups=[{
+                "patternKey": "pattern-1",
+                "rowEntries": {
+                    "11": {
+                        "entries": [{
+                            "fields": {
+                                "mpn": {
+                                    "value": "MPN-A1 MPN-B2 MPN-C3",
+                                    "sourceColumn": "MPN",
+                                },
+                                "manufacturer": {
+                                    "value": collapsed_manufacturers,
+                                    "sourceColumn": "MFR",
+                                },
+                            },
+                        }],
+                    },
+                },
+            }],
+            roles={"mpn": "MPN", "manufacturer": "MFR"},
+            config={},
+            source_rows_by_number={
+                "11": {
+                    "MPN": "MPN-A1\nMPN-B2\nMPN-C3",
+                    "MFR": "KEMET\nYAGEO\nVISHAY",
+                },
+            },
+            headers=["MPN", "MFR"],
+            include_display_entries=True,
+        )
+
+        self.assertEqual(
+            [
+                (entry["fields"]["mpn"], entry["fields"]["manufacturer"])
+                for entry in review_rows[0]["entries"]
+            ],
+            [("MPN-A1", "KEMET"), ("MPN-B2", "YAGEO"), ("MPN-C3", "VISHAY")],
+        )
+        self.assertNotIn(
+            collapsed_manufacturers,
+            [entry["fields"]["manufacturer"] for entry in review_rows[0]["entries"]],
+        )
+
+    @patch("excel_mapper.services.bom_role_inference.build_bom_field_pattern_groups")
+    def test_normalizer_repairs_collapsed_manufacturers_by_source_position(self, build_groups):
+        collapsed_manufacturers = "KEMET YAGEO VISHAY"
+        stale_entries = [
+            {
+                "relation": "Primary" if index == 0 else f"Alternate {index}",
+                "fields": {
+                    "mpn": {"value": mpn, "sourceColumn": "MPN"},
+                    "manufacturer": {
+                        "value": collapsed_manufacturers,
+                        "sourceColumn": "MFR",
+                    },
+                },
+            }
+            for index, mpn in enumerate(("MPN-A1", "MPN-B2", "MPN-C3"))
+        ]
+        build_groups.return_value = {
+            "groups": [{"rowEntries": {"11": {"entries": stale_entries}}}],
+            "reviewRows": [],
+        }
+
+        result = normalize_bom_rows(
+            ["MPN", "MFR"],
+            [{
+                "MPN": "MPN-A1\nMPN-B2\nMPN-C3",
+                "MFR": "KEMET\nYAGEO\nVISHAY",
+                "__sourceRow": 11,
+            }],
+            roles={"mpn": "MPN", "manufacturer": "MFR"},
+            config={"skipTitleRows": False},
+        )
+
+        self.assertEqual(
+            [(row["mpn"], row["manufacturer"]) for row in result["normalizedRows"]],
+            [("MPN-A1", "KEMET"), ("MPN-B2", "YAGEO"), ("MPN-C3", "VISHAY")],
+        )
 
     def test_same_cell_semantic_manufacturer_behavior_is_unchanged(self):
         source = "MPN-A1 (KEMET)\nMPN-B2 (YAGEO)"
