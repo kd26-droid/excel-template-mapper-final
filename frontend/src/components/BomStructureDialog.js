@@ -422,12 +422,29 @@ const assembliesFromParents = (records, levelColumn, codeColumn = '', excludeRow
     (codeColumn ? record?.[codeColumn] : undefined) ?? record?.cpn ?? '',
   ).trim();
 
+  // Codes the sheet actually contains. A parent naming something that is not
+  // one of them is not an assembly - exports write a placeholder beside the
+  // topmost line to mean "nothing above me", and THALES writes "Top" there.
+  // Taken literally it became a BOM of its own: a finished good called "Top"
+  // that exists nowhere, holding the real product, and - because the tiers
+  // below are ranked in depth order - it took rank 1 and pushed every real
+  // assembly down one, leaving two "Level 1" rows and no Level 2 at all.
+  const knownCodes = new Set();
+  records.forEach((record) => {
+    if (excludeRow(record)) return;
+    const code = ownCode(record);
+    if (code) knownCodes.add(code);
+  });
+
   const shallowestChild = new Map();
   let any = false;
   records.forEach((record) => {
     if (excludeRow(record)) return;
     const parent = assemblyCodeFromPath(String(record?.parent ?? '').trim());
     if (!parent || parent === ownCode(record)) return;
+    // Nothing is invented in its place: the row simply has no assembly above
+    // it, which is what the sheet was saying.
+    if (!knownCodes.has(parent)) return;
     any = true;
     const level = parseLevelValue(record?.[levelColumn]);
     if (level === null) return;
@@ -444,7 +461,9 @@ const assembliesFromParents = (records, levelColumn, codeColumn = '', excludeRow
     // and every lookup here misses.
     if (excludeRow(record)) return;
     const parent = assemblyCodeFromPath(String(record?.parent ?? '').trim());
-    if (parent && parent !== ownCode(record) && !nameOf.has(parent)) nameOf.set(parent, '');
+    // Same filter as above, or the two maps disagree about what an assembly is.
+    if (parent && knownCodes.has(parent)
+        && parent !== ownCode(record) && !nameOf.has(parent)) nameOf.set(parent, '');
   });
 
   return { shallowestChild, nameOf };
