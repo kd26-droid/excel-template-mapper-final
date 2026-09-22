@@ -473,7 +473,7 @@ class BOMHeaderMapper:
                 if header and header not in template_headers:
                     template_headers.append(header)
             client_headers = self.read_excel_headers(client_file, client_sheet_name, client_header_row)
-            
+
             try:
                 client_sample_data = self.read_sample_data(
                     client_file,
@@ -483,16 +483,34 @@ class BOMHeaderMapper:
                 )
             except Exception as e:
                 client_sample_data = {header: [] for header in client_headers}
-            
+
+            return self.map_header_lists_to_template(
+                client_headers,
+                template_headers,
+                client_sample_data,
+            )
+
+        except Exception as e:
+            print(f"Error in header mapping: {e}")
+            return []
+
+    def map_header_lists_to_template(self, client_headers: List[str],
+                                     template_headers: List[str],
+                                     client_sample_data: Dict[str, List[str]] = None) -> List[Dict]:
+        """Map already-resolved header lists without requiring a template file."""
+        try:
+            client_sample_data = client_sample_data or {
+                header: [] for header in (client_headers or [])
+            }
             results = []
             used_client_headers = set()
-            
-            for template_header in template_headers:
+
+            for template_header in (template_headers or []):
                 best_match = None
                 best_score = 0.0
                 best_explanation = ""
-                
-                for client_header in client_headers:
+
+                for client_header in (client_headers or []):
                     if client_header in used_client_headers:
                         continue
                     
@@ -549,7 +567,7 @@ class BOMHeaderMapper:
                 })
             
             return results
-            
+
         except Exception as e:
             print(f"Error in header mapping: {e}")
             return []

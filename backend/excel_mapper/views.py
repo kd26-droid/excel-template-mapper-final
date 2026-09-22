@@ -5837,30 +5837,57 @@ def mapping_suggestions(request):
             }, status=status.HTTP_404_NOT_FOUND)
         mapper = BOMHeaderMapper()
 
-        # Get mapping suggestions from files
-        mapping_results = mapper.map_headers_to_template(
-            client_file=hybrid_file_manager.get_file_path(info["client_path"]),
-            template_file=hybrid_file_manager.get_file_path(info["template_path"]),
-            client_sheet_name=info["sheet_name"],
-            template_sheet_name=info.get("template_sheet_name"),
-            client_header_row=info["header_row"] - 1 if info["header_row"] > 0 else 0,
-            template_header_row=info.get("template_header_row", 1) - 1 if info.get("template_header_row", 1) > 0 else 0,
-            # Level / Quantity / Base BOM Qty are added to the destination list by
-            # `add_bom_destination_headers`, not by the template workbook, so the
-            # matcher never saw them as candidates. The mapping page offered
-            # `Quantity` while auto-mapping could not fill it, and a BOM Normalizer
-            # upload - whose `quantity` column is an exact name match - arrived in
-            # the editor with an empty Quantity column that looked like the
-            # normalizer had dropped it.
-            extra_template_headers=BOM_DESTINATION_HEADERS,
-        )
+        client_file_path = hybrid_file_manager.get_file_path(info["client_path"])
+        client_header_row = info["header_row"] - 1 if info["header_row"] > 0 else 0
 
-        # Get template headers from file
-        template_headers = mapper.read_excel_headers(
-            file_path=hybrid_file_manager.get_file_path(info["template_path"]),
-            sheet_name=info.get("template_sheet_name"),
-            header_row=info.get("template_header_row", 1) - 1 if info.get("template_header_row", 1) > 0 else 0
-        )
+        # The built-in destination template is defined in code. Reopening a
+        # workbook here made automatic mapping depend on a deployment file even
+        # though upload had already stored the canonical headers in the session.
+        # User-uploaded templates still need to be read from their own file.
+        if info.get("template_source") == "default":
+            template_headers = list(
+                info.get("template_headers") or get_sfo_reference_headers()
+            )
+            mapping_template_headers = list(template_headers)
+            for header in BOM_DESTINATION_HEADERS:
+                if header and header not in mapping_template_headers:
+                    mapping_template_headers.append(header)
+            client_headers = mapper.read_excel_headers(
+                file_path=client_file_path,
+                sheet_name=info["sheet_name"],
+                header_row=client_header_row,
+            )
+            if not client_headers and info.get("client_headers"):
+                client_headers = [
+                    str(header).strip()
+                    for header in (info.get("client_headers") or [])
+                    if str(header).strip()
+                ]
+            client_sample_data = mapper.read_sample_data(
+                client_file_path,
+                info["sheet_name"],
+                client_header_row,
+            )
+            mapping_results = mapper.map_header_lists_to_template(
+                client_headers,
+                mapping_template_headers,
+                client_sample_data,
+            )
+        else:
+            mapping_results = mapper.map_headers_to_template(
+                client_file=client_file_path,
+                template_file=hybrid_file_manager.get_file_path(info["template_path"]),
+                client_sheet_name=info["sheet_name"],
+                template_sheet_name=info.get("template_sheet_name"),
+                client_header_row=client_header_row,
+                template_header_row=info.get("template_header_row", 1) - 1 if info.get("template_header_row", 1) > 0 else 0,
+                extra_template_headers=BOM_DESTINATION_HEADERS,
+            )
+            template_headers = mapper.read_excel_headers(
+                file_path=hybrid_file_manager.get_file_path(info["template_path"]),
+                sheet_name=info.get("template_sheet_name"),
+                header_row=info.get("template_header_row", 1) - 1 if info.get("template_header_row", 1) > 0 else 0
+            )
 
         # Store template headers in session for later use
         info['template_headers'] = template_headers
@@ -5871,9 +5898,9 @@ def mapping_suggestions(request):
         # Get client headers from file, with cached upload-detected headers as a
         # fallback for workbooks where the second read cannot recover the header row.
         client_headers = mapper.read_excel_headers(
-            file_path=hybrid_file_manager.get_file_path(info["client_path"]),
+            file_path=client_file_path,
             sheet_name=info["sheet_name"],
-            header_row=info["header_row"] - 1 if info["header_row"] > 0 else 0
+            header_row=client_header_row
         )
         if not client_headers and info.get("client_headers"):
             client_headers = [
