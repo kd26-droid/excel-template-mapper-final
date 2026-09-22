@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
-  Alert, Box, Button, Chip, Dialog, DialogContent, DialogTitle, Stack, Typography,
+  Alert, Box, Button, Chip, Dialog, DialogActions, DialogContent, DialogTitle,
+  Stack, TextField, Typography,
 } from '@mui/material';
 import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
 import WarningAmberOutlinedIcon from '@mui/icons-material/WarningAmberOutlined';
@@ -8,6 +9,24 @@ import api from '../services/api';
 import BomDuplicatePolicyDialog from './BomDuplicatePolicyDialog';
 
 const DEFAULT_POLICY = 'aggregate_per_level';
+
+// What joins two kept values. Named chips rather than a text box because the
+// separator people reach for most is a space, and a space typed into a field is
+// invisible - the box reads empty whether it holds one or not.
+const JOIN_CHOICES = [
+  { key: '_', label: '_' },
+  { key: '-', label: '-' },
+  { key: '/', label: '/' },
+  { key: ' ', label: 'space' },
+  { key: '.', label: '.' },
+];
+const DEFAULT_JOINER = '_';
+
+// A field's selections, joined in DISPLAY order rather than click order, so the
+// same chips always produce the same string no matter how they were picked.
+const joinSelected = (values, selected, joiner) => (values || [])
+  .filter((value) => (selected || []).includes(value))
+  .join(joiner === undefined ? DEFAULT_JOINER : joiner);
 // Kept in sync with GLOBAL_DUP_POLICY_KEY in pages/Settings.js. If those
 // diverge the banner would ignore the user's global default.
 const GLOBAL_DEFAULT_KEY = 'fw_bom_default_dup_policy';
@@ -109,37 +128,109 @@ const BomDuplicatePolicyBanner = ({ sessionId, refreshKey }) => {
     }
   }, [sessionId]);
 
+  // What the user has picked, per conflict and field: which values to keep, and
+  // what to put between them. Keyed '<code>|<column>' so two fields of the same
+  // conflict stay independent - one may want '_' and the other a space.
+  const [picks, setPicks] = useState({});
+  const [joiners, setJoiners] = useState({});
+  const [customJoiners, setCustomJoiners] = useState({});
+  const [applyError, setApplyError] = useState('');
+
+  const fieldKey = (code, column) => `${code}|${column}`;
+
+  const joinerFor = useCallback((key) => {
+    const custom = customJoiners[key];
+    if (custom) return custom;
+    return joiners[key] === undefined ? DEFAULT_JOINER : joiners[key];
+  }, [joiners, customJoiners]);
+
+  const toggleValue = useCallback((code, column, value) => {
+    const key = fieldKey(code, column);
+    setPicks((prev) => {
+      const current = prev[key] || [];
+      const next = current.includes(value)
+        ? current.filter((v) => v !== value)
+        : [...current, value];
+      return { ...prev, [key]: next };
+    });
+    setApplyError('');
+  }, []);
+
+  // Everything the user has chosen, flattened into one write per field. A field
+  // with nothing picked is left alone rather than blocking the rest: fixing one
+  // column and leaving the other is a normal thing to want.
+  const pendingWrites = useCallback(() => {
+    const writes = [];
+    (conflicts || []).forEach((conflict) => {
+      (conflict.fields || []).forEach((field) => {
+        const key = fieldKey(conflict.code, field.column);
+        const chosen = picks[key] || [];
+        if (chosen.length === 0) return;
+        writes.push({
+          code: conflict.code,
+          column: field.column,
+          value: joinSelected(field.values, chosen, joinerFor(key)),
+        });
+      });
+    });
+    return writes;
+  }, [conflicts, picks, joinerFor]);
+
   // Settle one disagreement by writing the value the user picked onto every row
   // carrying that item code. A conditional rule with NO 'else' branch touches
   // only the matching rows - everything else keeps what it has. Once the rows
   // agree they are the same item, so they collapse and their quantities add up.
-  const applyValue = useCallback(async (code, column, value) => {
-    setApplying(`${code}|${column}|${value}`);
-    try {
-      await api.fillOrCreateColumn(sessionId, {
-        type: 'column_value',
-        target_mode: 'existing',
-        target_column: column,
-        value_mode: 'conditional',
-        write_mode: 'overwrite',
-        source_columns: [],
-        separator: '_',
-        condition: {
-          branches: [{
-            column: 'Item code',
-            operator: 'equals',
-            compare: [code],
-            output_value: value,
-          }],
-        },
-      });
-      await refresh();
-    } catch (_) {
-      // The row simply stays as it was; the banner still names the conflict.
-    } finally {
-      setApplying('');
+  const writeOne = useCallback(async (code, column, value) => {
+    await api.fillOrCreateColumn(sessionId, {
+      type: 'column_value',
+      target_mode: 'existing',
+      target_column: column,
+      value_mode: 'conditional',
+      write_mode: 'overwrite',
+      source_columns: [],
+      separator: '_',
+      condition: {
+        branches: [{
+          column: 'Item code',
+          operator: 'equals',
+          compare: [code],
+          output_value: value,
+        }],
+      },
+    });
+  }, [sessionId]);
+
+  // One Apply for the whole dialog. Writing on every chip click meant a person
+  // correcting two fields of one code watched the grid rebuild twice and could
+  // not change their mind halfway; here nothing is written until they say so.
+  const applyAll = useCallback(async () => {
+    const writes = pendingWrites();
+    if (writes.length === 0) return;
+    setApplyError('');
+    const failed = [];
+    for (let i = 0; i < writes.length; i += 1) {
+      const write = writes[i];
+      setApplying(`${i + 1} of ${writes.length}`);
+      try {
+        // Sequential on purpose: these are writes to the same grid, and firing
+        // them together lets two land on one stale copy.
+        await writeOne(write.code, write.column, write.value);
+      } catch (_) {
+        failed.push(`${write.code} / ${write.column}`);
+      }
     }
-  }, [sessionId, refresh]);
+    setApplying('');
+    if (failed.length > 0) {
+      // Selections are kept so the user can press Apply again rather than
+      // rebuilding every choice.
+      setApplyError(`Could not apply: ${failed.join(', ')}. Your choices are still here - try Apply again.`);
+      await refresh();
+      return;
+    }
+    setPicks({});
+    setReviewOpen(false);
+    await refresh();
+  }, [pendingWrites, writeOne, refresh]);
 
   useEffect(() => { refresh(); }, [refresh, refreshKey]);
 
@@ -244,20 +335,76 @@ const BomDuplicatePolicyBanner = ({ sessionId, refreshKey }) => {
                       <Typography variant="caption" sx={{ color: 'text.secondary' }}>
                         {`differs on ${field.column}:`}
                       </Typography>
-                      {(field.values || []).map((v) => (
-                        <Button
-                          key={`${field.column}|${v}`}
-                          size="small"
-                          variant="outlined"
-                          disabled={Boolean(applying)}
-                          onClick={() => applyValue(conflict.code, field.column, v)}
-                          sx={{ textTransform: 'none', py: 0, minWidth: 0, fontFamily: 'monospace' }}
+                      {(field.values || []).map((v) => {
+                        const key = `${conflict.code}|${field.column}`;
+                        const chosen = (picks[key] || []).includes(v);
+                        return (
+                          <Chip
+                            key={`${field.column}|${v}`}
+                            size="small"
+                            clickable
+                            disabled={Boolean(applying)}
+                            color={chosen ? 'primary' : 'default'}
+                            variant={chosen ? 'filled' : 'outlined'}
+                            onClick={() => toggleValue(conflict.code, field.column, v)}
+                            label={v === '' ? '(blank)' : v}
+                            sx={{ fontFamily: 'monospace' }}
+                          />
+                        );
+                      })}
+                      {(picks[`${conflict.code}|${field.column}`] || []).length > 1 && (
+                        <Stack
+                          direction="row"
+                          alignItems="center"
+                          gap={0.5}
+                          flexWrap="wrap"
+                          sx={{ width: '100%', pl: 0.5, mt: 0.25 }}
                         >
-                          {applying === `${conflict.code}|${field.column}|${v}`
-                            ? 'applying…'
-                            : `use ${v === '' ? '(blank)' : v}`}
-                        </Button>
-                      ))}
+                          <Typography variant="caption" color="text.secondary">
+                            join with:
+                          </Typography>
+                          {JOIN_CHOICES.map((choice) => {
+                            const key = `${conflict.code}|${field.column}`;
+                            const active = !customJoiners[key] && joinerFor(key) === choice.key;
+                            return (
+                              <Chip
+                                key={choice.key}
+                                size="small"
+                                clickable
+                                disabled={Boolean(applying)}
+                                color={active ? 'primary' : 'default'}
+                                variant={active ? 'filled' : 'outlined'}
+                                label={choice.label}
+                                onClick={() => {
+                                  setJoiners((prev) => ({ ...prev, [key]: choice.key }));
+                                  setCustomJoiners((prev) => ({ ...prev, [key]: '' }));
+                                }}
+                              />
+                            );
+                          })}
+                          <TextField
+                            size="small"
+                            placeholder="other"
+                            value={customJoiners[`${conflict.code}|${field.column}`] || ''}
+                            disabled={Boolean(applying)}
+                            onChange={(e) => setCustomJoiners((prev) => ({
+                              ...prev, [`${conflict.code}|${field.column}`]: e.target.value,
+                            }))}
+                            sx={{ width: 78 }}
+                            inputProps={{ style: { padding: '2px 6px', fontSize: 12 } }}
+                          />
+                          <Typography
+                            variant="caption"
+                            sx={{ fontFamily: 'monospace', fontWeight: 700, ml: 0.5 }}
+                          >
+                            {joinSelected(
+                              field.values,
+                              picks[`${conflict.code}|${field.column}`],
+                              joinerFor(`${conflict.code}|${field.column}`),
+                            )}
+                          </Typography>
+                        </Stack>
+                      )}
                     </Stack>
                   ))
                 ) : (
@@ -269,6 +416,29 @@ const BomDuplicatePolicyBanner = ({ sessionId, refreshKey }) => {
             ))}
           </Stack>
         </DialogContent>
+        <DialogActions sx={{ px: 3, py: 1.5, gap: 1 }}>
+          {applyError ? (
+            <Typography variant="caption" color="error" sx={{ flex: 1 }}>
+              {applyError}
+            </Typography>
+          ) : (
+            <Typography variant="caption" color="text.secondary" sx={{ flex: 1 }}>
+              {pendingWrites().length === 0
+                ? 'Pick a value on any line. Pick two or more to join them.'
+                : `${pendingWrites().length} field${pendingWrites().length === 1 ? '' : 's'} will be written.`}
+            </Typography>
+          )}
+          <Button onClick={() => setReviewOpen(false)} disabled={Boolean(applying)}>
+            Cancel
+          </Button>
+          <Button
+            variant="contained"
+            onClick={applyAll}
+            disabled={Boolean(applying) || pendingWrites().length === 0}
+          >
+            {applying ? `Applying ${applying}…` : 'Apply'}
+          </Button>
+        </DialogActions>
       </Dialog>
       <BomDuplicatePolicyDialog
         open={dialogOpen}
