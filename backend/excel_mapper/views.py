@@ -18422,8 +18422,15 @@ def _generate_hierarchical_bom(records, answer, bom_header):
     primary_of, alternates_of = split_primaries_and_alternates(records)
     primaries = [record for record in primary_of.values() if record] or records
 
+    # Which assembly in the SHEET is the finished good, which is not the same as
+    # what the user decided to call it. Built on the typed code, a renamed root
+    # stopped matching its own row: the sheet's top assembly kept its block and
+    # the new name was authored as a parent ABOVE it, so renaming silently added
+    # a level. `rootSourceCode` is the popup's record of what the sheet said, so
+    # the tree keeps its shape and the new name is applied to it below.
     root = {
-        'code': str(bom_header.get('finishedGoodCode') or '').strip(),
+        'code': (str(bom_header.get('rootSourceCode') or '').strip()
+                 or str(bom_header.get('finishedGoodCode') or '').strip()),
         'description': str(bom_header.get('itemName') or '').strip(),
         'uom': str(bom_header.get('measurementUnit') or '').strip(),
     }

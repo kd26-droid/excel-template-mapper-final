@@ -605,6 +605,14 @@ def generate_multi_level_bom(tree, bom_header, alternates_of=None, records=None,
         if bom:
             bom_code_of[code] = bom
 
+    # A root that IS a row in the sheet is renamed the same way a sub-assembly
+    # is: the authored code replaces the code the sheet gave it, everywhere it
+    # is referenced. Without this the header said the new name while every line
+    # under it still pointed at the old one.
+    authored_finished_good = _text((bom_header or {}).get('finishedGoodCode'))
+    if authored_finished_good and root_code and root_code in resolved:
+        resolved[root_code] = authored_finished_good
+
     def bom_code_for(tree_code):
         """A block's BOM ID: its own code when given, else its item code."""
         return bom_code_of.get(tree_code) or resolved.get(tree_code, tree_code)
