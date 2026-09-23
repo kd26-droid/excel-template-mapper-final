@@ -64,6 +64,8 @@ const getFileExtension = (fileName = '') => {
   return match ? match[0] : '';
 };
 
+const getFileStem = (fileName = '') => String(fileName || '').replace(/\.[^.]+$/, '');
+
 const unsupportedFileMessage = (fileName = 'Selected file') => (
   `${fileName} is not supported. Please upload .xlsx, .xls, .xlsm, .csv, or .pdf files.`
 );
@@ -4397,52 +4399,62 @@ const UploadFiles = () => {
                       <Box sx={{ pt: 1, borderTop: `1px solid ${Nn.divider}` }}>
                         <Grid container spacing={1.5} sx={{ mb: 1.5 }}>
                           <Grid item xs={7}>
-                            <FormControl fullWidth size="small">
-                              <InputLabel sx={{ color: Nn.muted }}>
-                                {combineSheetsMode ? 'Sheets to combine' : 'Sheet Name'}
-                              </InputLabel>
-                              {/* Combining stacks several sheets into one, so the
-                                  picker has to accept several. */}
-                              {combineSheetsMode ? (
-                                <Select
-                                  multiple
-                                  value={selectedClientSheets}
-                                  label="Sheets to combine"
-                                  onChange={(e) => {
-                                    const picked = typeof e.target.value === 'string'
-                                      ? e.target.value.split(',')
-                                      : e.target.value;
-                                    setSelectedClientSheets(picked);
-                                  }}
-                                  renderValue={(picked) => `${picked.length} of ${clientSheetNames.length} selected`}
-                                  MenuProps={{ PaperProps: { className: 'fw-select-dropdown' } }}
-                                  sx={{ borderRadius: '8px' }}
-                                >
-                                  {clientSheetNames.map(s => (
-                                    <MenuItem key={s} value={s}>
-                                      <Checkbox
-                                        checked={selectedClientSheets.indexOf(s) > -1}
-                                        size="small"
-                                        sx={{ p: 0.5, mr: 1 }}
-                                      />
-                                      {s}
-                                    </MenuItem>
-                                  ))}
-                                </Select>
-                              ) : (
-                                <Select
-                                  value={selectedClientSheet}
-                                  label="Sheet Name"
-                                  onChange={(e) => handleClientSheetChange(e.target.value)}
-                                  MenuProps={{ PaperProps: { className: 'fw-select-dropdown' } }}
-                                  sx={{ borderRadius: '8px' }}
-                                >
-                                  {clientSheetNames.map(s => (
-                                    <MenuItem key={s} value={s}>{s}</MenuItem>
-                                  ))}
-                                </Select>
-                              )}
-                            </FormControl>
+                            {userFile.name.toLowerCase().endsWith('.csv') ? (
+                              <TextField
+                                fullWidth
+                                size="small"
+                                label="Sheet Name"
+                                value={getFileStem(userFile.name)}
+                                InputProps={{ readOnly: true }}
+                              />
+                            ) : (
+                              <FormControl fullWidth size="small">
+                                <InputLabel sx={{ color: Nn.muted }}>
+                                  {combineSheetsMode ? 'Sheets to combine' : 'Sheet Name'}
+                                </InputLabel>
+                                {/* Combining stacks several sheets into one, so the
+                                    picker has to accept several. */}
+                                {combineSheetsMode ? (
+                                  <Select
+                                    multiple
+                                    value={selectedClientSheets}
+                                    label="Sheets to combine"
+                                    onChange={(e) => {
+                                      const picked = typeof e.target.value === 'string'
+                                        ? e.target.value.split(',')
+                                        : e.target.value;
+                                      setSelectedClientSheets(picked);
+                                    }}
+                                    renderValue={(picked) => `${picked.length} of ${clientSheetNames.length} selected`}
+                                    MenuProps={{ PaperProps: { className: 'fw-select-dropdown' } }}
+                                    sx={{ borderRadius: '8px' }}
+                                  >
+                                    {clientSheetNames.map(s => (
+                                      <MenuItem key={s} value={s}>
+                                        <Checkbox
+                                          checked={selectedClientSheets.indexOf(s) > -1}
+                                          size="small"
+                                          sx={{ p: 0.5, mr: 1 }}
+                                        />
+                                        {s}
+                                      </MenuItem>
+                                    ))}
+                                  </Select>
+                                ) : (
+                                  <Select
+                                    value={selectedClientSheet}
+                                    label="Sheet Name"
+                                    onChange={(e) => handleClientSheetChange(e.target.value)}
+                                    MenuProps={{ PaperProps: { className: 'fw-select-dropdown' } }}
+                                    sx={{ borderRadius: '8px' }}
+                                  >
+                                    {clientSheetNames.map(s => (
+                                      <MenuItem key={s} value={s}>{s}</MenuItem>
+                                    ))}
+                                  </Select>
+                                )}
+                              </FormControl>
+                            )}
                           </Grid>
                           <Grid item xs={5}>
                             <TextField

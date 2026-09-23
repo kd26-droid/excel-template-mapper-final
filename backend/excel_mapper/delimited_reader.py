@@ -6,8 +6,26 @@ import pandas as pd
 ENCODINGS_TO_TRY = ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1', 'windows-1252']
 DELIMITER_CANDIDATES = [',', ';', '\t', '|']
 
+# How many physical lines one record may absorb before the wrap reading is
+# abandoned. A record CAN legitimately span many lines - a manufacturer list runs
+# to a dozen - but a buffer that has swallowed forty and still has not reached
+# the header's width is not a wrapped record, it is a row this parser cannot
+# count. Without a bound it takes the rest of the file with it: one unterminated
+# bracket has been measured collapsing 61 rows into 1.
+MAX_WRAPPED_LINES = 40
 
-def split_delimited_line_safely(line, delimiter):
+
+def split_delimited_line_safely(line, delimiter, group_aware=True):
+    """Split one line, honouring quotes and - while they balance - brackets.
+
+    Brackets are treated as grouping so that a comma INSIDE one does not split a
+    cell: THALES writes manufacturer references like `Y2552860 (B724, 26X6)`.
+    That only holds while the brackets balance. `group_aware` is how the function
+    tells itself they did not: a line ending mid-group was never grouped, and
+    re-reading it on quotes alone is the honest fallback. Left standing, an
+    unclosed bracket swallows every delimiter after it and the short row it
+    produces then drags the following lines in through `_rejoin_wrapped_lines`.
+    """
     cells = []
     current = []
     in_quotes = False
@@ -24,16 +42,22 @@ def split_delimited_line_safely(line, delimiter):
                 current.append(text[index + 1])
                 index += 2
                 continue
-            in_quotes = not in_quotes
+            # Treat a quote as structure only when it opens a cell or closes an
+            # already quoted one. Supplier exports carry stray trailing quotes in
+            # unquoted cells (`... [1126658]"`); letting those toggle quote mode
+            # merged the rest of the file into one logical record.
+            if in_quotes or not ''.join(current).strip():
+                in_quotes = not in_quotes
             current.append(char)
             index += 1
             continue
 
         if not in_quotes:
-            if char in '([{':
-                group_depth += 1
-            elif char in ')]}' and group_depth > 0:
-                group_depth -= 1
+            if group_aware:
+                if char in '([{':
+                    group_depth += 1
+                elif char in ')]}' and group_depth > 0:
+                    group_depth -= 1
 
             if char == delimiter and group_depth == 0:
                 cells.append(_clean_cell(''.join(current)))
@@ -44,12 +68,15 @@ def split_delimited_line_safely(line, delimiter):
         current.append(char)
         index += 1
 
+    if group_aware and group_depth > 0:
+        return split_delimited_line_safely(line, delimiter, group_aware=False)
+
     cells.append(_clean_cell(''.join(current)))
     return cells
 
 
-def count_delimited_fields_safely(line, delimiter):
-    return len(split_delimited_line_safely(line, delimiter))
+def count_delimited_fields_safely(line, delimiter, group_aware=True):
+    return len(split_delimited_line_safely(line, delimiter, group_aware=group_aware))
 
 
 def detect_delimiter_safely(text):
@@ -77,10 +104,47 @@ def detect_delimiter_safely(text):
     return best_delimiter
 
 
+def decode_delimited_bytes(raw):
+    """Decode delimited text, detecting UTF-16 before falling back to bytes-as-latin.
+
+    Trying encodings in order and catching UnicodeDecodeError cannot find UTF-16:
+    NUL is a valid UTF-8 codepoint, so a UTF-16 file "decodes" without raising
+    into NUL-separated garbage, and latin-1 maps every byte so it never fails
+    either. The BOM, or the parity of where the NULs fall, is the only reliable
+    signal - so look for it first.
+    """
+    data = bytes(raw or b'')
+    if data[:2] == b'\xff\xfe':
+        return data.decode('utf-16le', errors='replace').lstrip('﻿')
+    if data[:2] == b'\xfe\xff':
+        return data.decode('utf-16be', errors='replace').lstrip('﻿')
+
+    sample = data[:2000]
+    even_nulls = sum(1 for index, byte in enumerate(sample) if byte == 0 and index % 2 == 0)
+    odd_nulls = sum(1 for index, byte in enumerate(sample) if byte == 0 and index % 2 == 1)
+    null_threshold = max(8, len(sample) * 0.1)
+    if odd_nulls > null_threshold and odd_nulls > even_nulls * 3:
+        return data.decode('utf-16le', errors='replace')
+    if even_nulls > null_threshold and even_nulls > odd_nulls * 3:
+        return data.decode('utf-16be', errors='replace')
+
+    text = data.decode('utf-8', errors='replace')
+    # A replacement char means the bytes were not UTF-8. These files are usually
+    # latin-1, and reading them as UTF-8 mangles every accented character.
+    return data.decode('iso-8859-1') if '�' in text else text
+
+
 def read_delimited_text_safely(file_path, header=0, encoding=None, **kwargs):
-    encodings = [encoding] if encoding else ENCODINGS_TO_TRY
     last_error = None
 
+    if not encoding:
+        try:
+            text = decode_delimited_bytes(Path(file_path).read_bytes())
+            return dataframe_from_delimited_text(text, header=header, **kwargs)
+        except Exception as exc:
+            last_error = exc
+
+    encodings = [encoding] if encoding else ENCODINGS_TO_TRY
     for candidate_encoding in encodings:
         try:
             text = Path(file_path).read_text(encoding=candidate_encoding)
@@ -104,13 +168,22 @@ def dataframe_from_delimited_text(text, header=0, **kwargs):
     keep_default_na = kwargs.pop('keep_default_na', True)
     nrows = kwargs.pop('nrows', None)
     names = kwargs.pop('names', None)
+    skiprows = kwargs.pop('skiprows', None)
 
     delimiter = detect_delimiter_safely(text) if delimiter in (None, 'infer') else delimiter
-    raw_lines = [line for line in str(text or '').splitlines() if line.strip()]
+    # Blank lines are rows. Dropping them renumbers everything below, and row
+    # numbers are the contract: `__sourceRow` is what a user's "row 12" means and
+    # what every pattern answer is addressed by. Only a trailing run goes, since
+    # that carries no rows - a file ending in a newline is not a file with an
+    # extra empty record.
+    raw_lines = str(text or '').splitlines()
+    while raw_lines and not raw_lines[-1].strip():
+        raw_lines.pop()
     if not raw_lines:
         return pd.DataFrame(columns=names or [])
 
-    expected_width = count_delimited_fields_safely(raw_lines[0], delimiter)
+    first_populated = next((line for line in raw_lines if line.strip()), raw_lines[0])
+    expected_width = count_delimited_fields_safely(first_populated, delimiter)
     lines = _rejoin_wrapped_lines(raw_lines, delimiter, expected_width)
     rows = [split_delimited_line_safely(line, delimiter) for line in lines]
     if not rows:
@@ -125,8 +198,16 @@ def dataframe_from_delimited_text(text, header=0, **kwargs):
             keep_default_na=keep_default_na,
             nrows=nrows,
             names=names,
+            skiprows=skiprows,
             **kwargs
         )
+
+    # Before the header is chosen, so `header=0` means the first row that
+    # survives - what pandas does, and what the paginated readers in views.py
+    # assume when they pass a range of physical line numbers.
+    rows = _apply_skiprows(rows, skiprows)
+    if not rows:
+        return pd.DataFrame(columns=names or [])
 
     if header is None:
         data_rows = rows
@@ -171,11 +252,18 @@ def _unwrap_single_column_records(rows, outer_delimiter):
         return None
 
     single_cell_rows = 0
+    populated_rows = 0
     records = []
     for row in rows:
         cells = [str(cell) if cell is not None else '' for cell in row]
-        if len([cell for cell in cells if cell.strip()]) <= 1:
-            single_cell_rows += 1
+        populated = [cell for cell in cells if cell.strip()]
+        # A blank line is a row of its own now, but it says nothing about whether
+        # the file split into columns. Counting one as "at most one populated
+        # cell" would push any sparse file over the threshold and invent columns.
+        if populated:
+            populated_rows += 1
+            if len(populated) <= 1:
+                single_cell_rows += 1
         # Interior blanks are real empty columns; only the padding run at the end goes.
         end = len(cells)
         while end > 0 and not cells[end - 1].strip():
@@ -185,7 +273,7 @@ def _unwrap_single_column_records(rows, outer_delimiter):
     # Most rows carrying at most one populated cell is the wrapper's signature: the
     # record never really split into columns. Rows broken by a comma inside the
     # record are the minority, so this stays true for them.
-    if single_cell_rows < len(rows) * 0.6:
+    if populated_rows < 2 or single_cell_rows < populated_rows * 0.6:
         return None
 
     # Only retry when the recovered records form a table on a DIFFERENT separator.
@@ -214,20 +302,60 @@ def _splits_on_other_delimiter(records, outer_delimiter):
 
 
 def _rejoin_wrapped_lines(lines, delimiter, expected_width):
+    """Rebuild records that an unquoted newline split across physical lines.
+
+    A line carrying fewer fields than the header is a continuation of the one
+    above - SAP and THALES ARTDOC exports both do this. Two things keep that from
+    running away: a blank line between records is a record of its own rather than
+    a continuation, and a buffer that has held MAX_WRAPPED_LINES without reaching
+    the header's width is given up on. Giving up costs one short row; not giving
+    up costs every row after it.
+    """
     if expected_width < 2:
         return lines
 
     joined = []
     buffer = None
+    held = 0
     for line in lines:
+        if buffer is None and not line.strip():
+            joined.append(line)
+            continue
+
         buffer = line if buffer is None else f'{buffer}\n{line}'
+        held += 1
         if count_delimited_fields_safely(buffer, delimiter) >= expected_width:
             joined.append(buffer)
             buffer = None
+            held = 0
+            continue
+        if held >= MAX_WRAPPED_LINES:
+            joined.append(buffer)
+            buffer = None
+            held = 0
 
     if buffer is not None:
         joined.append(buffer)
     return joined
+
+
+def _apply_skiprows(rows, skiprows):
+    """Drop rows by position, the way pandas' `skiprows` does.
+
+    An int skips that many leading rows; an iterable drops those 0-based
+    positions. Anything unrecognised is ignored rather than raising - this reader
+    is a drop-in for `pd.read_csv` on files pandas cannot handle, and a caller
+    that passes something odd should get a frame, not a traceback.
+    """
+    if skiprows is None or isinstance(skiprows, bool):
+        return rows
+    if isinstance(skiprows, int):
+        return rows[max(0, skiprows):]
+    try:
+        dropped = {int(index) for index in skiprows}
+    except (TypeError, ValueError):
+        return rows
+    return [row for index, row in enumerate(rows) if index not in dropped]
 
 
 def _clean_cell(value):

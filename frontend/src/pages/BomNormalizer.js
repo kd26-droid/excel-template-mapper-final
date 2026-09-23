@@ -8986,11 +8986,13 @@ export const canUseVisualTeachInterpretation = ({
   recognized,
 } = {}) => Boolean(hasUserChanges || recognized === false);
 
+export const backendReviewDisplayRows = (contract = {}) => (
+  Array.isArray(contract?.displayRows) ? contract.displayRows : []
+);
+
 const FieldPatternReviewTable = ({
   contract,
-  reviewRows,
   fields,
-  edits,
   search,
   onSearchChange,
   page,
@@ -9002,7 +9004,7 @@ const FieldPatternReviewTable = ({
   onRemoveEntry,
   onValueChange,
 }) => {
-  const backendDisplayRows = Array.isArray(contract?.displayRows) ? contract.displayRows : [];
+  const backendDisplayRows = backendReviewDisplayRows(contract);
   const sourceColumns = Array.isArray(contract?.display?.sourceColumns)
     ? contract.display.sourceColumns
     : [];
@@ -9016,47 +9018,7 @@ const FieldPatternReviewTable = ({
   const [factwiseHorizontalScroll, setFactwiseHorizontalScroll] = useState(0);
   const [pairingMismatchFilter, setPairingMismatchFilter] = useState('all');
 
-  const resolvedRows = useMemo(() => {
-    const backendRowsByReviewId = new Map();
-    backendDisplayRows.forEach((row) => {
-      const reviewRowId = fmt(row.reviewRowId);
-      if (!backendRowsByReviewId.has(reviewRowId)) backendRowsByReviewId.set(reviewRowId, []);
-      backendRowsByReviewId.get(reviewRowId).push(row);
-    });
-
-    const emittedReviewIds = new Set();
-    const output = [];
-    (reviewRows || []).forEach((reviewRow) => {
-      const reviewRowId = fmt(reviewRow.id);
-      const backendRows = backendRowsByReviewId.get(reviewRowId) || [];
-      if (!backendRows.length) return;
-      emittedReviewIds.add(reviewRowId);
-      const visibleEntries = reviewEntriesWithUserEdits(reviewRow, edits);
-      visibleEntries.forEach((entry, entryIndex) => {
-        const baseRow = backendRows.find((candidate) => (
-          fmt(candidate.groupId) === fmt(entry.groupId)
-          && fmt(candidate.occurrenceId) === fmt(entry.occurrenceId)
-          && Number(candidate.patternEntryIndex || 0) === Number(entry.patternEntryIndex || 0)
-        )) || backendRows[entryIndex] || backendRows[0];
-        output.push({
-          ...baseRow,
-          id: `${reviewRowId}:display:${entryIndex}`,
-          relation: entry.relation || baseRow.relation || '',
-          fields: entry.fields || baseRow.fields || {},
-          sourceColumns: entry.sourceColumns || baseRow.sourceColumns || {},
-          groupId: entry.groupId || baseRow.groupId || '',
-          occurrenceId: entry.occurrenceId || baseRow.occurrenceId || '',
-          patternEntryIndex: entry.patternEntryIndex ?? baseRow.patternEntryIndex ?? entryIndex,
-          firstForSourceRow: entryIndex === 0,
-          lastForSourceRow: entryIndex === visibleEntries.length - 1,
-        });
-      });
-    });
-    backendDisplayRows.forEach((row) => {
-      if (!emittedReviewIds.has(fmt(row.reviewRowId))) output.push(row);
-    });
-    return output;
-  }, [backendDisplayRows, edits, reviewRows]);
+  const resolvedRows = backendDisplayRows;
 
   const pairingFilteredRows = pairingMismatchFilter === 'mismatch'
     ? resolvedRows.filter((row) => row.hasPairingMismatch === true)
@@ -9124,7 +9086,7 @@ const FieldPatternReviewTable = ({
         <Stack direction="row" alignItems="center" gap={0.75} flexWrap="wrap">
           <Typography sx={{ fontSize: 14, fontWeight: 850, color: theme.text }}>All detected rows</Typography>
           <Chip size="small" label={contract?.display?.reviewModeLabel || ''} sx={{ height: 25, fontSize: 11, fontWeight: 800, bgcolor: '#e4f3f0', color: '#0f6e63' }} />
-          <Chip size="small" variant="outlined" label={`${reviewRows.length} source rows`} sx={{ height: 25, fontSize: 11, fontWeight: 800, bgcolor: theme.paper }} />
+          <Chip size="small" variant="outlined" label={`${Number(contract?.summary?.sourceRowCount || 0)} source rows`} sx={{ height: 25, fontSize: 11, fontWeight: 800, bgcolor: theme.paper }} />
           <Chip size="small" variant="outlined" label={`${filteredRows.length} displayed rows`} sx={{ height: 25, fontSize: 11, fontWeight: 800, bgcolor: theme.paper }} />
         </Stack>
         <Stack direction={{ xs: 'column', sm: 'row' }} alignItems="center" gap={1} sx={{ width: { xs: '100%', md: 'auto' } }}>
@@ -18559,8 +18521,17 @@ const BomNormalizer = () => {
                       options={fieldPatternFieldFilterOptions}
                       value={fieldPatternFieldFilterOptions.find((option) => option.key === fieldPatternFieldFilter) || fieldPatternFieldFilterOptions[0]}
                       onChange={(_, option) => {
-                        setFieldPatternFieldFilter(option?.key || 'all');
+                        const nextField = option?.key || 'all';
+                        setFieldPatternFieldFilter(nextField);
                         setFieldPatternExpandedPatternKey('');
+                        if (
+                          nextField !== 'all' &&
+                          mappedFieldPatternRuleOptions.some((field) => field.key === nextField)
+                        ) {
+                          setFieldPatternSelectedRuleField(nextField);
+                          setBulkPatternControls({});
+                          setBulkPatternControlsChanged(false);
+                        }
                       }}
                       getOptionLabel={(option) => option?.label || ''}
                       isOptionEqualToValue={(option, value) => option.key === value.key}
@@ -18704,6 +18675,34 @@ const BomNormalizer = () => {
                         </Select>
                       </FormControl>
                     </Box>
+                  </Box>
+                  <Box
+                    sx={{
+                      mt: 1,
+                      ml: { xs: 0, md: 'calc(21.25% + 8px)' },
+                      display: 'grid',
+                      gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, minmax(0, 1fr))' },
+                      gap: 1,
+                    }}
+                  >
+                    <TextField
+                      size="small"
+                      label="Replace text"
+                      value={bulkPatternControls.replaceText || ''}
+                      onChange={(event) => {
+                        setBulkPatternControls((current) => ({ ...current, replaceText: event.target.value }));
+                        setBulkPatternControlsChanged(true);
+                      }}
+                    />
+                    <TextField
+                      size="small"
+                      label="Replace with"
+                      value={bulkPatternControls.replaceWith || ''}
+                      onChange={(event) => {
+                        setBulkPatternControls((current) => ({ ...current, replaceWith: event.target.value }));
+                        setBulkPatternControlsChanged(true);
+                      }}
+                    />
                   </Box>
                   {(bulkPatternControls.prefixMode && !['none', 'recognized_mpn_start'].includes(bulkPatternControls.prefixMode))
                     || (bulkPatternControls.suffixMode && bulkPatternControls.suffixMode !== 'none')
@@ -18854,9 +18853,7 @@ const BomNormalizer = () => {
                 {(fieldPatternReviewContract.displayRows || []).length > 0 && (
                   <FieldPatternReviewTable
                     contract={fieldPatternReviewContract}
-                    reviewRows={fieldPatternReviewRows}
                     fields={fieldPatternFields}
-                    edits={fieldPatternEdits}
                     search={fieldPatternReviewSearch}
                     onSearchChange={setFieldPatternReviewSearch}
                     page={fieldPatternReviewPage}

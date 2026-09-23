@@ -1,4 +1,5 @@
 import {
+  backendReviewDisplayRows,
   canUseVisualTeachInterpretation,
   mergeInferredAlternateInheritFields,
   requiresExplicitGroupKey,
@@ -7,6 +8,32 @@ import {
   visualTeachMappedFieldKeysFromBackend,
   visualTeachSeedEntries,
 } from './BomNormalizer';
+
+describe('backendReviewDisplayRows', () => {
+  test('renders only the rows returned by the backend display contract', () => {
+    const backendRow = {
+      id: 'review-row-2:entry:0',
+      reviewRowId: 'review-row-2',
+      sourceRow: 2,
+      relation: 'Primary',
+      fields: {
+        cpn: 'S141951',
+        mpn: '',
+        manufacturer: '',
+      },
+    };
+
+    const result = backendReviewDisplayRows({ displayRows: [backendRow] });
+
+    expect(result).toEqual([backendRow]);
+    expect(result).toHaveLength(1);
+  });
+
+  test('does not synthesize rows when backend display rows are absent', () => {
+    expect(backendReviewDisplayRows({})).toEqual([]);
+    expect(backendReviewDisplayRows({ displayRows: null })).toEqual([]);
+  });
+});
 
 const backendEntry = {
   relation: 'Primary',

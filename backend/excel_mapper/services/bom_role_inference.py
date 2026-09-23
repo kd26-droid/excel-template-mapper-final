@@ -16,7 +16,7 @@ from .mpn_pattern_library import (
     score_manufacturer_value,
     score_mpn_value,
 )
-from .bom_directory_store import normalize_mpn
+from .bom_directory_store import directory_cache_version, normalize_mpn
 
 
 ROLE_KEYS = (
@@ -2662,6 +2662,15 @@ def _field_pattern_control_state(rule):
             else {}
         ),
     }
+    configured_field_rule = next((
+        field_rule
+        for field_rule in correction_fields.values()
+        if isinstance(field_rule, dict)
+    ), None) or next((
+        field_rule
+        for field_rule in rule_fields.values()
+        if isinstance(field_rule, dict)
+    ), {})
 
     def first_present(mappings, keys):
         for mapping in mappings:
@@ -2714,6 +2723,8 @@ def _field_pattern_control_state(rule):
         "alternateJoiner": str(alternate_joiner or ""),
         "prefixMode": prefix_mode,
         "stripPrefix": str(strip_prefix or ""),
+        "replaceText": str(configured_field_rule.get("replaceText") or ""),
+        "replaceWith": str(configured_field_rule.get("replaceWith") or ""),
     }
     if suffix_mode or strip_suffix:
         controls.update({
@@ -2771,6 +2782,8 @@ def _bulk_pattern_parsing_contract(mapped_field_options):
             "stripPrefix": "",
             "suffixMode": "none",
             "stripSuffix": "",
+            "replaceText": "",
+            "replaceWith": "",
         },
     }
 
@@ -3586,6 +3599,10 @@ def _strip_configured_suffix(value, rule=None):
 def _strip_configured_prefix(value, rule=None):
     text = str(value or "").replace("\u00a0", " ").strip()
     rule = rule if isinstance(rule, dict) else {}
+    replace_text = str(rule.get("replaceText") or rule.get("replace_text") or "")
+    replace_with = str(rule.get("replaceWith") or rule.get("replace_with") or "")
+    if replace_text:
+        text = text.replace(replace_text, replace_with)
     mode = clean(rule.get("prefixMode") or rule.get("prefix_mode") or "literal")
     if not text:
         return _strip_configured_suffix(text, rule)
@@ -3620,8 +3637,20 @@ def _strip_configured_prefix(value, rule=None):
     return _strip_configured_suffix(clean(stripped), rule)
 
 
-def _strip_configured_prefixes(parts, rule=None):
-    return [clean(_strip_configured_prefix(part, rule)) for part in (parts or []) if not is_blankish(_strip_configured_prefix(part, rule))]
+def _strip_configured_prefixes(parts, rule=None, value_type=""):
+    cleaned_parts = []
+    for part in parts or []:
+        cleaned = (
+            clean(part)
+            if (
+                value_type == "mpn"
+                and _directory_mpn_similarity(part) >= MPN_RECOGNITION_SIMILARITY_THRESHOLD
+            )
+            else clean(_strip_configured_prefix(part, rule))
+        )
+        if not is_blankish(cleaned):
+            cleaned_parts.append(cleaned)
+    return cleaned_parts
 
 
 def _repair_wrapped_mpn_segment(value):
@@ -4212,8 +4241,65 @@ def _wrapped_prefixed_mpn_segments(value, rule=None):
     return [_repair_wrapped_mpn_segment(segment) for segment in segments]
 
 
-def _clean_field_value(value, config=None, value_type=""):
-    return _strip_configured_prefix(value, _field_rule(config, value_type))
+def _matching_semantic_field_rule(value, config=None, value_type="", source_header=""):
+    rules = _semantic_pattern_rules(config)
+    if not rules or not value_type or is_blankish(value):
+        return {}
+    for fragment in _semantic_identity_fragments(value, [value_type]):
+        grammars = [fragment.get("grammar") or ""]
+        if value_type in {"quantity", "level"}:
+            legacy_grammar = _single_field_delimited_pattern(value, value_type)
+            if legacy_grammar and legacy_grammar not in grammars:
+                grammars.append(legacy_grammar)
+        candidate_keys = []
+        for grammar in grammars:
+            candidate_keys.extend((
+                _semantic_pattern_key(source_header, [value_type], grammar),
+                _semantic_pattern_key(source_header, [value_type], grammar, scope="alternate"),
+                _legacy_semantic_pattern_key([value_type], grammar),
+            ))
+        for pattern_key in candidate_keys:
+            pattern_rule = rules.get(pattern_key)
+            fields = pattern_rule.get("fields") if isinstance(pattern_rule, dict) else {}
+            field_rule = fields.get(value_type) if isinstance(fields, dict) else {}
+            if isinstance(field_rule, dict) and field_rule:
+                return field_rule
+    return {}
+
+
+def _clean_numeric_field_value(value, role):
+    """Remove surrounding punctuation only from numeric BOM fields."""
+    text = clean(value)
+    if role not in {"level", "quantity"} or not text:
+        return text
+
+    matches = list(re.finditer(r"[+-]?(?:\d+(?:[.,]\d+)?|[.,]\d+)", text))
+    if len(matches) != 1:
+        return text
+    match = matches[0]
+    remainder = f"{text[:match.start()]}{text[match.end():]}"
+    if re.search(r"[A-Za-z0-9]", remainder):
+        return text
+    return match.group(0)
+
+
+def _clean_field_value(value, config=None, value_type="", source_header=""):
+    if (
+        value_type == "mpn"
+        and _directory_mpn_similarity(value) >= MPN_RECOGNITION_SIMILARITY_THRESHOLD
+    ):
+        return clean(value)
+    field_rule = _field_rule(config, value_type)
+    matching_rule = _matching_semantic_field_rule(
+        value,
+        config=config,
+        value_type=value_type,
+        source_header=source_header,
+    )
+    if matching_rule:
+        field_rule = {**field_rule, **matching_rule}
+    cleaned = _strip_configured_prefix(value, field_rule)
+    return _clean_numeric_field_value(cleaned, value_type)
 
 
 def _split_whitespace_mpn_parts(value, rule=None):
@@ -4223,7 +4309,7 @@ def _split_whitespace_mpn_parts(value, rule=None):
     raw_parts = [clean(part) for part in re.split(r"\s+", text) if not is_blankish(part)]
     if len(raw_parts) <= 1:
         return []
-    stripped_parts = _strip_configured_prefixes(raw_parts, rule)
+    stripped_parts = _strip_configured_prefixes(raw_parts, rule, "mpn")
     if len(stripped_parts) <= 1:
         return []
     scored = [_best_mpn_from_text(part) for part in stripped_parts]
@@ -4254,12 +4340,12 @@ def _split_alternate_value(value, config=None, value_type="mpn"):
     if preserve_original_value and configured_delimiter:
         explicit_parts = _split_explicit_delimiter(raw_text, configured_delimiter)
         if len(explicit_parts) > 1:
-            return _strip_configured_prefixes(explicit_parts, rule)
+            return _strip_configured_prefixes(explicit_parts, rule, value_type)
 
     if value_type == "mpn":
         fixed_width_prefix_parts = _fixed_width_prefix_segments(raw_text, rule)
         if len(fixed_width_prefix_parts) > 1:
-            stripped_parts = _strip_configured_prefixes(fixed_width_prefix_parts, rule)
+            stripped_parts = _strip_configured_prefixes(fixed_width_prefix_parts, rule, value_type)
             if preserve_original_value:
                 return stripped_parts
             scored = [_best_mpn_from_text(part) for part in stripped_parts]
@@ -4273,7 +4359,7 @@ def _split_alternate_value(value, config=None, value_type="mpn"):
         wrapped_prefix_parts = _wrapped_prefixed_mpn_segments(raw_text, rule)
         if len(wrapped_prefix_parts) > 1:
             if preserve_original_value:
-                return _strip_configured_prefixes(wrapped_prefix_parts, rule)
+                return _strip_configured_prefixes(wrapped_prefix_parts, rule, value_type)
             scored = [_best_mpn_from_text(part) for part in wrapped_prefix_parts]
             valid_count = sum(1 for mpn, score, _ in scored if mpn and score >= 0.45)
             digit_part_count = sum(1 for part in wrapped_prefix_parts if re.search(r"\d", part))
@@ -4282,7 +4368,7 @@ def _split_alternate_value(value, config=None, value_type="mpn"):
 
     explicit_parts = _split_explicit_delimiter(raw_text, configured_delimiter)
     if len(explicit_parts) > 1:
-        explicit_parts = _strip_configured_prefixes(explicit_parts, rule)
+        explicit_parts = _strip_configured_prefixes(explicit_parts, rule, value_type)
         if value_type == "manufacturer":
             return _split_manufacturer_parts_by_directory(explicit_parts) or explicit_parts
         if value_type == "mpn":
@@ -4296,7 +4382,7 @@ def _split_alternate_value(value, config=None, value_type="mpn"):
 
     prefix_parts = _repeated_prefix_segments(raw_text, rule)
     if len(prefix_parts) > 1:
-        stripped_parts = _strip_configured_prefixes(prefix_parts, rule)
+        stripped_parts = _strip_configured_prefixes(prefix_parts, rule, value_type)
         if preserve_original_value:
             return stripped_parts
         if value_type != "mpn":
@@ -4312,7 +4398,7 @@ def _split_alternate_value(value, config=None, value_type="mpn"):
     if value_type == "mpn" and rule_delimiter_mode in {"", "auto"}:
         fixed_width_prefix_parts = _fixed_width_prefix_segments(raw_text, rule)
         if len(fixed_width_prefix_parts) > 1:
-            stripped_parts = _strip_configured_prefixes(fixed_width_prefix_parts, rule)
+            stripped_parts = _strip_configured_prefixes(fixed_width_prefix_parts, rule, value_type)
             scored = [_best_mpn_from_text(part) for part in stripped_parts]
             valid_count = sum(1 for mpn, score, _ in scored if mpn and score >= 0.45)
             if valid_count >= 2:
@@ -4326,7 +4412,14 @@ def _split_alternate_value(value, config=None, value_type="mpn"):
         if len(whitespace_parts) > 1:
             return whitespace_parts
 
-    raw_text = _strip_configured_prefix(raw_text, rule)
+    raw_text = (
+        clean(raw_text)
+        if (
+            value_type == "mpn"
+            and _directory_mpn_similarity(raw_text) >= MPN_RECOGNITION_SIMILARITY_THRESHOLD
+        )
+        else _strip_configured_prefix(raw_text, rule)
+    )
     text = clean(raw_text)
 
     delimiter_mode = clean(config.get("delimiterMode") or config.get("delimiter_mode"))
@@ -4336,7 +4429,7 @@ def _split_alternate_value(value, config=None, value_type="mpn"):
         explicit_delimiter = "\n"
     explicit_parts = _split_explicit_delimiter(raw_text, explicit_delimiter)
     if len(explicit_parts) > 1:
-        explicit_parts = _strip_configured_prefixes(explicit_parts, rule)
+        explicit_parts = _strip_configured_prefixes(explicit_parts, rule, value_type)
         if value_type == "manufacturer":
             return _split_manufacturer_parts_by_directory(explicit_parts) or explicit_parts
         return explicit_parts
@@ -4349,7 +4442,7 @@ def _split_alternate_value(value, config=None, value_type="mpn"):
         parts = [clean(part) for part in re.split(delimiter, raw_text, flags=re.IGNORECASE) if not is_blankish(part)]
         if len(parts) <= 1:
             continue
-        parts = _strip_configured_prefixes(parts, rule)
+        parts = _strip_configured_prefixes(parts, rule, value_type)
         if value_type == "manufacturer":
             return _split_manufacturer_parts_by_directory(parts) or parts
         if value_type != "mpn":
@@ -4745,10 +4838,20 @@ def _infer_separate_column_entries(row, headers, roles, config, primary_fields, 
 
 
 def _build_factwise_entry(index, fields, relation):
+    normalized_fields = deepcopy(fields or {})
+    for role in ("level", "quantity"):
+        field = normalized_fields.get(role)
+        if isinstance(field, dict):
+            normalized_fields[role] = {
+                **field,
+                "value": _clean_numeric_field_value(field.get("value"), role),
+            }
+        elif field is not None:
+            normalized_fields[role] = _clean_numeric_field_value(field, role)
     return {
         "index": index,
         "relation": relation,
-        "fields": fields,
+        "fields": normalized_fields,
     }
 
 
@@ -4829,7 +4932,6 @@ def _pair_semantic_entries_with_separate_manufacturers(
     if (
         not entries
         or not manufacturer_header
-        or manufacturer_header in set(semantic_source_columns or [])
     ):
         return entries
 
@@ -4864,6 +4966,17 @@ def _pair_semantic_entries_with_separate_manufacturers(
     inherit_primary_manufacturer = "manufacturer" in set(
         configured_inherit_fields or []
     )
+    existing_manufacturers = [
+        clean(_review_entry_field_value(
+            (entry.get("fields") or {}).get("manufacturer")
+        ))
+        for entry in mpn_entries
+    ]
+    repeated_collapsed_manufacturer = bool(
+        len(manufacturer_slots) > 1
+        and len(mpn_entries) > 1
+        and len({value for value in existing_manufacturers if value}) == 1
+    )
 
     unknown_manufacturers = []
     for index, entry in enumerate(mpn_entries):
@@ -4874,6 +4987,7 @@ def _pair_semantic_entries_with_separate_manufacturers(
         collapsed_source_manufacturer = clean(manufacturer_value)
         preserve_existing_manufacturer = (
             existing_manufacturer
+            and not repeated_collapsed_manufacturer
             and (
                 len(manufacturer_slots) <= 1
                 or existing_manufacturer != collapsed_source_manufacturer
@@ -5449,6 +5563,33 @@ def _single_field_delimited_pattern(value, role, include_newline=True):
     return ""
 
 
+def _directory_validated_mpn_delimited_pattern(value):
+    """Expose delimiters without asserting that unknown pieces are MPNs."""
+    text = str(value or "").replace("\u00a0", " ").strip()
+    delimiter_patterns = (
+        (r"/", "/"),
+        (r"\|", "|"),
+        (r";", ";"),
+        (r"\^", "^"),
+        (r"~", "~"),
+        (r"%", "%"),
+        (r",", ","),
+    )
+    for delimiter_pattern, display_delimiter in delimiter_patterns:
+        parts = [clean(part) for part in re.split(delimiter_pattern, text)]
+        if len(parts) <= 1 or sum(1 for part in parts if part) <= 1:
+            continue
+        tokens = [
+            "<MPN>"
+            if _directory_mpn_similarity(part) >= MPN_RECOGNITION_SIMILARITY_THRESHOLD
+            else "<UNCLASSIFIED_TEXT>"
+            for part in parts
+            if part
+        ]
+        return f" {display_delimiter} ".join(tokens)
+    return ""
+
+
 def _same_cell_parenthesized_patterns_from_entries(value, entries, header):
     pairs = _same_cell_parenthesized_mpn_manufacturer_pairs(value)
     if not pairs:
@@ -5694,7 +5835,18 @@ def _merge_pattern_display_rows(existing_rows, new_rows, limit=8):
     )[:limit]
 
 
-def _semantic_pattern_key(source_column, mapped_fields, grammar):
+def _semantic_pattern_key(source_column, mapped_fields, grammar, scope=""):
+    identity_parts = [
+        "+".join(sorted(clean(field) for field in (mapped_fields or []) if clean(field))),
+        re.sub(r"\s+", " ", clean(grammar).lower()),
+    ]
+    if clean(scope):
+        identity_parts.insert(0, clean(scope).lower())
+    identity = "|".join(identity_parts)
+    return f"semantic-{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:20]}"
+
+
+def _legacy_semantic_pattern_key(mapped_fields, grammar):
     identity = "|".join([
         "+".join(sorted(clean(field) for field in (mapped_fields or []) if clean(field))),
         re.sub(r"\s+", " ", clean(grammar).lower()),
@@ -5733,7 +5885,12 @@ def _semantic_grammar_is_unclassified(grammar, mapped_fields=None):
     )
 
 
-def _automatic_unclassified_rule(source_column, mapped_fields, pattern_key=""):
+def _automatic_unclassified_rule(
+    source_column,
+    mapped_fields,
+    pattern_key="",
+    display_pattern="<UNCLASSIFIED_TEXT>",
+):
     """Build a transient rule that preserves the row but blanks this source's roles."""
     ignored_fields = [
         clean(field)
@@ -5749,7 +5906,7 @@ def _automatic_unclassified_rule(source_column, mapped_fields, pattern_key=""):
             "sourceHeader": clean(source_column),
             "excludeRow": False,
             "ignoredFields": ignored_fields,
-            "displayPattern": "<UNCLASSIFIED_TEXT>",
+            "displayPattern": clean(display_pattern) or "<UNCLASSIFIED_TEXT>",
             "automaticUnclassified": True,
             "ephemeral": True,
         },
@@ -6447,12 +6604,19 @@ def _trim_semantic_fragment_span(text, start, end):
     return start, end
 
 
-def _unclassified_identity_fragment_pattern(fragment):
+def _unclassified_identity_fragment_pattern(fragment, require_directory=True):
     text = clean(fragment)
     if not text:
         return ""
     candidate, score, _reason = _best_mpn_from_text(text)
-    if not candidate or float(score or 0) < 0.35:
+    if (
+        not candidate
+        or float(score or 0) < 0.35
+        or (
+            require_directory
+            and _directory_mpn_similarity(candidate) < MPN_RECOGNITION_SIMILARITY_THRESHOLD
+        )
+    ):
         return "<UNCLASSIFIED_TEXT>"
     candidate_index = text.upper().find(clean(candidate).upper())
     if candidate_index < 0:
@@ -6469,6 +6633,249 @@ def _unclassified_identity_fragment_pattern(fragment):
         else:
             tokens.append("<UNCLASSIFIED_TEXT>")
     return " ".join(tokens)
+
+
+@lru_cache(maxsize=16384)
+def _verified_mpn_source_spans_cached(value, _directory_version):
+    """Locate MPN text backed by exact or >=90 percent directory evidence."""
+    text = str(value or "").replace("\u00a0", " ")
+    candidates = candidate_mpn_tokens(text, max_candidates=32)
+    if not candidates:
+        return []
+
+    lookup = load_mpn_mfr_lookup()
+    normalized_candidates = {
+        normalize_mpn(candidate): candidate
+        for candidate in candidates
+        if normalize_mpn(candidate)
+    }
+    matches = (
+        lookup.match_normalized_many(
+            normalized_candidates,
+            threshold=MPN_RECOGNITION_SIMILARITY_THRESHOLD,
+        )
+        if hasattr(lookup, "match_normalized_many")
+        else {}
+    )
+    spans = []
+    for normalized, candidate in normalized_candidates.items():
+        match = matches.get(normalized) or {}
+        if not match.get("matched") or float(match.get("score") or 0) < MPN_RECOGNITION_SIMILARITY_THRESHOLD:
+            continue
+        source_span = _normalized_candidate_source_span(text, candidate)
+        if source_span is None:
+            continue
+        start, end = source_span
+        spans.append({
+            "start": int(start),
+            "end": int(end),
+            "role": "mpn",
+            "value": text[int(start):int(end)],
+            "score": float(match.get("score") or 0),
+        })
+    return tuple(
+        (item["start"], item["end"], item["role"], item["value"], item["score"])
+        for item in spans
+    )
+
+
+def _verified_mpn_source_spans(value):
+    return [
+        {"start": start, "end": end, "role": role, "value": raw, "score": score}
+        for start, end, role, raw, score in _verified_mpn_source_spans_cached(
+            str(value or ""),
+            directory_cache_version(),
+        )
+    ]
+
+
+@lru_cache(maxsize=16384)
+def _manufacturer_source_spans_cached(value, _directory_version):
+    """Find longest directory aliases anywhere in source text with exact offsets."""
+    text = str(value or "").replace("\u00a0", " ")
+    token_matches = list(re.finditer(r"[A-Za-z0-9][A-Za-z0-9&.+'\-]*", text))
+    if not token_matches:
+        return []
+
+    lookup = load_manufacturer_lookup()
+    phrase_lookup = load_manufacturer_phrase_lookup()
+    candidates = []
+    for start_index in range(len(token_matches)):
+        for end_index in range(
+            start_index + 1,
+            min(len(token_matches), start_index + 6) + 1,
+        ):
+            start = token_matches[start_index].start()
+            end = token_matches[end_index - 1].end()
+            raw = text[start:end]
+            normalized = clean(re.sub(r"[^A-Za-z0-9]+", " ", raw)).upper()
+            if not normalized:
+                continue
+            exact = normalized in lookup or normalized in phrase_lookup
+            if not exact:
+                scored = score_manufacturer_value(raw)
+                scored_key = clean(
+                    re.sub(r"[^A-Za-z0-9]+", " ", scored.get("manufacturer") or "")
+                ).upper()
+                exact = bool(
+                    scored.get("matched")
+                    and float(scored.get("score") or 0) >= 0.85
+                    and scored_key == normalized
+                )
+            if exact:
+                candidates.append({
+                    "start": start,
+                    "end": end,
+                    "role": "manufacturer",
+                    "value": raw,
+                })
+
+    selected = []
+    for candidate in sorted(
+        candidates,
+        key=lambda item: (-(item["end"] - item["start"]), item["start"]),
+    ):
+        if any(
+            candidate["start"] < current["end"]
+            and candidate["end"] > current["start"]
+            for current in selected
+        ):
+            continue
+        selected.append(candidate)
+    return tuple(
+        (item["start"], item["end"], item["role"], item["value"])
+        for item in sorted(selected, key=lambda item: item["start"])
+    )
+
+
+def _manufacturer_source_spans(value):
+    return [
+        {"start": start, "end": end, "role": role, "value": raw}
+        for start, end, role, raw in _manufacturer_source_spans_cached(
+            str(value or ""),
+            directory_cache_version(),
+        )
+    ]
+
+
+def _semantic_gap_grammar(value, value_token="<UNCLASSIFIED_TEXT>"):
+    """Replace text runs with a token while preserving structural punctuation."""
+    text = str(value or "")
+    if not text:
+        return ""
+    delimiter_re = re.compile(
+        r"(\r\n|\r|\n|\s+-\s+|[=|;,:~%^+@#/\\]+|[()\[\]{}])"
+    )
+    pieces = []
+    for piece in delimiter_re.split(text):
+        if not piece:
+            continue
+        if delimiter_re.fullmatch(piece):
+            pieces.append("<NEW_LINE>" if re.fullmatch(r"\r\n|\r|\n", piece) else piece)
+        elif clean(piece):
+            leading = " " if piece[:1].isspace() else ""
+            trailing = " " if piece[-1:].isspace() else ""
+            pieces.append(f"{leading}{value_token}{trailing}")
+        else:
+            pieces.append(piece)
+    return "".join(pieces)
+
+
+def _generic_mapped_field_pattern(value, mapped_fields):
+    """Return an offset-preserving grammar for any mapped source column."""
+    text = str(value or "").replace("\u00a0", " ")
+    mapped = [clean(field) for field in (mapped_fields or []) if clean(field)]
+    if is_blankish(text) or not mapped:
+        return {"grammar": "", "spans": []}
+
+    identity_roles = set(mapped) & {"mpn", "manufacturer"}
+    spans = []
+    if "manufacturer" in identity_roles:
+        spans.extend(_manufacturer_source_spans(text))
+    if "mpn" in identity_roles:
+        for candidate in _verified_mpn_source_spans(text):
+            if any(
+                candidate["start"] < current["end"]
+                and candidate["end"] > current["start"]
+                for current in spans
+            ):
+                continue
+            spans.append(candidate)
+    spans.sort(key=lambda item: (item["start"], item["end"]))
+
+    fallback_token = (
+        _pattern_display_token(mapped[0])
+        if len(mapped) == 1 and not identity_roles
+        else "<UNCLASSIFIED_TEXT>"
+    )
+    if len(mapped) == 1 and not identity_roles:
+        delimiter_re = re.compile(
+            r"(\r\n|\r|\n|\s+-\s+|[=|;,:~%^+@#/\\]+|[()\[\]{}])"
+        )
+        boundaries = list(delimiter_re.finditer(text))
+        text_ranges = []
+        cursor = 0
+        for delimiter_match in boundaries:
+            text_ranges.append((cursor, delimiter_match.start()))
+            cursor = delimiter_match.end()
+        text_ranges.append((cursor, len(text)))
+        for start, end in text_ranges:
+            while start < end and text[start].isspace():
+                start += 1
+            while end > start and text[end - 1].isspace():
+                end -= 1
+            if end > start:
+                spans.append({
+                    "start": start,
+                    "end": end,
+                    "role": mapped[0],
+                    "value": text[start:end],
+                })
+    grammar_parts = []
+    cursor = 0
+    for span in spans:
+        if span["start"] > cursor:
+            grammar_parts.append(
+                _semantic_gap_grammar(text[cursor:span["start"]], fallback_token)
+            )
+        grammar_parts.append(_pattern_display_token(span["role"]))
+        cursor = span["end"]
+    if cursor < len(text):
+        grammar_parts.append(_semantic_gap_grammar(text[cursor:], fallback_token))
+
+    grammar = clean("".join(part for part in grammar_parts if part))
+    return {"grammar": grammar or fallback_token, "spans": spans}
+
+
+def _numeric_mapped_field_pattern(value, role):
+    """Recognize one scalar number without treating decimal punctuation as a split."""
+    text = str(value or "").replace("\u00a0", " ")
+    token = _pattern_display_token(role)
+    matches = list(re.finditer(r"[+-]?(?:\d+(?:[.,]\d+)?|[.,]\d+)", text))
+    if not matches:
+        return {
+            "grammar": _semantic_gap_grammar(text),
+            "spans": [],
+        }
+
+    match = matches[0]
+    span = {
+        "start": match.start(),
+        "end": match.end(),
+        "role": role,
+        "value": text[match.start():match.end()],
+    }
+    grammar = "".join((
+        _semantic_gap_grammar(text[:match.start()]),
+        token,
+        _semantic_gap_grammar(text[match.end():]),
+    ))
+    numeric_value = match.group(0)
+    if "," in numeric_value:
+        grammar = f"{grammar} (decimal separator: ,)"
+    elif "." in numeric_value:
+        grammar = f"{grammar} (decimal separator: .)"
+    return {"grammar": clean(grammar) or token, "spans": [span]}
 
 
 def _repeated_fixed_width_mpn_prefix_layout(value):
@@ -6596,42 +7003,62 @@ def _semantic_identity_fragments(value, mapped_fields):
     mapped = set(mapped_fields or [])
     if not {"mpn", "manufacturer"}.issubset(mapped):
         prefix_layout = {}
+        detected_spans = []
         if mapped == {"mpn"}:
-            # A one-to-one MPN column can still contain a real MPN plus customer
-            # annotations, suffix lists, status text, or other cleanup content.
-            # Directory/value evidence identifies the MPN span; the remaining
-            # text is deliberately left teachable instead of being discarded.
-            prefix_layout = _mpn_position_prefix_layout(text)
-            grammar = _mpn_only_marker_alternate_pattern(text)
-            if (
-                not grammar
-                and prefix_layout
-                and prefix_layout.get("recordDelimiter") in {"\\n", "repeated_prefix"}
-            ):
-                grammar = "<PREFIX><MPN>"
-                if prefix_layout["recordDelimiter"] == "\\n":
-                    grammar = f"{grammar} repeated by <NEW_LINE>"
-                else:
-                    grammar = f"{grammar} repeated by <ADJACENT_RECORD>"
-            if not grammar:
-                grammar = _single_field_delimited_pattern(
-                    text,
-                    "mpn",
-                    include_newline=False,
-                )
-            if not grammar and prefix_layout:
-                grammar = "<PREFIX><MPN>"
-            if not grammar:
-                grammar = _unclassified_identity_fragment_pattern(text)
+            verified_pattern = _generic_mapped_field_pattern(text, mapped_fields)
+            verified_spans = verified_pattern.get("spans") or []
+            has_full_verified_mpn = any(
+                clean(span.get("role")) == "mpn"
+                and int(span.get("start") or 0) == 0
+                and int(span.get("end") or 0) == len(text)
+                for span in verified_spans
+            )
+            if has_full_verified_mpn:
+                grammar = "<MPN>"
+                detected_spans = verified_spans
+            else:
+                # A one-to-one MPN column can still contain a real MPN plus customer
+                # annotations, suffix lists, status text, or other cleanup content.
+                # Directory/value evidence identifies the MPN span; the remaining
+                # text is deliberately left teachable instead of being discarded.
+                prefix_layout = _mpn_position_prefix_layout(text)
+                grammar = _mpn_only_marker_alternate_pattern(text)
+                if (
+                    not grammar
+                    and prefix_layout
+                    and prefix_layout.get("recordDelimiter") in {"\\n", "repeated_prefix"}
+                ):
+                    grammar = "<PREFIX><MPN>"
+                    if prefix_layout["recordDelimiter"] == "\\n":
+                        grammar = f"{grammar} repeated by <NEW_LINE>"
+                    else:
+                        grammar = f"{grammar} repeated by <ADJACENT_RECORD>"
+                if not grammar:
+                    grammar = _directory_validated_mpn_delimited_pattern(text)
+                if not grammar and prefix_layout:
+                    grammar = "<PREFIX><MPN>"
+                if not grammar:
+                    grammar = _unclassified_identity_fragment_pattern(
+                        text,
+                        require_directory=False,
+                    )
         elif len(mapped) == 1:
             role = next(iter(mapped))
-            grammar = (
-                _single_field_delimited_pattern(text, role)
-                or _pattern_display_token(role)
-            )
+            if role in {"quantity", "level"}:
+                detected = _numeric_mapped_field_pattern(text, role)
+                grammar = detected["grammar"]
+                detected_spans = detected["spans"]
+            else:
+                detected = _generic_mapped_field_pattern(text, mapped_fields)
+                grammar = detected["grammar"]
+                detected_spans = detected["spans"]
         else:
-            grammar = " + ".join(_pattern_display_token(role) for role in (mapped_fields or []))
+            detected = _generic_mapped_field_pattern(text, mapped_fields)
+            grammar = detected["grammar"]
+            detected_spans = detected["spans"]
         fragment = {"start": 0, "end": len(text), "rawValue": text, "grammar": grammar or "<VALUE>"}
+        if detected_spans:
+            fragment["detectedSpans"] = detected_spans
         if prefix_layout:
             fragment["extraction"] = {
                 "mode": "recognized_mpn_start",
@@ -6729,19 +7156,42 @@ def _semantic_identity_fragments(value, mapped_fields):
             previous["rawValue"] = text[int(previous.get("start") or 0):residual_end]
             previous["grammar"] = clean(f"{previous.get('grammar') or ''} {residual}")
         else:
-            grammar = _unclassified_identity_fragment_pattern(residual)
+            detected = _generic_mapped_field_pattern(residual, mapped_fields)
+            residual_grammar = (
+                detected.get("grammar")
+                if detected.get("spans")
+                else _unclassified_identity_fragment_pattern(residual)
+            )
             fragments.append({
                 "start": residual_start,
                 "end": residual_end,
                 "rawValue": residual,
-                "grammar": grammar,
+                "grammar": residual_grammar or "<UNCLASSIFIED_TEXT>",
+                **(
+                    {"detectedSpans": detected.get("spans")}
+                    if detected.get("spans")
+                    else {}
+                ),
             })
 
     if fragments:
         return fragments
 
-    grammar = _unclassified_identity_fragment_pattern(text)
-    return [{"start": 0, "end": len(text), "rawValue": text, "grammar": grammar or "<UNCLASSIFIED_TEXT>"}]
+    detected = _generic_mapped_field_pattern(text, mapped_fields)
+    grammar = (
+        detected.get("grammar")
+        if detected.get("spans")
+        else _unclassified_identity_fragment_pattern(text)
+    )
+    fragment = {
+        "start": 0,
+        "end": len(text),
+        "rawValue": text,
+        "grammar": grammar or "<UNCLASSIFIED_TEXT>",
+    }
+    if detected.get("spans"):
+        fragment["detectedSpans"] = detected["spans"]
+    return [fragment]
 
 
 def _raw_field_pattern_sample_score(sample):
@@ -7589,7 +8039,11 @@ def _visual_pattern_identity_pairs(row, headers, roles, config=None):
     def add_pair(mpn, manufacturer):
         nonlocal pair_position
         mpn_text = str(mpn or "")
-        mpn_text = _strip_configured_prefix(mpn_text, _field_rule(config, "mpn"))
+        if _directory_mpn_similarity(mpn_text) < MPN_RECOGNITION_SIMILARITY_THRESHOLD:
+            mpn_text = _strip_configured_prefix(
+                mpn_text,
+                _field_rule(config, "mpn"),
+            )
         mpn = clean(mpn_text)
         manufacturer = clean(manufacturer)
         if not manufacturer and external_manufacturers:
@@ -8111,24 +8565,64 @@ def _infer_semantic_pattern_entries_for_row(row, headers, roles, selected_column
     )
     allow_automatic_unclassified = not _field_pattern_rule_has_content(active_rule)
 
-    combined_entries = []
+    semantic_batches = []
     ignored_fragments = []
     semantic_source_columns = set()
+
+    def semantic_slot(unit):
+        scopes = list((unit or {}).get("scopes") or [])
+        if "primary" in scopes:
+            return 0
+        alternate_scope = next(
+            (scope for scope in scopes if clean(scope).startswith("alternate-")),
+            "",
+        )
+        try:
+            return int(alternate_scope.rsplit("-", 1)[-1])
+        except (AttributeError, TypeError, ValueError):
+            return clean((unit or {}).get("sourceColumn"))
+
     for unit in _field_review_mapping_units(headers, roles, config=config):
-        if "primary" not in (unit.get("scopes") or []):
-            continue
         source_column = unit.get("sourceColumn")
         mapped_fields = _active_mapping_unit_fields(
             unit, row, headers, roles, config=config
         )
-        if len(mapped_fields) < 2 and mapped_fields != ["mpn"]:
+        if not mapped_fields:
             continue
+        pattern_scope = (
+            "alternate"
+            if (
+                "primary" not in (unit.get("scopes") or [])
+                and any(
+                    clean(scope).startswith("alternate-")
+                    for scope in (unit.get("scopes") or [])
+                )
+            )
+            else ""
+        )
+        is_configured_alternate_mpn = bool(
+            mapped_fields == ["mpn"] and semantic_slot(unit) > 0
+        )
         source_value = _row_cell(row, source_column, headers, preserve_delimiters=True)
         if is_blankish(source_value):
             continue
         fragments = _semantic_identity_fragments(source_value, mapped_fields)
-        if not any(
-            _semantic_pattern_key(source_column, mapped_fields, fragment.get("grammar")) in rules
+
+        def rule_keys(fragment):
+            grammar = fragment.get("grammar")
+            return list(dict.fromkeys((
+                _semantic_pattern_key(
+                    source_column,
+                    mapped_fields,
+                    grammar,
+                    scope=pattern_scope,
+                ),
+                _semantic_pattern_key(source_column, mapped_fields, grammar),
+                _legacy_semantic_pattern_key(mapped_fields, grammar),
+            )))
+
+        has_matching_rule = any(
+            any(pattern_key in rules for pattern_key in rule_keys(fragment))
             or (
                 allow_automatic_unclassified
                 and _semantic_grammar_is_unclassified(
@@ -8137,19 +8631,40 @@ def _infer_semantic_pattern_entries_for_row(row, headers, roles, selected_column
                 )
             )
             for fragment in fragments
-        ):
+        )
+        # A field-only semantic rule refines an existing item; it must not
+        # replace that item. Keep explicitly mapped MPN-only units as the row
+        # anchors whenever semantic rules are active elsewhere in the row.
+        is_mpn_anchor = bool(rules) and mapped_fields == ["mpn"]
+        if not has_matching_rule and not is_mpn_anchor:
             continue
 
         for fragment in fragments:
-            pattern_key = _semantic_pattern_key(
-                source_column,
-                mapped_fields,
-                fragment.get("grammar"),
+            candidate_rule_keys = rule_keys(fragment)
+            pattern_key = next(
+                (candidate_key for candidate_key in candidate_rule_keys if candidate_key in rules),
+                candidate_rule_keys[0],
             )
             rule = rules.get(pattern_key) or {}
             if (
+                is_configured_alternate_mpn
+                and rule.get("automaticUnclassified")
+                and rule.get("ephemeral")
+            ):
+                # The user explicitly mapped this source as an alternate MPN.
+                # A transient classifier guess must not suppress that value;
+                # only a user-confirmed ignore rule may do so.
+                rule = {}
+            if (
+                not rule
+                and is_mpn_anchor
+                and _field_pattern_rule_has_content(active_rule)
+            ):
+                rule = active_rule
+            if (
                 not rule
                 and allow_automatic_unclassified
+                and not is_configured_alternate_mpn
                 and _semantic_grammar_is_unclassified(
                     fragment.get("grammar"),
                     mapped_fields,
@@ -8170,13 +8685,25 @@ def _infer_semantic_pattern_entries_for_row(row, headers, roles, selected_column
             fragment_config.pop("field_pattern_rules", None)
             fragment_config.pop("_activeFieldPatternRule", None)
             fragment_config.pop("_active_field_pattern_rule", None)
+            # Each semantic batch owns exactly one mapping unit. Leaving the
+            # workbook's alternate-column configuration active here causes a
+            # primary fragment to emit its sibling alternate columns, and the
+            # alternate fragment then emits them a second time.
+            fragment_config["alternateLayout"] = "already_separate_rows"
+            fragment_config["alternateColumnGroups"] = []
+            fragment_config["alternate_column_groups"] = []
             if rule:
                 fragment_config = _config_with_active_rule(
                     fragment_config,
                     _semantic_rule_for_source(rule, source_column),
                 )
             if _field_pattern_rule_ignores_fields(rule):
-                ignored_fragments.append((fragment_row, fragment_config))
+                ignored_fragments.append((
+                    fragment_row,
+                    fragment_config,
+                    semantic_slot(unit),
+                    list(mapped_fields),
+                ))
                 continue
             fragment_entries = _infer_field_entries_for_row(
                 fragment_row,
@@ -8190,9 +8717,13 @@ def _infer_semantic_pattern_entries_for_row(row, headers, roles, selected_column
             )
             if fragment_entries:
                 semantic_source_columns.add(source_column)
-            combined_entries.extend(fragment_entries)
+                semantic_batches.append({
+                    "slot": semantic_slot(unit),
+                    "mappedFields": list(mapped_fields),
+                    "entries": fragment_entries,
+                })
 
-    for fragment_row, fragment_config in ignored_fragments:
+    for fragment_row, fragment_config, slot, mapped_fields in ignored_fragments:
         ignored_entries = _infer_field_entries_for_row(
             fragment_row,
             headers,
@@ -8204,7 +8735,84 @@ def _infer_semantic_pattern_entries_for_row(row, headers, roles, selected_column
             ignored_entry = ignored_entries[0]
             ignored_entry["relation"] = "Ignored"
             ignored_entry["ignoredIdentity"] = True
-            combined_entries.append(ignored_entry)
+            semantic_batches.append({
+                "slot": slot,
+                "mappedFields": mapped_fields,
+                "entries": [ignored_entry],
+                "ignored": True,
+            })
+
+    # A semantic pattern describes fields; it does not independently describe
+    # an item row. Build rows only from batches that own an MPN, then overlay
+    # MFR and other field-only interpretations onto the corresponding slot.
+    combined_entries = []
+    entries_by_slot = {}
+    for batch in semantic_batches:
+        if "mpn" not in set(batch.get("mappedFields") or []):
+            continue
+        slot_entries = entries_by_slot.setdefault(batch.get("slot"), [])
+        for entry in batch.get("entries") or []:
+            if (
+                not isinstance(entry, dict)
+                or entry.get("ignoredIdentity")
+                or clean(entry.get("relation")) == "Ignored"
+                or is_blankish(
+                    _review_entry_field_value((entry.get("fields") or {}).get("mpn"))
+                )
+            ):
+                continue
+            anchored_entry = deepcopy(entry)
+            slot_entries.append(anchored_entry)
+            combined_entries.append(anchored_entry)
+
+    for batch in semantic_batches:
+        mapped_fields = set(batch.get("mappedFields") or [])
+        if "mpn" in mapped_fields or batch.get("ignored"):
+            continue
+        targets = entries_by_slot.get(batch.get("slot")) or []
+        source_entries = [
+            entry
+            for entry in (batch.get("entries") or [])
+            if isinstance(entry, dict)
+        ]
+        if not targets or not source_entries:
+            continue
+        for target_index, target in enumerate(targets):
+            source_entry = (
+                source_entries[target_index]
+                if target_index < len(source_entries)
+                else source_entries[0] if len(source_entries) == 1 else None
+            )
+            if not source_entry:
+                continue
+            target_fields = target.setdefault("fields", {})
+            source_fields = source_entry.get("fields") or {}
+            for field in mapped_fields:
+                source_field = source_fields.get(field)
+                if not is_blankish(_review_entry_field_value(source_field)):
+                    target_fields[field] = deepcopy(source_field)
+
+    if not combined_entries and semantic_batches:
+        # Preserve a non-item source row as one primary row. Field-only
+        # patterns may refine it, but they can never manufacture alternates.
+        fallback_entry = None
+        for batch in semantic_batches:
+            candidate = next((
+                entry for entry in (batch.get("entries") or [])
+                if isinstance(entry, dict) and not entry.get("ignoredIdentity")
+            ), None)
+            if candidate is None:
+                continue
+            if fallback_entry is None:
+                fallback_entry = deepcopy(candidate)
+            fallback_fields = fallback_entry.setdefault("fields", {})
+            candidate_fields = candidate.get("fields") or {}
+            for field in set(batch.get("mappedFields") or []):
+                candidate_field = candidate_fields.get(field)
+                if not is_blankish(_review_entry_field_value(candidate_field)):
+                    fallback_fields[field] = deepcopy(candidate_field)
+        if fallback_entry is not None:
+            combined_entries = [fallback_entry]
 
     for index, entry in enumerate(combined_entries):
         entry["index"] = index
@@ -8288,7 +8896,7 @@ def _infer_field_entries_for_row(row, headers, roles, selected_columns, config=N
         )
         if header:
             if not is_blankish(value):
-                clean_value = _clean_field_value(value, config, role) if role in {"cpn"} else value
+                clean_value = _clean_field_value(value, config, role, header)
                 set_field(role, clean_value, header)
 
     cpn_value, cpn_header, _cpn_branch = _resolved_role_source(
@@ -8431,9 +9039,14 @@ def _infer_field_entries_for_row(row, headers, roles, selected_columns, config=N
         )
         if targeted_manufacturer_parts and len(targeted_manufacturer_parts) <= len(mpn_parts):
             manufacturer_parts = targeted_manufacturer_parts
-    primary_cpn_value = cpn_parts[0] if cpn_parts else _clean_field_value(cpn_value, config, "cpn")
-    primary_mpn_value = mpn_parts[0] if mpn_parts else _clean_field_value(mpn_value, config, "mpn")
-    primary_manufacturer_value = manufacturer_parts[0] if manufacturer_parts else _clean_field_value(manufacturer_value, config, "manufacturer")
+    primary_cpn_value = cpn_parts[0] if cpn_parts else _clean_field_value(cpn_value, config, "cpn", cpn_header)
+    primary_mpn_value = mpn_parts[0] if mpn_parts else _clean_field_value(mpn_value, config, "mpn", mpn_header)
+    primary_manufacturer_value = manufacturer_parts[0] if manufacturer_parts else _clean_field_value(
+        manufacturer_value,
+        config,
+        "manufacturer",
+        manufacturer_header,
+    )
     detected_mpn_count = len(mpn_parts) if mpn_parts else (0 if is_blankish(primary_mpn_value) else 1)
     detected_manufacturer_count = (
         len(manufacturer_parts)
@@ -8526,14 +9139,11 @@ def _infer_field_entries_for_row(row, headers, roles, selected_columns, config=N
             ),
         )
 
-    entry_count = max(len(cpn_parts), len(mpn_parts), len(manufacturer_parts), 1)
-    if mpn_header and (mpn_parts or not is_blankish(primary_mpn_value)):
-        # MPN is the identity anchor for alternates. Manufacturer parsing can
-        # over-split multi-word names, but it must never create an extra
-        # alternate row with no MPN.
-        entry_count = max(len(mpn_parts), 1)
-        if len(mpn_parts) > 1 and len(manufacturer_parts) > len(mpn_parts):
-            manufacturer_parts = manufacturer_parts[:len(mpn_parts)]
+    # MPN is the sole identity anchor for alternates. Splitting any other
+    # field may populate an MPN-backed row, but must never create a row.
+    entry_count = max(len(mpn_parts), 1)
+    if len(manufacturer_parts) > len(mpn_parts):
+        manufacturer_parts = manufacturer_parts[:len(mpn_parts)]
     entries = [_build_factwise_entry(0, fields, "Primary")]
     if (
         visual_owned_fields
@@ -11246,23 +11856,7 @@ def _build_semantic_review_patterns(headers, roles, config, row_shape_groups, op
     """Build globally deduplicated, fragment-level patterns for user review."""
     options = options or {}
     units = _field_review_mapping_units(headers, roles, config=config)
-    semantic_units = [
-        unit for unit in units
-        if (
-            unit.get("relationship") == "shared"
-            or unit.get("mappedFields") == ["mpn"]
-            or (
-                any(
-                    clean(scope).startswith("alternate-")
-                    for scope in (unit.get("scopes") or [])
-                )
-                and any(
-                    field in {"mpn", "manufacturer", "cpn"}
-                    for field in (unit.get("mappedFields") or [])
-                )
-            )
-        )
-    ]
+    semantic_units = list(units)
     structure_signature = _bom_pattern_structure_scope(headers, roles, config).get("signature")
     saved_interpretations = load_saved_bom_pattern_interpretations(structure_signature)
     draft_rules = {}
@@ -11271,57 +11865,170 @@ def _build_semantic_review_patterns(headers, roles, config, row_shape_groups, op
             draft_rules.update(options.get(key))
 
     patterns = {}
+    fragment_cache = {}
     for group in row_shape_groups or []:
         for raw_sample in group.get("_rawSamples") or []:
             row = raw_sample.get("row") or {}
             source_row = raw_sample.get("sourceRow")
             for unit in semantic_units:
                 source_column = unit.get("sourceColumn")
-                mapped_fields = _active_mapping_unit_fields(
-                    unit, row, headers, roles, config=config
-                )
-                if (
-                    len(mapped_fields) < 2
-                    and mapped_fields != ["mpn"]
-                    and not any(
-                        clean(scope).startswith("alternate-")
-                        for scope in (unit.get("scopes") or [])
+                mapped_fields = [
+                    field
+                    for field in _active_mapping_unit_fields(
+                        unit, row, headers, roles, config=config
                     )
-                ):
+                    if field != "description"
+                ]
+                if not mapped_fields:
                     continue
                 active_unit = {**unit, "mappedFields": mapped_fields}
+                # A normalized row represents one MPN. Other mapped fields only
+                # enrich an existing MPN row, even when they use alternate slots
+                # or share a source column with another field.
+                contributes_to_rows = "mpn" in mapped_fields
                 unit_roles = _roles_for_mapping_unit(roles, config, active_unit)
                 source_value = _row_cell(row, source_column, headers, preserve_delimiters=True)
                 if is_blankish(source_value):
                     continue
-                for fragment in _semantic_identity_fragments(source_value, mapped_fields):
+                fragment_cache_key = (str(source_value), tuple(mapped_fields))
+                if fragment_cache_key not in fragment_cache:
+                    fragment_cache[fragment_cache_key] = _semantic_identity_fragments(
+                        source_value,
+                        mapped_fields,
+                    )
+                for fragment in deepcopy(fragment_cache[fragment_cache_key]):
                     grammar = clean(fragment.get("grammar"))
                     if not grammar:
                         continue
-                    # Plain one-to-one values are direct mappings, not patterns.
-                    # Only surface the MPN column when backend value recognition
-                    # found additional customer text that needs interpretation.
-                    if (
-                        unit.get("relationship") == "one_to_one"
-                        and len(mapped_fields) == 1
-                        and grammar == _pattern_display_token(mapped_fields[0])
-                    ):
-                        continue
-                    pattern_key = _semantic_pattern_key(source_column, mapped_fields, grammar)
-                    automatic_unclassified = _semantic_grammar_is_unclassified(
-                        grammar,
-                        mapped_fields,
-                    )
-                    stored = saved_interpretations.get(pattern_key)
-                    draft_rule = draft_rules.get(pattern_key) if isinstance(draft_rules.get(pattern_key), dict) else {}
-                    parser_rule = (
-                        _automatic_unclassified_rule(
-                            source_column,
-                            mapped_fields,
-                            pattern_key,
+                    fragment_contributes_to_rows = bool(
+                        contributes_to_rows
+                        and not (
+                            unit.get("relationship") == "one_to_one"
+                            and grammar == _pattern_display_token(mapped_fields[0])
+                            and not (
+                                "primary" not in (unit.get("scopes") or [])
+                                and any(
+                                    clean(scope).startswith("alternate-")
+                                    for scope in (unit.get("scopes") or [])
+                                )
+                            )
                         )
-                        if automatic_unclassified
-                        else draft_rule or ((stored or {}).get("rule") if stored else {}) or {}
+                    )
+                    pattern_scope = (
+                        "alternate"
+                        if (
+                            "primary" not in (unit.get("scopes") or [])
+                            and any(
+                                clean(scope).startswith("alternate-")
+                                for scope in (unit.get("scopes") or [])
+                            )
+                        )
+                        else ""
+                    )
+                    pattern_key = _semantic_pattern_key(
+                        source_column,
+                        mapped_fields,
+                        grammar,
+                        scope=pattern_scope,
+                    )
+                    legacy_pattern_key = _legacy_semantic_pattern_key(
+                        mapped_fields,
+                        grammar,
+                    )
+                    detected_spans = [
+                        {
+                            "start": int(span.get("start") or 0),
+                            "end": int(span.get("end") or 0),
+                            "role": clean(span.get("role")),
+                        }
+                        for span in (fragment.get("detectedSpans") or [])
+                        if (
+                            clean(span.get("role")) in ROLE_KEYS
+                            and int(span.get("end") or 0) > int(span.get("start") or 0)
+                        )
+                    ]
+                    detected_roles = {
+                        span["role"] for span in detected_spans
+                    }
+                    automatic_detected_mapping = bool(
+                        detected_spans
+                        and set(mapped_fields).issubset(detected_roles)
+                    )
+                    automatic_direct_mapping = bool(
+                        unit.get("relationship") == "one_to_one"
+                        and grammar == _pattern_display_token(mapped_fields[0])
+                    )
+                    configured_alternate_mpn = bool(
+                        pattern_scope == "alternate" and mapped_fields == ["mpn"]
+                    )
+                    automatic_unclassified = (
+                        _semantic_grammar_is_unclassified(
+                            grammar,
+                            mapped_fields,
+                        )
+                        and not detected_roles
+                        and not configured_alternate_mpn
+                    )
+                    automatic_direct_mapping = bool(
+                        automatic_direct_mapping or configured_alternate_mpn
+                    )
+                    stored = (
+                        saved_interpretations.get(pattern_key)
+                        or saved_interpretations.get(legacy_pattern_key)
+                    )
+                    draft_rule = (
+                        draft_rules.get(pattern_key)
+                        or draft_rules.get(legacy_pattern_key)
+                    )
+                    draft_rule = draft_rule if isinstance(draft_rule, dict) else {}
+                    if (
+                        configured_alternate_mpn
+                        and draft_rule.get("automaticUnclassified")
+                        and draft_rule.get("ephemeral")
+                    ):
+                        draft_rule = {}
+                    stored_rule = (
+                        (stored or {}).get("rule")
+                        if isinstance(stored, dict)
+                        else {}
+                    )
+                    parser_rule = (
+                        draft_rule
+                        or stored_rule
+                        or (
+                            _automatic_unclassified_rule(
+                                source_column,
+                                mapped_fields,
+                                pattern_key,
+                                grammar,
+                            )
+                            if automatic_unclassified
+                            else (
+                                {
+                                    "fields": {
+                                        mapped_fields[0]: {
+                                            "delimiter": "none",
+                                            "preserveOriginalValue": True,
+                                        },
+                                    },
+                                    **(
+                                        {
+                                            "visualPattern": derive_visual_pattern_from_tagged_spans(
+                                                fragment.get("rawValue") or "",
+                                                source_column,
+                                                detected_spans,
+                                            ),
+                                        }
+                                        if detected_spans
+                                        else {}
+                                    ),
+                                    "automaticDirectMapping": True,
+                                    "ephemeral": True,
+                                }
+                                if automatic_direct_mapping
+                                else {}
+                            )
+                        )
                     )
                     parser_rule = _semantic_rule_for_source(parser_rule, source_column)
                     has_saved_interpretation = bool(parser_rule)
@@ -11360,6 +12067,17 @@ def _build_semantic_review_patterns(headers, roles, config, row_shape_groups, op
                             source_column,
                             mapped_fields,
                         )
+                        if not parser_rule and detected_spans:
+                            detected_visual_pattern = derive_visual_pattern_from_tagged_spans(
+                                fragment.get("rawValue") or "",
+                                source_column,
+                                detected_spans,
+                            )
+                            if detected_visual_pattern:
+                                parser_rule = {
+                                    "fields": {},
+                                    "visualPattern": detected_visual_pattern,
+                                }
                         if not parser_rule and detected_position_rule:
                             parser_rule = detected_position_rule
                         if parser_rule:
@@ -11395,7 +12113,7 @@ def _build_semantic_review_patterns(headers, roles, config, row_shape_groups, op
                         else ""
                     ) or grammar
                     if automatic_unclassified:
-                        interpretation_pattern = "<UNCLASSIFIED_TEXT>"
+                        interpretation_pattern = grammar
                     item = patterns.setdefault(pattern_key, {
                         "id": pattern_key,
                         "patternKey": pattern_key,
@@ -11406,9 +12124,11 @@ def _build_semantic_review_patterns(headers, roles, config, row_shape_groups, op
                         "title": "",
                         "sourceColumn": source_column,
                         "mappedFields": list(mapped_fields),
+                        "contributesToRows": fragment_contributes_to_rows,
                         "selectedColumns": [source_column],
                         "rowShapeGroupIds": [],
                         "occurrences": [],
+                        "_occurrenceIdentities": set(),
                         "interpretations": [],
                         "samples": [],
                         "rowEntries": {},
@@ -11417,18 +12137,33 @@ def _build_semantic_review_patterns(headers, roles, config, row_shape_groups, op
                         "suggestedRule": parser_rule or {"fields": {}},
                         "controls": _field_pattern_control_state(parser_rule),
                         "storedInterpretation": stored,
-                        "recognized": bool(automatic_unclassified or stored or draft_rule),
+                        "recognized": bool(
+                            automatic_unclassified
+                            or automatic_direct_mapping
+                            or automatic_detected_mapping
+                            or stored
+                            or draft_rule
+                        ),
                         "ignored": _field_pattern_rule_excludes_row(parser_rule),
                         "ignoresFields": _field_pattern_rule_ignores_fields(parser_rule),
                         "recognitionScope": (
                             "backend"
-                            if automatic_unclassified
+                            if automatic_unclassified or automatic_direct_mapping
                             else clean((stored or {}).get("matchScope")) or ("session" if draft_rule else "")
                         ),
                         "draftInterpretation": {"rule": draft_rule} if draft_rule else None,
                         "automaticUnclassified": automatic_unclassified,
+                        "automaticDirectMapping": automatic_direct_mapping,
+                        "automaticDetectedMapping": automatic_detected_mapping,
                         "confirmed": False,
                     })
+                    item["contributesToRows"] = bool(
+                        item.get("contributesToRows")
+                        or fragment_contributes_to_rows
+                    )
+                    item.setdefault("sourceColumns", [])
+                    if source_column not in item["sourceColumns"]:
+                        item["sourceColumns"].append(source_column)
                     if group.get("id") not in item["rowShapeGroupIds"]:
                         item["rowShapeGroupIds"].append(group.get("id"))
                     occurrence = {
@@ -11446,18 +12181,17 @@ def _build_semantic_review_patterns(headers, roles, config, row_shape_groups, op
                         "patternKey": pattern_key,
                         "rowShapeGroupId": group.get("id"),
                         "extraction": deepcopy(fragment.get("extraction") or {}),
+                        "detectedSpans": deepcopy(fragment.get("detectedSpans") or []),
                     }
                     occurrence_identity = (
                         occurrence["sourceRow"], occurrence["sourceColumn"],
                         occurrence["start"], occurrence["end"],
                     )
-                    existing_occurrences = {
-                        (entry["sourceRow"], entry["sourceColumn"], entry["start"], entry["end"])
-                        for entry in item["occurrences"]
-                    }
+                    existing_occurrences = item["_occurrenceIdentities"]
                     if occurrence_identity in existing_occurrences:
                         continue
                     item["occurrences"].append(occurrence)
+                    existing_occurrences.add(occurrence_identity)
 
                     fragment_row = dict(row) if isinstance(row, dict) else {}
                     fragment_row[source_column] = occurrence["rawValue"]
@@ -11472,12 +12206,19 @@ def _build_semantic_review_patterns(headers, roles, config, row_shape_groups, op
                     ):
                         fragment_config.pop(config_key, None)
                     fragment_config["_semanticPatternPass"] = True
+                    fragment_config["alternateLayout"] = "already_separate_rows"
+                    fragment_config["alternateColumnGroups"] = []
+                    fragment_config["alternate_column_groups"] = []
                     if parser_rule:
                         fragment_config = _config_with_active_rule(fragment_config, parser_rule)
+                    preview_roles = {
+                        role: source_column
+                        for role in mapped_fields
+                    }
                     entries = _infer_field_entries_for_row(
                         fragment_row,
                         headers,
-                        unit_roles,
+                        preview_roles,
                         [source_column],
                         config=fragment_config,
                     )
@@ -11521,12 +12262,20 @@ def _build_semantic_review_patterns(headers, roles, config, row_shape_groups, op
                         entries = entries[:1]
                         entries[0]["relation"] = "Ignored"
                         entries[0]["ignoredIdentity"] = True
-                    spans = _interpretation_spans_by_column(
-                        fragment_row,
-                        headers,
-                        [source_column],
-                        {} if rule_fallback_used else parser_rule,
-                        entries,
+                    spans = (
+                        _interpretation_spans_by_column(
+                            fragment_row,
+                            headers,
+                            [source_column],
+                            {} if rule_fallback_used else parser_rule,
+                            entries,
+                        )
+                        if entries
+                        else {
+                            source_column: deepcopy(
+                                fragment.get("detectedSpans") or []
+                            )
+                        }
                     )
                     confirmed_spans = spans.get(source_column) or []
                     if stored and visual_pattern and confirmed_spans and not rule_fallback_used:
@@ -11604,10 +12353,15 @@ def _build_semantic_review_patterns(headers, roles, config, row_shape_groups, op
     )
     mpn_validations = _validate_semantic_pattern_mpns(ordered)
     for index, item in enumerate(ordered, start=1):
+        item.pop("_occurrenceIdentities", None)
         automatic_unclassified = bool(item.get("automaticUnclassified"))
+        automatic_direct_mapping = bool(item.get("automaticDirectMapping"))
+        automatic_detected_mapping = bool(item.get("automaticDetectedMapping"))
         has_saved_interpretation = bool(item.get("storedInterpretation"))
         has_interpretation = bool(
             automatic_unclassified
+            or automatic_direct_mapping
+            or automatic_detected_mapping
             or has_saved_interpretation
             or item.get("draftInterpretation")
         )
@@ -11674,6 +12428,8 @@ def _build_semantic_review_patterns(headers, roles, config, row_shape_groups, op
         item["recognitionValidation"] = coverage
         item["recognized"] = bool(
             automatic_unclassified
+            or automatic_direct_mapping
+            or automatic_detected_mapping
             or has_saved_interpretation
             or (
                 has_interpretation
@@ -11681,11 +12437,11 @@ def _build_semantic_review_patterns(headers, roles, config, row_shape_groups, op
                 and mpn_is_accepted
             )
         )
-        if automatic_unclassified:
+        if automatic_unclassified or automatic_direct_mapping or automatic_detected_mapping:
             item["recognitionScope"] = "backend"
         if has_interpretation:
             item["interpretationPattern"] = (
-                "<UNCLASSIFIED_TEXT>"
+                item.get("grammar") or "<UNCLASSIFIED_TEXT>"
                 if automatic_unclassified
                 else effective_grammar
             )
@@ -11702,7 +12458,78 @@ def _build_semantic_review_patterns(headers, roles, config, row_shape_groups, op
             item.get("hasAlternateList") or item["alternateEntryCount"] > 0
         )
         item["groupIds"] = list(item.get("rowShapeGroupIds") or [])
-    return ordered
+    deduplicated = {}
+    for item in ordered:
+        display_grammar = clean(
+            item.get("interpretationPattern")
+            or item.get("grammar")
+        )
+        identity = (
+            tuple(sorted(clean(field) for field in item.get("mappedFields") or [])),
+            re.sub(r"\s+", " ", display_grammar.lower()),
+        )
+        existing = deduplicated.get(identity)
+        if existing is None:
+            deduplicated[identity] = item
+            continue
+
+        canonical_key = clean(existing.get("patternKey"))
+        for occurrence in item.get("occurrences") or []:
+            occurrence["patternKey"] = canonical_key
+        existing_occurrence_ids = {
+            clean(occurrence.get("id"))
+            for occurrence in existing.get("occurrences") or []
+        }
+        existing["occurrences"].extend(
+            occurrence
+            for occurrence in item.get("occurrences") or []
+            if clean(occurrence.get("id")) not in existing_occurrence_ids
+        )
+        existing["interpretations"].extend(item.get("interpretations") or [])
+        existing["samples"] = (
+            (existing.get("samples") or []) + (item.get("samples") or [])
+        )[:8]
+        existing["sourceColumns"] = list(dict.fromkeys(
+            (existing.get("sourceColumns") or [])
+            + (item.get("sourceColumns") or [])
+        ))
+        existing["selectedColumns"] = list(dict.fromkeys(
+            (existing.get("selectedColumns") or [])
+            + (item.get("selectedColumns") or [])
+        ))
+        existing["rowShapeGroupIds"] = list(dict.fromkeys(
+            (existing.get("rowShapeGroupIds") or [])
+            + (item.get("rowShapeGroupIds") or [])
+        ))
+        existing["groupIds"] = list(dict.fromkeys(
+            (existing.get("groupIds") or [])
+            + (item.get("groupIds") or [])
+        ))
+        existing["rowEntries"].update(item.get("rowEntries") or {})
+        existing["recognized"] = bool(
+            existing.get("recognized") and item.get("recognized")
+        )
+        existing["confirmed"] = bool(
+            existing.get("confirmed") and item.get("confirmed")
+        )
+        existing["occurrenceCount"] = len(existing.get("occurrences") or [])
+        existing["rowCount"] = len({
+            occurrence.get("sourceRow")
+            for occurrence in existing.get("occurrences") or []
+        })
+        existing["sampledRowCount"] = len(existing.get("samples") or [])
+        existing["alternateEntryCount"] = max(
+            existing.get("alternateEntryCount") or 0,
+            item.get("alternateEntryCount") or 0,
+        )
+        existing["hasAlternateList"] = bool(
+            existing.get("hasAlternateList") or item.get("hasAlternateList")
+        )
+
+    merged_patterns = list(deduplicated.values())
+    for index, item in enumerate(merged_patterns, start=1):
+        item["title"] = f"Pattern {index}"
+    return merged_patterns
 
 
 def _build_pattern_combinations(headers, patterns):
@@ -11720,6 +12547,8 @@ def _build_pattern_combinations(headers, patterns):
     rows = {}
 
     for pattern_number, pattern in enumerate(patterns or [], start=1):
+        if not pattern.get("contributesToRows", True):
+            continue
         pattern_key = clean(pattern.get("patternKey"))
         interpretations = {
             clean(item.get("occurrenceId")): item
@@ -12035,6 +12864,77 @@ def _visible_review_field_keys(entries, left, roles):
     return visible
 
 
+def _overlay_review_fields_by_source_column(
+    existing_entries,
+    interpreted_entries,
+    mapped_fields,
+    source_column,
+    target_source_columns=None,
+):
+    """Overlay non-row semantic fields without changing backend row cardinality."""
+    composed = deepcopy(existing_entries or [])
+    if not composed:
+        return composed
+
+    mapped_fields = [
+        clean(field)
+        for field in (mapped_fields or [])
+        if clean(field) in ROLE_KEYS
+    ]
+    source_column = clean(source_column)
+    target_source_columns = {
+        clean(column)
+        for column in (target_source_columns or [])
+        if clean(column)
+    } | {source_column}
+    target_indexes = []
+    for index, entry in enumerate(composed):
+        fields = entry.get("fields") if isinstance(entry, dict) else {}
+        source_columns = entry.get("sourceColumns") if isinstance(entry, dict) else {}
+        if any(
+            clean(column) in target_source_columns
+            for column in (
+                list((source_columns or {}).values())
+                + [
+                    _review_entry_source_column((fields or {}).get(field))
+                    for field in mapped_fields
+                ]
+            )
+        ):
+            target_indexes.append(index)
+
+    if not target_indexes and len(composed) == 1:
+        target_indexes = [0]
+    interpreted_entries = [
+        entry for entry in (interpreted_entries or [])
+        if isinstance(entry, dict)
+    ]
+    if not target_indexes or not interpreted_entries:
+        return composed
+
+    for position, target_index in enumerate(target_indexes):
+        interpreted = (
+            interpreted_entries[position]
+            if position < len(interpreted_entries)
+            else interpreted_entries[0] if len(interpreted_entries) == 1 else None
+        )
+        if not interpreted:
+            continue
+        target = composed[target_index]
+        target_fields = target.setdefault("fields", {})
+        target_source_columns = target.setdefault("sourceColumns", {})
+        interpreted_fields = interpreted.get("fields") or {}
+        interpreted_source_columns = interpreted.get("sourceColumns") or {}
+        for field in mapped_fields:
+            if field not in interpreted_fields:
+                continue
+            target_fields[field] = deepcopy(interpreted_fields[field])
+            interpreted_source = clean(interpreted_source_columns.get(field))
+            if interpreted_source:
+                target_source_columns[field] = interpreted_source
+    return composed
+
+
 def _sync_review_display_rows(review):
     """Synchronize row statuses and return one backend-owned row per interpretation."""
     review = review if isinstance(review, dict) else {}
@@ -12137,6 +13037,14 @@ def _sync_review_display_rows(review):
     })
     review["display"] = display
     review["displayRows"] = display_rows
+    summary = review.get("summary") if isinstance(review.get("summary"), dict) else {}
+    summary["itemCount"] = len(display_rows)
+    summary["sourceRowCount"] = len({
+        str(row.get("sourceRow"))
+        for row in display_rows
+        if row.get("sourceRow") is not None
+    })
+    review["summary"] = summary
     return review
 
 
@@ -12435,14 +13343,33 @@ def _build_flat_pattern_review_rows(
     def compose_interpreted_entries(complete_entries, occurrences, interpreted_entries):
         """Replace each directly mapped identity with its backend interpretation."""
         composed = deepcopy(complete_entries or [])
+        next_target_indexes = {}
         if not composed:
-            return deepcopy(interpreted_entries or [])
+            mpn_backed = [
+                deepcopy(entry)
+                for entry in (interpreted_entries or [])
+                if clean(
+                    _review_entry_field_value((entry.get("fields") or {}).get("mpn"))
+                )
+            ]
+            return mpn_backed or deepcopy((interpreted_entries or [])[:1])
 
         for occurrence in occurrences:
             occurrence_id = clean(
                 occurrence.get("occurrenceId")
                 or occurrence.get("id")
             )
+            source_column = clean(occurrence.get("sourceColumn"))
+            mapped_fields = {
+                clean(field)
+                for field in (occurrence.get("mappedFields") or [])
+                if clean(field) in ROLE_KEYS
+            }
+            # Direct-preview combinations carry one synthetic occurrence only
+            # to keep the source row navigable. It does not represent a field
+            # interpretation and must not duplicate the already composed row.
+            if not source_column and not mapped_fields:
+                continue
             interpreted = [
                 deepcopy(entry)
                 for entry in (interpreted_entries or [])
@@ -12461,19 +13388,15 @@ def _build_flat_pattern_review_rows(
                     }
                     for entry_index, entry in enumerate(occurrence.get("entries") or [])
                     if isinstance(entry, dict)
-                ]
+            ]
             if not interpreted:
                 continue
-            source_column = clean(occurrence.get("sourceColumn"))
-            mapped_fields = {
-                clean(field)
-                for field in (occurrence.get("mappedFields") or [])
-                if clean(field) in ROLE_KEYS
-            }
+            target_key = (source_column, tuple(sorted(mapped_fields)))
+            next_target_index = next_target_indexes.get(target_key, 0)
             target_index = next((
                 index
                 for index, entry in enumerate(composed)
-                if any(
+                if index >= next_target_index and any(
                     clean(
                         ((entry.get("fields") or {}).get(field) or {}).get("sourceColumn")
                         if isinstance((entry.get("fields") or {}).get(field), dict)
@@ -12483,11 +13406,16 @@ def _build_flat_pattern_review_rows(
                 )
             ), None)
             if target_index is None:
-                if len(composed) == 1 and len(occurrences) == 1:
-                    target_index = 0
-                else:
-                    composed.extend(interpreted)
-                    continue
+                mpn_backed = [
+                    entry
+                    for entry in interpreted
+                    if clean(
+                        _review_entry_field_value((entry.get("fields") or {}).get("mpn"))
+                    )
+                ]
+                if occurrence.get("contributesToRows", True) and mpn_backed:
+                    composed.extend(mpn_backed)
+                continue
 
             replacements = []
             for offset, interpreted_entry in enumerate(interpreted):
@@ -12509,6 +13437,7 @@ def _build_flat_pattern_review_rows(
                 })
                 replacements.append(merged_entry)
             composed[target_index:target_index + len(interpreted)] = replacements
+            next_target_indexes[target_key] = target_index + len(replacements)
         return composed
 
     patterns_by_key = {
@@ -12534,6 +13463,22 @@ def _build_flat_pattern_review_rows(
             current = complete_entries_by_source_row.get(str(source_row)) or []
             if len(entries) > len(current):
                 complete_entries_by_source_row[str(source_row)] = entries
+    semantic_occurrences_by_source_row = {}
+    for pattern in patterns or []:
+        if not isinstance(pattern, dict):
+            continue
+        interpretations = {
+            clean(item.get("occurrenceId")): item
+            for item in (pattern.get("interpretations") or [])
+            if isinstance(item, dict) and clean(item.get("occurrenceId"))
+        }
+        for occurrence in pattern.get("occurrences") or []:
+            if not isinstance(occurrence, dict):
+                continue
+            semantic_occurrences_by_source_row.setdefault(
+                str(occurrence.get("sourceRow")),
+                [],
+            ).append((pattern, occurrence, interpretations.get(clean(occurrence.get("id"))) or {}))
     rows_by_key = {}
     for combination in combinations or []:
         if not isinstance(combination, dict):
@@ -12552,8 +13497,41 @@ def _build_flat_pattern_review_rows(
                 occurrences.append({
                     **occurrence,
                     "groupId": pattern.get("id") or "",
+                    "mappedFields": pattern.get("mappedFields") or [],
+                    "contributesToRows": pattern.get("contributesToRows", True),
                     "entries": _compact_review_entries(occurrence.get("entries") or []),
                 })
+            existing_occurrence_ids = {
+                clean(occurrence.get("occurrenceId") or occurrence.get("id"))
+                for occurrence in occurrences
+            }
+            for pattern, occurrence, interpretation in semantic_occurrences_by_source_row.get(
+                str(source_row),
+                [],
+            ):
+                occurrence_id = clean(occurrence.get("id"))
+                if not occurrence_id or occurrence_id in existing_occurrence_ids:
+                    continue
+                occurrences.append({
+                    **occurrence,
+                    "occurrenceId": occurrence_id,
+                    "groupId": pattern.get("id") or "",
+                    "mappedFields": pattern.get("mappedFields") or [],
+                    "contributesToRows": pattern.get("contributesToRows", True),
+                    # Non-identity patterns (for example a Manufacturer-only
+                    # column) overlay their semantic values onto an MPN row.
+                    # Row creation remains guarded by contributesToRows.
+                    "entries": _compact_review_entries(
+                        interpretation.get("entries") or []
+                    ),
+                    "interpretationSpans": interpretation.get("interpretationSpans") or [],
+                })
+                existing_occurrence_ids.add(occurrence_id)
+            occurrences.sort(key=lambda occurrence: (
+                clean(occurrence.get("sourceColumn")),
+                int(occurrence.get("start") or 0),
+                int(occurrence.get("end") or 0),
+            ))
             row_patterns = []
             seen_patterns = set()
             for occurrence in occurrences:
@@ -12840,10 +13818,7 @@ def _apply_following_item_row_review_relations(
                 if (
                     isinstance(entry, dict)
                     and clean(entry.get("relation")) != "Ignored"
-                    and (
-                        clean((entry.get("fields") or {}).get("mpn"))
-                        or clean((entry.get("fields") or {}).get("manufacturer"))
-                    )
+                    and clean((entry.get("fields") or {}).get("mpn"))
                 )
             ]
             if not identity_entries:
@@ -12932,7 +13907,7 @@ def _apply_same_group_row_review_relations(review_rows, config):
                 continue
             fields = entry.setdefault("fields", {})
             source_columns = entry.setdefault("sourceColumns", {})
-            if not group_key:
+            if not group_key or is_blankish(fields.get("mpn")):
                 entry["relation"] = "Primary"
                 continue
 
@@ -13046,8 +14021,6 @@ def _build_bom_field_review_workflow(headers, roles, config, groups, patterns=No
 
     semantic_patterns = list(patterns or [])
     for pattern_number, item in enumerate(semantic_patterns, start=1):
-        if item.get("automaticUnclassified") and item.get("recognized"):
-            continue
         interpretations = item.get("interpretations") or []
         interpretation_refs = [
             interpretation.get("occurrenceId")
@@ -13490,6 +14463,23 @@ def build_bom_field_pattern_groups(headers, rows, roles=None, config=None, selec
         rule_key = clean(group.get("patternKey") or group.get("shape"))
         if rule_key and isinstance(group.get("suggestedRule"), dict):
             active_rules[rule_key] = group["suggestedRule"]
+    for pattern in semantic_patterns:
+        rule_key = clean(pattern.get("patternKey"))
+        suggested_rule = pattern.get("suggestedRule")
+        if (
+            rule_key
+            and pattern.get("recognized")
+            and (
+                pattern.get("automaticDetectedMapping")
+                or pattern.get("storedInterpretation")
+            )
+            and isinstance(suggested_rule, dict)
+            and suggested_rule
+        ):
+            active_rules[rule_key] = _merge_pattern_rules(
+                suggested_rule,
+                active_rules.get(rule_key),
+            )
     review_contract = None
     if review_contract_version >= 3:
         review_groups = semantic_patterns if semantic_patterns else groups
@@ -13606,6 +14596,11 @@ def refresh_bom_field_pattern_review_after_teach(
         or teach_result.get("mappedFields")
         or [role for role in ROLE_KEYS if source_header and clean(roles.get(role)) == source_header]
     )
+    # Recompute this invariant during Teach refresh so stale review payloads
+    # cannot make Level, Manufacturer, CPN, or another non-MPN field add rows.
+    pattern_contributes_to_rows = "mpn" in {
+        clean(field).lower() for field in mapped_fields
+    }
     if not source_header:
         mapped_headers = {
             clean(roles.get(role))
@@ -13631,10 +14626,6 @@ def refresh_bom_field_pattern_review_after_teach(
     ):
         parse_config.pop(key, None)
     parse_config["_semanticPatternPass"] = True
-    parse_config = _config_with_active_rule(
-        parse_config,
-        _semantic_rule_for_source(rule, source_header),
-    )
 
     for review_row in refreshed.get("rows") or []:
         if not isinstance(review_row, dict):
@@ -13657,6 +14648,7 @@ def refresh_bom_field_pattern_review_after_teach(
         matching_fragments = [
             {
                 "id": clean(occurrence.get("occurrenceId") or occurrence.get("id")),
+                "sourceColumn": clean(occurrence.get("sourceColumn")) or source_header,
                 "start": int(occurrence.get("start") or 0),
                 "end": int(occurrence.get("end") or 0),
                 "rawValue": occurrence.get("rawValue") or "",
@@ -13670,6 +14662,7 @@ def refresh_bom_field_pattern_review_after_teach(
         ]
         if not matching_fragments:
             for fragment in _semantic_identity_fragments(source_value, mapped_fields):
+                fragment["sourceColumn"] = source_header
                 fragment_key = _semantic_pattern_key(
                     source_header,
                     mapped_fields,
@@ -13710,6 +14703,8 @@ def refresh_bom_field_pattern_review_after_teach(
                     "entries": generated_entries,
                 })
         for fragment in matching_fragments:
+            fragment_source_header = clean(fragment.get("sourceColumn")) or source_header
+            fragment_rule = _semantic_rule_for_source(rule, fragment_source_header)
             start = int(fragment.get("start") or 0)
             end = int(fragment.get("end") or 0)
             generated_occurrence_id = clean(fragment.get("id")) or hashlib.sha256(
@@ -13720,7 +14715,7 @@ def refresh_bom_field_pattern_review_after_teach(
             ).hexdigest()[:20]
             fragment_value = str(fragment.get("rawValue") or "")
             fragment_row = dict(reconstructed_row)
-            fragment_row[source_header] = fragment_value
+            fragment_row[fragment_source_header] = fragment_value
             is_taught_occurrence = (
                 str(review_source_row) == str(source_row)
                 and (
@@ -13736,18 +14731,27 @@ def refresh_bom_field_pattern_review_after_teach(
                 interpreted_entries = _infer_field_entries_for_row(
                     fragment_row,
                     list(reconstructed_row.keys()),
-                    roles,
-                    [source_header],
-                    config=parse_config,
+                    {
+                        **roles,
+                        **{
+                            field: fragment_source_header
+                            for field in mapped_fields
+                        },
+                    },
+                    [fragment_source_header],
+                    config=_config_with_active_rule(
+                        parse_config,
+                        fragment_rule,
+                    ),
                 )
                 rule_fallback_used = False
                 interpretation_spans = _interpretation_spans_by_column(
                     fragment_row,
                     list(reconstructed_row.keys()),
-                    [source_header],
-                    {} if rule_fallback_used else rule,
+                    [fragment_source_header],
+                    {} if rule_fallback_used else fragment_rule,
                     interpreted_entries,
-                ).get(source_header) or []
+                ).get(fragment_source_header) or []
             base_fragment_entries = [
                 entry
                 for entry in existing_entries
@@ -13792,16 +14796,81 @@ def refresh_bom_field_pattern_review_after_teach(
                     "patternEntryIndex": pattern_entry_index,
                 })
 
-        merged_entries = (
-            retained_entries[:insert_at]
-            + generated_entries
-            + retained_entries[insert_at:]
-        )
+        if pattern_contributes_to_rows:
+            merged_entries = (
+                retained_entries[:insert_at]
+                + generated_entries
+                + retained_entries[insert_at:]
+            )
+        else:
+            merged_entries = existing_entries
+            source_columns_by_occurrence = {
+                clean(fragment.get("id")): clean(fragment.get("sourceColumn"))
+                for fragment in matching_fragments
+                if clean(fragment.get("id")) and clean(fragment.get("sourceColumn"))
+            }
+            generated_by_source_column = {}
+            for generated_entry in generated_entries:
+                generated_fields = generated_entry.get("fields") or {}
+                generated_sources = generated_entry.get("sourceColumns") or {}
+                generated_source_column = (
+                    source_columns_by_occurrence.get(
+                        clean(generated_entry.get("occurrenceId"))
+                    )
+                    or next((
+                        clean(generated_sources.get(field))
+                        or clean(_review_entry_source_column(generated_fields.get(field)))
+                        for field in mapped_fields
+                        if (
+                            clean(generated_sources.get(field))
+                            or clean(_review_entry_source_column(generated_fields.get(field)))
+                        )
+                    ), source_header)
+                )
+                generated_by_source_column.setdefault(
+                    generated_source_column,
+                    [],
+                ).append(generated_entry)
+            for generated_source_column, source_entries in generated_by_source_column.items():
+                target_source_columns = {generated_source_column}
+                mapping_units = _field_review_mapping_units(
+                    list(reconstructed_row.keys()),
+                    roles,
+                    config=config,
+                )
+                source_unit = next((
+                    unit for unit in mapping_units
+                    if clean(unit.get("sourceColumn")) == generated_source_column
+                ), {})
+                source_scopes = {
+                    clean(scope) for scope in (source_unit.get("scopes") or [])
+                    if clean(scope)
+                }
+                for candidate_unit in mapping_units:
+                    if "mpn" not in set(candidate_unit.get("mappedFields") or []):
+                        continue
+                    candidate_scopes = {
+                        clean(scope)
+                        for scope in (candidate_unit.get("scopes") or [])
+                        if clean(scope)
+                    }
+                    if source_scopes and source_scopes == candidate_scopes:
+                        target_source_columns.add(
+                            clean(candidate_unit.get("sourceColumn"))
+                        )
+                merged_entries = _overlay_review_fields_by_source_column(
+                    merged_entries,
+                    source_entries,
+                    mapped_fields,
+                    generated_source_column,
+                    target_source_columns=target_source_columns,
+                )
         if _field_pattern_rule_ignores_fields(rule):
-            if target_indexes or len(existing_entries) > 1:
-                merged_entries = retained_entries + generated_entries[:1]
-            else:
-                merged_entries = generated_entries[:1] or retained_entries
+            if pattern_contributes_to_rows:
+                if target_indexes or len(existing_entries) > 1:
+                    merged_entries = retained_entries + generated_entries[:1]
+                else:
+                    merged_entries = generated_entries[:1] or retained_entries
         for entry_index, entry in enumerate(merged_entries):
             if clean(entry.get("relation")) != "Ignored":
                 entry["relation"] = "Primary" if entry_index == 0 else f"Alternate {entry_index}"
@@ -13968,7 +15037,6 @@ def refresh_bom_field_pattern_review_after_teach(
     summary["patternCount"] = len(patterns)
     summary["recognizedPatternCount"] = recognized_count
     summary["unrecognizedPatternCount"] = max(0, len(patterns) - recognized_count)
-    summary["itemCount"] = sum(int(row.get("entryCount") or 0) for row in refreshed.get("rows") or [])
     refreshed["summary"] = summary
     refreshed["recognizedPatternKeys"] = sorted(
         clean(pattern.get("patternKey"))
@@ -14093,7 +15161,7 @@ def _normalize_following_item_row_groups(normalized_rows, source_rows, headers, 
         identity_entries = [
             entry
             for entry in entries
-            if clean(entry.get("mpn")) or clean(entry.get("manufacturer"))
+            if clean(entry.get("mpn"))
         ]
 
         if starts_context:
@@ -14151,7 +15219,7 @@ def _normalize_same_group_rows(normalized_rows, config):
     for row in normalized_rows or []:
         grouped = dict(row)
         group_key = clean(grouped.get("parentKey"))
-        if not group_key:
+        if not group_key or is_blankish(grouped.get("mpn")):
             grouped["parentKey"] = str(grouped.get("sourceRow") or "")
             grouped["relation"] = "Primary"
             output.append(grouped)
@@ -14359,6 +15427,7 @@ def normalize_bom_rows(headers, rows, roles=None, config=None):
             "totalDiscoverySampleLimit": 80,
             "fieldPatternRules": pattern_rules,
             "includeAllRows": True,
+            "reviewContractVersion": 3,
         },
     )
 
@@ -14383,12 +15452,18 @@ def normalize_bom_rows(headers, rows, roles=None, config=None):
         has_primary_occurrence = any(
             clean(occurrence.get("sourceColumn")) in primary_identity_headers
             for occurrence in review_row.get("occurrences") or []
-            if isinstance(occurrence, dict)
+            if (
+                isinstance(occurrence, dict)
+                and occurrence.get("contributesToRows", True)
+            )
         )
         has_alternate_occurrence = any(
             clean(occurrence.get("sourceColumn")) in alternate_identity_headers
             for occurrence in review_row.get("occurrences") or []
-            if isinstance(occurrence, dict)
+            if (
+                isinstance(occurrence, dict)
+                and occurrence.get("contributesToRows", True)
+            )
         )
         row_entries = [
             {
@@ -14399,7 +15474,10 @@ def normalize_bom_rows(headers, rows, roles=None, config=None):
                 "_patternKey": clean(occurrence.get("patternKey")),
             }
             for occurrence in review_row.get("occurrences") or []
-            if isinstance(occurrence, dict)
+            if (
+                isinstance(occurrence, dict)
+                and occurrence.get("contributesToRows", True)
+            )
             for entry in occurrence.get("entries") or []
             if isinstance(entry, dict)
         ]
@@ -14417,6 +15495,19 @@ def normalize_bom_rows(headers, rows, roles=None, config=None):
                 }
                 for index, entry in enumerate(row_entries)
             ]
+
+    review_contract = result.get("review") if isinstance(result.get("review"), dict) else {}
+    for review_row in review_contract.get("rows") or []:
+        if not isinstance(review_row, dict):
+            continue
+        source_row = review_row.get("sourceRow")
+        reviewed_entries = [
+            deepcopy(entry)
+            for entry in (review_row.get("entries") or [])
+            if isinstance(entry, dict)
+        ]
+        if source_row is not None and reviewed_entries:
+            entries_by_source_row[str(source_row)] = reviewed_entries
 
     confirmed_rows = (
         ((safe_config.get("fieldPatternOverrides") or {}).get("rows") or {})
@@ -14457,10 +15548,10 @@ def normalize_bom_rows(headers, rows, roles=None, config=None):
             else []
         )
         reviewed_entries = entries_by_source_row.get(str(source_row)) or []
-        if occurrence_overrides and reviewed_entries:
-            # Occurrence IDs come from the semantic review result. Keep that
-            # complete ordered row as the merge base so confirming one
-            # fragment cannot replace or duplicate its siblings.
+        if reviewed_entries:
+            # Contract-v3 review rows are the backend's complete composition:
+            # MPN-bearing patterns create rows and all other field patterns
+            # have already been overlaid onto those rows by source position.
             entries = reviewed_entries
         elif row_rule:
             entries = _infer_field_entries_for_row(
@@ -14596,6 +15687,11 @@ def normalize_bom_rows(headers, rows, roles=None, config=None):
                 return clean(value.get("value") if isinstance(value, dict) else value)
 
             values = {role: field_value(role) for role in FACTWISE_FIELD_LABELS}
+            for numeric_role in ("level", "quantity"):
+                values[numeric_role] = _clean_numeric_field_value(
+                    values.get(numeric_role),
+                    numeric_role,
+                )
             needs_review = bool(entry.get("needsReview")) if isinstance(entry, dict) else False
             if not any(values.values()) and relation != "Ignored" and not needs_review:
                 continue

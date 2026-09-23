@@ -3640,45 +3640,6 @@ def bom_field_pattern_apply(request):
             groups_by_pattern[pattern_key] = group
         groups = list(groups_by_pattern.values())
 
-        override_rows = {}
-        for group in groups:
-            for correction in group.get('rows') or []:
-                source_row = correction.get('sourceRow')
-                occurrence_id = str(correction.get('occurrenceId') or '').strip()
-                pattern_key = str(correction.get('patternKey') or group.get('patternKey') or '').strip()
-                entries = correction.get('entries') or []
-                normalized_entries = []
-                for entry_index, entry in enumerate(entries):
-                    if not isinstance(entry, dict):
-                        continue
-                    normalized_entries.append({
-                        'relation': entry.get('relation') or (
-                            'Primary' if entry_index == 0 else f'Alternate {entry_index}'
-                        ),
-                        'fields': entry.get('fields') or {},
-                    })
-                if not normalized_entries:
-                    continue
-                row_key = str(source_row)
-                row_override = override_rows.setdefault(row_key, {'occurrences': []})
-                occurrence_override = {
-                    'occurrenceId': occurrence_id,
-                    'patternKey': pattern_key,
-                    'entries': normalized_entries,
-                    'rule': group.get('rule') or {},
-                }
-                if occurrence_id:
-                    row_override['occurrences'] = [
-                        item
-                        for item in row_override.get('occurrences') or []
-                        if str(item.get('occurrenceId') or '').strip() != occurrence_id
-                    ]
-                    row_override['occurrences'].append(occurrence_override)
-                else:
-                    # Compatibility for old confirmation payloads that did not
-                    # identify a fragment inside the source cell.
-                    row_override.setdefault('entries', []).extend(normalized_entries)
-
         structure_profile = build_structure_profile(
             headers=headers,
             rows=rows,
@@ -3759,12 +3720,42 @@ def bom_field_pattern_apply(request):
         applied_config = {
             **trusted_config,
             'fieldPatternRules': confirmed_rules,
-            'fieldPatternOverrides': {
-                'source': 'backend_user_corrections',
-                'rows': override_rows,
-            },
         }
         normalized = normalize_bom_rows(headers, rows, roles=roles, config=applied_config)
+
+        normalized_rows_by_source = {}
+        for normalized_row in normalized.get('normalizedRows') or []:
+            if not isinstance(normalized_row, dict):
+                continue
+            normalized_rows_by_source.setdefault(
+                str(normalized_row.get('sourceRow')),
+                [],
+            ).append(normalized_row)
+        learning_groups = []
+        for scoped_group in scoped_groups:
+            learning_group = deepcopy(scoped_group)
+            source_rows = {
+                str(row.get('sourceRow'))
+                for row in scoped_group.get('rows') or []
+                if isinstance(row, dict) and row.get('sourceRow') is not None
+            }
+            learning_group['rows'] = [
+                {
+                    'sourceRow': source_row,
+                    'entries': [
+                        {
+                            'relation': normalized_row.get('relation') or '',
+                            'fields': {
+                                'mpn': normalized_row.get('mpn') or '',
+                                'manufacturer': normalized_row.get('manufacturer') or '',
+                            },
+                        }
+                        for normalized_row in normalized_rows_by_source.get(source_row, [])
+                    ],
+                }
+                for source_row in source_rows
+            ]
+            learning_groups.append(learning_group)
         saved_structure = None
         if persist:
             backend_source_signature = {
@@ -3803,7 +3794,7 @@ def bom_field_pattern_apply(request):
                         profile=structure_profile,
                     )
                     learning_result = learn_confirmed_bom_field_patterns(
-                        scoped_groups,
+                        learning_groups,
                         structure_scope=structure_scope,
                         structure_fingerprint=structure.signature_hash,
                     )
@@ -4200,6 +4191,16 @@ def bom_field_pattern_bulk_controls(request):
                 else:
                     field_rule['suffixMode'] = suffix_mode
                     field_rule['stripSuffix'] = strip_suffix
+
+            if 'replaceText' in controls or 'replaceWith' in controls:
+                replace_text = str(controls.get('replaceText') or '')
+                replace_with = str(controls.get('replaceWith') or '')
+                if replace_text:
+                    field_rule['replaceText'] = replace_text
+                    field_rule['replaceWith'] = replace_with
+                else:
+                    for key in ('replaceText', 'replace_text', 'replaceWith', 'replace_with'):
+                        field_rule.pop(key, None)
             fields[field] = field_rule
 
             visual_pattern = deepcopy(base_rule.get('visualPattern') or base_rule.get('visual_pattern') or {})
