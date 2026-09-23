@@ -1602,6 +1602,16 @@ const BomStructureDialog = ({
         bomHeader = {
           finishedGoodCode: code,
           bomCode,
+          // Which assembly in the SHEET is the finished good, as opposed to
+          // what the user renamed it to. The dialog already kept this to stop a
+          // rename re-ranking the tiers on screen, but this object is rebuilt
+          // from a fixed list of fields, so it was dropped on submit and the
+          // backend fell back to the typed code - which is exactly the case it
+          // needed to tell apart. The preview then said three levels and the
+          // export produced four.
+          ...(String(raw.rootSourceCode || '').trim()
+            ? { rootSourceCode: String(raw.rootSourceCode).trim() }
+            : {}),
           // No longer asked for. Defaults to the finished good's code and is
           // renamed in the editor, where the item is actually visible.
           itemName: String(raw.itemName || '').trim() || code,
