@@ -5668,6 +5668,8 @@ class SemanticIdentityFragmentTests(SimpleTestCase):
     ):
         headers = [
             "Number",
+            "Description",
+            "Quantity",
             "Mfr1Number",
             "Mfr1Name",
             "Mfr2Number",
@@ -5675,6 +5677,8 @@ class SemanticIdentityFragmentTests(SimpleTestCase):
         ]
         row = {
             "Number": "2",
+            "Description": "1008CS.560NH.5%",
+            "Quantity": "4",
             "Mfr1Number": "1008CS-561X-J-L-C",
             "Mfr1Name": "S900157 = COILCRAFT",
             "Mfr2Number": "1008CS-561XJRC",
@@ -5683,6 +5687,8 @@ class SemanticIdentityFragmentTests(SimpleTestCase):
         }
         roles = {
             "cpn": "Number",
+            "description": "Description",
+            "quantity": "Quantity",
             "mpn": "Mfr1Number",
             "manufacturer": "Mfr1Name",
         }
@@ -5693,6 +5699,7 @@ class SemanticIdentityFragmentTests(SimpleTestCase):
                 "mpn": "Mfr2Number",
                 "manufacturer": "Mfr2Name",
             }],
+            "alternateInheritFields": ["cpn", "description", "quantity"],
         }
 
         def manufacturer_spans(value):
@@ -5737,15 +5744,33 @@ class SemanticIdentityFragmentTests(SimpleTestCase):
                 item for item in review["rows"]
                 if item["sourceRow"] == 10
             )
-            review_pairs = [
-                (entry["fields"]["mpn"], entry["fields"]["manufacturer"])
+            review_values = [
+                (
+                    entry["fields"]["mpn"],
+                    entry["fields"]["manufacturer"],
+                    entry["fields"]["cpn"],
+                    entry["fields"]["description"],
+                    entry["fields"]["quantity"],
+                )
                 for entry in review_row["entries"]
             ]
             self.assertEqual(
-                review_pairs,
+                review_values,
                 [
-                    ("1008CS-561X-J-L-C", "COILCRAFT"),
-                    ("1008CS-561XJRC", "COILCRAFT"),
+                    (
+                        "1008CS-561X-J-L-C",
+                        "COILCRAFT",
+                        "2",
+                        "1008CS.560NH.5%",
+                        "4",
+                    ),
+                    (
+                        "1008CS-561XJRC",
+                        "COILCRAFT",
+                        "2",
+                        "1008CS.560NH.5%",
+                        "4",
+                    ),
                 ],
             )
             manufacturer_patterns = [
@@ -5769,10 +5794,16 @@ class SemanticIdentityFragmentTests(SimpleTestCase):
 
         self.assertEqual(
             [
-                (entry["mpn"], entry["manufacturer"])
+                (
+                    entry["mpn"],
+                    entry["manufacturer"],
+                    entry["cpn"],
+                    entry["description"],
+                    entry["quantity"],
+                )
                 for entry in normalized["normalizedRows"]
             ],
-            review_pairs,
+            review_values,
         )
 
     @patch(

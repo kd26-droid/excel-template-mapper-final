@@ -4484,6 +4484,30 @@ def _copy_inheritable_fields(fields, config=None):
     return copied
 
 
+def _inherit_selected_primary_fields(primary_entry, alternate_entry, config=None):
+    """Fill blank alternate fields using the configured primary inheritance."""
+    if not isinstance(primary_entry, dict) or not isinstance(alternate_entry, dict):
+        return alternate_entry
+
+    inherited_fields = _copy_inheritable_fields(
+        primary_entry.get("fields") or {},
+        config=config,
+    )
+    alternate_fields = alternate_entry.setdefault("fields", {})
+    for role, inherited_field in inherited_fields.items():
+        inherited_value = (
+            inherited_field.get("value")
+            if isinstance(inherited_field, dict)
+            else inherited_field
+        )
+        alternate_value = alternate_fields.get(role)
+        if isinstance(alternate_value, dict):
+            alternate_value = alternate_value.get("value")
+        if is_blankish(alternate_value) and not is_blankish(inherited_value):
+            alternate_fields[role] = deepcopy(inherited_field)
+    return alternate_entry
+
+
 def _blank_factwise_field():
     return {
         "value": "",
@@ -8791,6 +8815,26 @@ def _infer_semantic_pattern_entries_for_row(row, headers, roles, selected_column
                 source_field = source_fields.get(field)
                 if not is_blankish(_review_entry_field_value(source_field)):
                     target_fields[field] = deepcopy(source_field)
+
+    # Replaying active semantic rules rebuilds each configured alternate MPN
+    # as its own slot. Apply the same primary-field inheritance used by direct
+    # alternate-column parsing so Review and Apply produce identical rows.
+    primary_slot_entries = entries_by_slot.get(0) or []
+    if primary_slot_entries:
+        for slot, slot_entries in entries_by_slot.items():
+            if slot == 0:
+                continue
+            for entry_index, alternate_entry in enumerate(slot_entries):
+                primary_entry = (
+                    primary_slot_entries[entry_index]
+                    if entry_index < len(primary_slot_entries)
+                    else primary_slot_entries[0]
+                )
+                _inherit_selected_primary_fields(
+                    primary_entry,
+                    alternate_entry,
+                    config=config,
+                )
 
     if not combined_entries and semantic_batches:
         # Preserve a non-item source row as one primary row. Field-only
