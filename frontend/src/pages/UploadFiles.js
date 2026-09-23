@@ -4304,7 +4304,6 @@ const UploadFiles = () => {
               <Grid item xs={12} md={10} lg={9}>
                 <Typography variant="subtitle2" sx={{ color: Nn.text, fontWeight: 700, fontSize: 14, mb: 1.25, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 1 }}>
                   Client File
-                  <Chip label="Required" size="small" sx={{ height: 20, fontSize: 11, bgcolor: isDarkMode ? 'rgba(37, 99, 235, 0.2)' : 'rgba(37, 99, 235, 0.1)', color: isDarkMode ? '#60a5fa' : '#1d4ed8', fontWeight: 700 }} />
                 </Typography>
 
                 <Box
