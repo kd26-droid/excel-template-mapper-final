@@ -787,6 +787,18 @@ def _known_mpn_substrings(value, lookup, max_candidates=16):
         if primed_entries is not None:
             return [entry.get("mpn") or normalized for entry in primed_entries[:max_candidates]]
 
+    if hasattr(lookup, "find_embedded_keys"):
+        matched_keys = lookup.find_embedded_keys(
+            normalized,
+            max_candidates=max_candidates,
+        )
+        known_entries = lookup.get_many(matched_keys, normalized=True)
+        return [
+            known_entries[key].get("mpn") or key
+            for key in matched_keys
+            if key in known_entries
+        ]
+
     exact_entry = lookup.get(normalized)
     if exact_entry and any(char.isalpha() for char in normalized) and any(char.isdigit() for char in normalized):
         return [exact_entry.get("mpn") or normalized]
@@ -842,6 +854,11 @@ def prime_mpn_lookup(values):
             continue
         if len(normalized) < 6:
             matches_by_value[normalized] = []
+            continue
+        if hasattr(lookup, "find_embedded_keys"):
+            matched_keys = lookup.find_embedded_keys(normalized, max_candidates=16)
+            keys.update(matched_keys)
+            matches_by_value[normalized] = matched_keys
             continue
         seen_candidates = set()
         matched_keys = []

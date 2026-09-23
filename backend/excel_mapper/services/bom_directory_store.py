@@ -191,6 +191,7 @@ class DatabaseMpnLookup:
         self._entries = {}
         self._loaded = set()
         self._value_matches = {}
+        self._embedded_prefix_index = None
         self._known_trigrams = None
         self._similarity_matches = {}
 
@@ -202,6 +203,44 @@ class DatabaseMpnLookup:
 
     def is_known(self, normalized_key):
         return normalized_key in self._known
+
+    def find_embedded_keys(self, normalized_value, *, max_candidates=16):
+        """Find verified MPNs inside one normalized value without substring explosion."""
+        value = str(normalized_value or "")
+        if len(value) < 6:
+            return []
+        if (
+            value in self._known
+            and any(char.isalpha() for char in value)
+            and any(char.isdigit() for char in value)
+        ):
+            return [value]
+
+        if self._embedded_prefix_index is None:
+            prefixes = {}
+            for key in self._known:
+                if (
+                    len(key) >= 6
+                    and any(char.isalpha() for char in key)
+                    and any(char.isdigit() for char in key)
+                ):
+                    prefixes.setdefault(key[:4], []).append(key)
+            self._embedded_prefix_index = {
+                prefix: tuple(sorted(keys, key=lambda item: (-len(item), item)))
+                for prefix, keys in prefixes.items()
+            }
+
+        matches = set()
+        for start in range(max(0, len(value) - 5)):
+            prefix = value[start:start + 4]
+            for candidate in self._embedded_prefix_index.get(prefix, ()):
+                if value.startswith(candidate, start):
+                    matches.add(candidate)
+
+        return sorted(
+            matches,
+            key=lambda item: (-len(item), value.find(item), item),
+        )[:max_candidates]
 
     def match_normalized_many(self, normalized_values, *, threshold=90.0):
         """Return exact or fuzzy verified-directory evidence for unique MPNs."""

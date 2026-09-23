@@ -3347,6 +3347,7 @@ def _finalize_bom_inference_with_structure(inferred_result, learned_matches, req
 def bom_role_inference(request):
     """Infer BOM normalizer role mappings from headers and sampled row values."""
     try:
+        endpoint_started_at = time.perf_counter()
         headers, rows, normaliser_session_id = _normaliser_input(request)
         options = request.data.get('options') or {}
         if 'sampleSize' in request.data and 'sampleSize' not in options:
@@ -3373,12 +3374,15 @@ def bom_role_inference(request):
         result = infer_bom_roles(headers, rows, options=inference_options)
         # Written down so a later call - or a different caller entirely - can
         # pick up where this one left off instead of being handed it all again.
+        initial_save_started_at = time.perf_counter()
         _save_normaliser_state(
             normaliser_session_id,
             roles=result.get('roles'),
             candidates=result.get('candidates'),
             block_structure=result.get('blockStructure'),
         )
+        initial_state_save_ms = round((time.perf_counter() - initial_save_started_at) * 1000, 2)
+        structure_match_started_at = time.perf_counter()
         learned_matches = match_bom_structures(
             headers=headers,
             rows=rows,
@@ -3387,12 +3391,14 @@ def bom_role_inference(request):
             source_signature=source_signature if isinstance(source_signature, dict) else {},
             limit=3,
         ).get('matches', [])
+        structure_match_ms = round((time.perf_counter() - structure_match_started_at) * 1000, 2)
         final_roles, final_config, applied_structure, role_sources = _finalize_bom_inference_with_structure(
             result,
             learned_matches,
             request_config=request_config,
         )
         inferred_roles = result.get('roles') or {}
+        structure_profile_started_at = time.perf_counter()
         structure_profile = build_structure_profile(
             headers=headers,
             rows=rows,
@@ -3400,6 +3406,7 @@ def bom_role_inference(request):
             config=final_config,
             source_signature=source_signature if isinstance(source_signature, dict) else {},
         )
+        structure_profile_ms = round((time.perf_counter() - structure_profile_started_at) * 1000, 2)
         # Write the FINAL roles down, not the raw ones saved above.
         #
         # Structure matching is what fills the roles a plain column-name guess
@@ -3408,13 +3415,24 @@ def bom_role_inference(request):
         # holding empty strings for exactly those roles while the response
         # carried the right ones, so the browser looked correct and every
         # headless caller normalised the sheet without an MPN.
+        final_save_started_at = time.perf_counter()
         _save_normaliser_state(
             normaliser_session_id,
             roles=final_roles,
             config=final_config,
         )
+        final_state_save_ms = round((time.perf_counter() - final_save_started_at) * 1000, 2)
+        endpoint_timings = dict(result.get('timings') or {})
+        endpoint_timings.update({
+            'initial_state_save_ms': initial_state_save_ms,
+            'structure_match_ms': structure_match_ms,
+            'structure_profile_ms': structure_profile_ms,
+            'final_state_save_ms': final_state_save_ms,
+            'endpoint_total_ms': round((time.perf_counter() - endpoint_started_at) * 1000, 2),
+        })
         response_payload = {
             **result,
+            'timings': endpoint_timings,
             'roles': final_roles,
             'config': final_config,
             'inferredRoles': inferred_roles,

@@ -5275,6 +5275,21 @@ class SemanticIdentityFragmentTests(SimpleTestCase):
         self.assertEqual(result["KNOWN123"]["mpn"], "KNOWN-123")
         self.assertIn("UNKNOWN999", lookup._loaded)
 
+    def test_mpn_lookup_finds_embedded_keys_without_length_window_scan(self):
+        lookup = DatabaseMpnLookup.__new__(DatabaseMpnLookup)
+        lookup._known = {
+            "ABC123": (1, "ABC-123"),
+            "ABC12345": (2, "ABC-12345"),
+            "123456": (3, "123456"),
+            "ONLYLETTERS": (4, "ONLYLETTERS"),
+        }
+        lookup._embedded_prefix_index = None
+
+        result = lookup.find_embedded_keys("XXABC12345YYABC123")
+
+        self.assertEqual(result, ["ABC12345", "ABC123"])
+        self.assertEqual(lookup.find_embedded_keys("123456"), [])
+
     def test_detected_mpn_position_rule_strips_each_newline_record(self):
         value = "01525-22-03-2061\n28384-69173-406HLF"
         rule = {

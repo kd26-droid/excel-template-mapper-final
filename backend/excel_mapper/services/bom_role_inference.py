@@ -508,6 +508,7 @@ def _conditional_source_columns(config, headers, role=None):
     ]
 
 
+@lru_cache(maxsize=16384)
 def norm_header(value):
     text = unicodedata.normalize("NFKD", clean(value))
     text = "".join(char for char in text if not unicodedata.combining(char))
@@ -530,6 +531,7 @@ def confidence(score):
     return "low"
 
 
+@lru_cache(maxsize=32768)
 def header_support(header, role):
     key = norm_header(header)
     if not key:
@@ -1574,18 +1576,29 @@ def apply_detail_row_mpn_mfr_context(headers, rows, profiles, column_values_by_i
         profile["reasons"].setdefault("manufacturer", []).append("MPN/manufacturer pairs in detail rows")
 
 
-def build_column_profiles(headers, rows, sample_size=250):
+def build_column_profiles(headers, rows, sample_size=250, timings=None):
+    timings = timings if isinstance(timings, dict) else {}
     profiles = []
     column_values_by_index = {}
     mpn_value_cache = {}
     manufacturer_value_cache = {}
 
+    values_started_at = perf_counter()
     prime_values = []
     for index in range(len(headers)):
         values = column_values(headers, rows, index, sample_size)
         column_values_by_index[index] = values
         prime_values.extend(non_empty(values)[:VALUE_SIGNAL_SAMPLE_SIZE])
+    timings["collect_column_values_ms"] = round(
+        (perf_counter() - values_started_at) * 1000,
+        2,
+    )
+    prime_started_at = perf_counter()
     prime_mpn_lookup(prime_values)
+    timings["prime_mpn_lookup_ms"] = round(
+        (perf_counter() - prime_started_at) * 1000,
+        2,
+    )
 
     def cached_mpn_score(value):
         key = clean(value)
@@ -1599,6 +1612,7 @@ def build_column_profiles(headers, rows, sample_size=250):
             manufacturer_value_cache[key] = score_manufacturer_value(key)
         return manufacturer_value_cache[key]
 
+    scoring_started_at = perf_counter()
     for index, header in enumerate(headers):
         values = column_values_by_index[index]
         samples = non_empty(values)
@@ -1774,6 +1788,11 @@ def build_column_profiles(headers, rows, sample_size=250):
             profile["reasons"].setdefault("quantity", []).append("line-number conflict")
             profile["reasons"].setdefault("level", []).append("line-number conflict")
 
+    timings["score_columns_ms"] = round(
+        (perf_counter() - scoring_started_at) * 1000,
+        2,
+    )
+    context_started_at = perf_counter()
     anchor = detect_primary_row_anchor(headers, rows, profiles, column_values_by_index, sample_size)
     apply_primary_row_context(
         headers,
@@ -1794,6 +1813,10 @@ def build_column_profiles(headers, rows, sample_size=250):
         sample_size,
         cached_mpn_score,
         cached_manufacturer_score,
+    )
+    timings["apply_row_context_ms"] = round(
+        (perf_counter() - context_started_at) * 1000,
+        2,
     )
 
     return profiles
@@ -1971,13 +1994,26 @@ def infer_bom_roles(headers, rows, options=None):
         sample_size = 250
     sample_size = max(25, min(sample_size, 250))
     input_rows = rows if isinstance(rows, list) else []
+    prepare_started_at = perf_counter()
     safe_rows, block_structure = _prepare_backend_bom_rows(
         safe_headers,
         input_rows,
         config=(options or {}).get("config") or {},
     )
-    profiles = build_column_profiles(safe_headers, safe_rows, sample_size=sample_size)
+    prepare_rows_ms = round((perf_counter() - prepare_started_at) * 1000, 2)
+    profile_timings = {}
+    profiles_started_at = perf_counter()
+    profiles = build_column_profiles(
+        safe_headers,
+        safe_rows,
+        sample_size=sample_size,
+        timings=profile_timings,
+    )
+    build_profiles_ms = round((perf_counter() - profiles_started_at) * 1000, 2)
+    resolve_started_at = perf_counter()
     resolved = resolve_roles(profiles)
+    resolve_roles_ms = round((perf_counter() - resolve_started_at) * 1000, 2)
+    diagnostics_started_at = perf_counter()
     mapped_input_rows = [_row_as_header_mapping(row, safe_headers) for row in input_rows]
     block_structure["parentPathRows"] = [
         _source_row_number(row, index)
@@ -1985,6 +2021,7 @@ def infer_bom_roles(headers, rows, options=None):
         if _backend_parent_path_value(row, safe_headers, resolved["roles"])
     ]
     block_structure["cleanupDetections"] = _cleanup_detection_counts(block_structure)
+    diagnostics_ms = round((perf_counter() - diagnostics_started_at) * 1000, 2)
     return {
         "source": "inferred",
         "roles": resolved["roles"],
@@ -1998,6 +2035,11 @@ def infer_bom_roles(headers, rows, options=None):
         "sampleSize": sample_size,
         "timings": {
             "total_ms": round((perf_counter() - started_at) * 1000, 2),
+            "prepare_rows_ms": prepare_rows_ms,
+            "build_profiles_ms": build_profiles_ms,
+            **profile_timings,
+            "resolve_roles_ms": resolve_roles_ms,
+            "diagnostics_ms": diagnostics_ms,
             "column_count": len(safe_headers),
             "row_count_received": len(safe_rows),
             "sample_size": sample_size,
@@ -2044,6 +2086,7 @@ def _normalizer_config_flag(config, camel_key, snake_key, default=True):
     return default
 
 
+@lru_cache(maxsize=16384)
 def _strong_semantic_header_role(value):
     scored = sorted(
         (
