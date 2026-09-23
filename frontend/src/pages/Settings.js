@@ -116,8 +116,18 @@ const ITEM_CODE_CONDITION_OPTIONS = [
 const ITEM_CODE_VALUE_SOURCE_OPTIONS = [
   { value: 'default', label: 'Default value' },
   { value: 'column', label: 'Value from a column' },
+  // The item code most sheets want IS a join - manufacturer part number and
+  // manufacturer - so a branch able to name only ONE column could express the
+  // exception but not the normal case. The concat mode can join but carries no
+  // condition, so "join them, but use the CPN when there is no part number"
+  // was not expressible at all, and a missing part number quietly produced an
+  // item code that was just the manufacturer's name.
+  { value: 'join', label: 'Join two columns' },
   { value: 'empty', label: 'Leave empty' },
 ];
+// A separator is written only between values that exist, so a blank half
+// leaves no dangling "TAG 15-400_" - a code that reads as real and is not.
+const ITEM_CODE_JOIN_DEFAULT_SEPARATOR = '_';
 const ITEM_TYPE_OPTIONS = ['Raw material', 'Finished good'];
 
 const cleanText = (value) => String(value ?? '').trim();
@@ -1710,6 +1720,51 @@ const Settings = () => {
                                           ))}
                                         </TextField>
                                       </Grid>
+                                    ) : (branch.outputType || 'default') === 'join' ? (
+                                      <>
+                                        <Grid item xs={12} sm={3}>
+                                          <TextField
+                                            select
+                                            fullWidth
+                                            size="small"
+                                            label="First column"
+                                            value={branch.outputColumn || ''}
+                                            onChange={(event) => updateItemCodeConditionalBranch(branchIndex, { outputColumn: event.target.value })}
+                                            sx={fieldSx}
+                                          >
+                                            <MenuItem value="">First column</MenuItem>
+                                            {itemCodeSourceColumnOptions.map(option => (
+                                              <MenuItem key={option} value={option}>{displayHeaderName(option, itemCodeSourceColumnOptions)}</MenuItem>
+                                            ))}
+                                          </TextField>
+                                        </Grid>
+                                        <Grid item xs={12} sm={3}>
+                                          <TextField
+                                            select
+                                            fullWidth
+                                            size="small"
+                                            label="Second column"
+                                            value={branch.outputSecondColumn || ''}
+                                            onChange={(event) => updateItemCodeConditionalBranch(branchIndex, { outputSecondColumn: event.target.value })}
+                                            sx={fieldSx}
+                                          >
+                                            <MenuItem value="">Second column</MenuItem>
+                                            {itemCodeSourceColumnOptions.map(option => (
+                                              <MenuItem key={option} value={option}>{displayHeaderName(option, itemCodeSourceColumnOptions)}</MenuItem>
+                                            ))}
+                                          </TextField>
+                                        </Grid>
+                                        <Grid item xs={12} sm={1}>
+                                          <TextField
+                                            fullWidth
+                                            size="small"
+                                            label="Join with"
+                                            value={branch.outputSeparator === undefined ? ITEM_CODE_JOIN_DEFAULT_SEPARATOR : branch.outputSeparator}
+                                            onChange={(event) => updateItemCodeConditionalBranch(branchIndex, { outputSeparator: event.target.value })}
+                                            sx={fieldSx}
+                                          />
+                                        </Grid>
+                                      </>
                                     ) : (branch.outputType || 'default') === 'default' ? (
                                       <Grid item xs={12} sm={7}>
                                         <TextField
@@ -1771,6 +1826,51 @@ const Settings = () => {
                                       ))}
                                     </TextField>
                                   </Grid>
+                                ) : (itemDirectoryDefaults.itemCodeElseValueSource || 'default') === 'join' ? (
+                                  <>
+                                    <Grid item xs={12} sm={3}>
+                                      <TextField
+                                        select
+                                        fullWidth
+                                        size="small"
+                                        label="First column"
+                                        value={itemDirectoryDefaults.itemCodeElseValueColumn || ''}
+                                        onChange={(event) => handleItemDirectoryDefaultChange('itemCodeElseValueColumn', event.target.value)}
+                                        sx={fieldSx}
+                                      >
+                                        <MenuItem value="">First column</MenuItem>
+                                        {itemCodeSourceColumnOptions.map(option => (
+                                          <MenuItem key={option} value={option}>{displayHeaderName(option, itemCodeSourceColumnOptions)}</MenuItem>
+                                        ))}
+                                      </TextField>
+                                    </Grid>
+                                    <Grid item xs={12} sm={3}>
+                                      <TextField
+                                        select
+                                        fullWidth
+                                        size="small"
+                                        label="Second column"
+                                        value={itemDirectoryDefaults.itemCodeElseSecondColumn || ''}
+                                        onChange={(event) => handleItemDirectoryDefaultChange('itemCodeElseSecondColumn', event.target.value)}
+                                        sx={fieldSx}
+                                      >
+                                        <MenuItem value="">Second column</MenuItem>
+                                        {itemCodeSourceColumnOptions.map(option => (
+                                          <MenuItem key={option} value={option}>{displayHeaderName(option, itemCodeSourceColumnOptions)}</MenuItem>
+                                        ))}
+                                      </TextField>
+                                    </Grid>
+                                    <Grid item xs={12} sm={1}>
+                                      <TextField
+                                        fullWidth
+                                        size="small"
+                                        label="Join with"
+                                        value={itemDirectoryDefaults.itemCodeElseSeparator === undefined ? ITEM_CODE_JOIN_DEFAULT_SEPARATOR : itemDirectoryDefaults.itemCodeElseSeparator}
+                                        onChange={(event) => handleItemDirectoryDefaultChange('itemCodeElseSeparator', event.target.value)}
+                                        sx={fieldSx}
+                                      />
+                                    </Grid>
+                                  </>
                                 ) : (itemDirectoryDefaults.itemCodeElseValueSource || 'default') === 'default' ? (
                                   <Grid item xs={12} sm={7}>
                                     <TextField

@@ -14518,6 +14518,40 @@ def apply_column_value_rule(headers, rows, raw_rule, locked_item_codes=None):
     condition = rule.get('condition') if isinstance(rule.get('condition'), dict) else None
     prepared_branches = []
     else_source_index = -1
+    def _join_indexes(raw_columns, single_column, where):
+        """Column positions a branch reads, in order.
+
+        A branch used to be able to name ONE column, so "use the manufacturer
+        part number when there is one, otherwise the CPN" was expressible but
+        "otherwise join the part number and the manufacturer" was not - and the
+        item code every customer uses is exactly that join. Both shapes are
+        accepted: `output_source_column` is what older saved rules carry, and
+        `output_source_columns` is the list.
+        """
+        columns = raw_columns if isinstance(raw_columns, (list, tuple)) else []
+        columns = [str(column or '').strip() for column in columns]
+        columns = [column for column in columns if column]
+        if not columns:
+            single = str(single_column or '').strip()
+            columns = [single] if single else []
+        indexes = []
+        for column in columns:
+            index = _grid_column_index(output_headers, column)
+            if index < 0:
+                raise ValueError(f'{where} column "{column}" is not in the grid')
+            indexes.append(index)
+        return indexes
+
+    def _join_cells(row, indexes, separator):
+        """Join the cells, skipping the blanks.
+
+        A blank side must not leave its separator behind: an item code of
+        "TAG 15-400_" reads as a real code and is not one, and it would collide
+        with nothing so no duplicate check would catch it.
+        """
+        parts = [str(row[index] or '').strip() for index in indexes]
+        return str(separator or '').join(part for part in parts if part)
+
     if value_mode == 'conditional':
         raw_branches = (condition or {}).get('branches')
         if not isinstance(raw_branches, list) or not raw_branches:
@@ -14536,12 +14570,12 @@ def apply_column_value_rule(headers, rows, raw_rule, locked_item_codes=None):
             condition_index = _grid_column_index(output_headers, condition_column)
             if condition_index < 0:
                 raise ValueError(f'Condition column "{condition_column}" is not in the grid')
-            output_source_column = str(branch.get('output_source_column') or '').strip()
-            output_source_index = -1
-            if output_source_column:
-                output_source_index = _grid_column_index(output_headers, output_source_column)
-                if output_source_index < 0:
-                    raise ValueError(f'Condition output column "{output_source_column}" is not in the grid')
+            output_source_indexes = _join_indexes(
+                branch.get('output_source_columns'),
+                branch.get('output_source_column'),
+                'Condition output',
+            )
+            output_source_index = output_source_indexes[0] if output_source_indexes else -1
             # Several values mean "any of these" and MUST stay a list -
             # condition_matches below is built for that shape. Flattening it with
             # str() produced the literal text "['asd', 'asdfaf']", so a contains
@@ -14558,13 +14592,19 @@ def apply_column_value_rule(headers, rows, raw_rule, locked_item_codes=None):
                 'compare': compare_value,
                 'output_value': '' if branch.get('output_value') is None else str(branch.get('output_value')),
                 'output_source_index': output_source_index,
+                'output_source_indexes': output_source_indexes,
+                'output_separator': ('' if branch.get('output_separator') is None
+                                     else str(branch.get('output_separator'))),
             })
 
-        else_source_column = str((condition or {}).get('else_source_column') or '').strip()
-        if else_source_column:
-            else_source_index = _grid_column_index(output_headers, else_source_column)
-            if else_source_index < 0:
-                raise ValueError(f'Otherwise-value column "{else_source_column}" is not in the grid')
+        else_source_indexes = _join_indexes(
+            (condition or {}).get('else_source_columns'),
+            (condition or {}).get('else_source_column'),
+            'Otherwise-value',
+        )
+        else_source_index = else_source_indexes[0] if else_source_indexes else -1
+        else_separator = ('' if (condition or {}).get('else_separator') is None
+                          else str((condition or {}).get('else_separator')))
 
     try:
         serial_start = int(rule.get('serial_start', 1))
@@ -14721,8 +14761,15 @@ def apply_column_value_rule(headers, rows, raw_rule, locked_item_codes=None):
                 None,
             )
             if matching_branch:
-                source_index = matching_branch['output_source_index']
-                generated = row[source_index] if source_index >= 0 else matching_branch['output_value']
+                indexes = matching_branch.get('output_source_indexes') or []
+                if len(indexes) > 1:
+                    generated = _join_cells(row, indexes, matching_branch.get('output_separator'))
+                elif indexes:
+                    generated = row[indexes[0]]
+                else:
+                    generated = matching_branch['output_value']
+            elif len(else_source_indexes) > 1:
+                generated = _join_cells(row, else_source_indexes, else_separator)
             elif else_source_index >= 0:
                 generated = row[else_source_index]
             elif 'else' in (condition or {}):
@@ -18423,8 +18470,15 @@ def _generate_hierarchical_bom(records, answer, bom_header):
     primary_of, alternates_of = split_primaries_and_alternates(records)
     primaries = [record for record in primary_of.values() if record] or records
 
+    # Which assembly in the SHEET is the finished good, which is not the same as
+    # what the user decided to call it. Built on the typed code, a renamed root
+    # stopped matching its own row: the sheet's top assembly kept its block and
+    # the new name was authored as a parent ABOVE it, so renaming silently added
+    # a level. `rootSourceCode` is the popup's record of what the sheet said, so
+    # the tree keeps its shape and the new name is applied to it below.
     root = {
-        'code': str(bom_header.get('finishedGoodCode') or '').strip(),
+        'code': (str(bom_header.get('rootSourceCode') or '').strip()
+                 or str(bom_header.get('finishedGoodCode') or '').strip()),
         'description': str(bom_header.get('itemName') or '').strip(),
         'uom': str(bom_header.get('measurementUnit') or '').strip(),
     }

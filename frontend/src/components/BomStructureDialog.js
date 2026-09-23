@@ -936,6 +936,14 @@ const BomStructureDialog = ({
         bomHeader.itemName = root && root.name ? root.name : '';
         if (root && root.uom) bomHeader.measurementUnit = root.uom;
         bomHeader.autoDetected = Boolean(root);
+        // Which assembly in the SHEET is the finished good, as opposed to what
+        // the user decides to call it. The two start equal and the code below
+        // used the typed value for both jobs, so renaming the top BOM made it
+        // stop matching itself: it dropped back into the sub-assembly list and
+        // every level shifted down one, as though a new parent had been added
+        // above. Renaming a sub-BOM never did that, because those are keyed by
+        // `assembly.code`. This keys the root the same way.
+        bomHeader.rootSourceCode = root ? root.code : '';
       }
 
       seeded[sheetName] = {
@@ -969,11 +977,18 @@ const BomStructureDialog = ({
     const levelColumn = answers[sheetName]?.levelColumn;
     if (!levelColumn || typeof getSheetRecords !== 'function') return null;
     try {
+      // The sheet's own top assembly when it has one, so the tiers stay put
+      // while the user renames it. Falls back to the typed code for a sheet
+      // that never had a root - a flat component list naming nothing it builds
+      // - where typing a code really does author a new BOM above the table.
+      const header = answers[sheetName]?.bomHeader || {};
+      const identity = String(header.rootSourceCode || '').trim()
+        || String(header.finishedGoodCode || '').trim();
       return analyzeLevels(
         getSheetRecords(sheetName),
         levelColumn,
         headersFor(sheetName),
-        answers[sheetName]?.bomHeader?.finishedGoodCode || '',
+        identity,
         false
       );
     } catch (err) {
@@ -1271,8 +1286,12 @@ const BomStructureDialog = ({
   // name, unit and quantity belong to the finished-good form; the list below is
   // for the assemblies underneath it.
   const assembliesFor = useCallback((sheetName) => {
+    // Same identity as the structure above: the assembly the sheet says is the
+    // finished good. Comparing the typed code here let a renamed root reappear
+    // below as one of its own sub-assemblies.
+    const rootHeader = answers[sheetName]?.bomHeader || {};
     const rootCode = String(
-      answers[sheetName]?.bomHeader?.finishedGoodCode || ''
+      rootHeader.rootSourceCode || rootHeader.finishedGoodCode || ''
     ).trim().toLowerCase();
     const seen = new Set();
     const unique = [];
