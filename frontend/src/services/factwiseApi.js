@@ -141,7 +141,7 @@ export async function silentRefreshToken() {
       const { data } = await axios.post(
         url,
         { id_token: token, refresh_token: refreshToken },
-        { headers: { 'Content-Type': 'application/json' }, timeout: 15000 }
+        { headers: { 'Content-Type': 'application/json' }, timeout: 0 }
       );
       const newIdToken = data?.id_token;
       const newRefreshToken = data?.refresh_token || refreshToken;
@@ -211,7 +211,7 @@ function buildClient() {
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
     },
-    timeout: 15000,
+    timeout: 0,
   });
   // Reactive: any 401/403 or CORS-flavoured network error is treated as an
   // expired session. FW's APIM returns 401 for expired JWTs; browsers see
@@ -347,7 +347,7 @@ export async function fetchFactwiseEntities() {
         api_url: apiUrl,
         enterprise_id: enterpriseId,
         token,
-      }, { timeout: 30000 });
+      }, { timeout: 0 });
       const rows = Array.isArray(data?.result) ? data.result : [];
       return {
         success: true,
@@ -422,7 +422,7 @@ export async function uploadFileToFactwiseBulkImport(file, resourceType) {
     const generateResp = await axios.post(
       `${base}/organization/bulk_import/url/generate/`,
       { file_name: file.name, resource_type: resourceType },
-      { headers: { ...authHeaders, 'Content-Type': 'application/json' }, timeout: 30000 }
+      { headers: { ...authHeaders, 'Content-Type': 'application/json' }, timeout: 0 }
     );
     const { bulk_import_id, url, fields } = generateResp.data;
     if (!bulk_import_id || !url) {
@@ -438,7 +438,7 @@ export async function uploadFileToFactwiseBulkImport(file, resourceType) {
     // (Same headers Factwise's own uploadFileToGeneratedUrl uses)
     await axios.put(url, file, {
       headers: { 'x-ms-blob-type': 'BlockBlob' },
-      timeout: 120000,
+      timeout: 0,
     });
 
     return { success: true, bulk_import_id, file_name: file.name, blob_key: blobKey };
@@ -465,7 +465,7 @@ export async function processFactwiseBulkImport(bulkImportId, additionalInformat
         bulk_import_id: bulkImportId,
         additional_information: additionalInformation || {},
       },
-      { timeout: 300000 }
+      { timeout: 0 }
     );
     return { success: true, ...data };
   } catch (error) {
@@ -911,7 +911,7 @@ export async function reviseProjectBom({ projectId, bomModuleId, enterpriseBomId
       // report a failure on a revise that actually landed. This sits past the
       // server's own 60s worker limit so the server is always the one to give
       // up first, and a client-side abort means something else went wrong.
-      { timeout: 120000 }
+      { timeout: 0 }
     );
     return { success: true, ...data };
   } catch (error) {

@@ -113,19 +113,19 @@ const api = {
   repairSpilledRows: (formData) =>
     axios.post(`${API_URL}/repair-spilled-rows/`, formData, {
       responseType: 'blob',
-      timeout: 60000,
+      timeout: 0,
     }),
 
   /** Run a sheet through FactWise 4.0's validator and return its findings.
    *  Goes through our own backend because the 4.0 API sends no CORS headers,
    *  so the browser cannot call it directly. */
   factwise40Validate: (formData) =>
-    axios.post(`${API_URL}/factwise40/validate/`, formData, { timeout: 200000 }),
+    axios.post(`${API_URL}/factwise40/validate/`, formData, { timeout: 0 }),
 
   /** One of the allowed FactWise 4.0 calls (projects, entities, BOMs), relayed
    *  by our backend for the same CORS reason. */
   factwise40Call: (body) =>
-    axios.post(`${API_URL}/factwise40/call/`, body, { timeout: 120000 }),
+    axios.post(`${API_URL}/factwise40/call/`, body, { timeout: 0 }),
 
   uploadFiles: async (formData) => {
     const maxRetries = 3;
@@ -135,7 +135,7 @@ const api = {
       try {
         const response = await axios.post(`${API_URL}/upload/`, formData, {
           headers: { 'Content-Type': 'multipart/form-data' },
-          timeout: 120000 // 2 minute timeout
+          timeout: 0 // 2 minute timeout
         });
         
         // Validate that upload was successful and has session_id
@@ -173,28 +173,28 @@ const api = {
     return axios.post(`${API_URL}/cleanup-rows/`, {
       session_id: sessionId,
       primary_column: primaryColumn
-    }, { timeout: 60000 });
+    }, { timeout: 0 });
   },
 
   applySheetJoin: (payload) => {
-    return axios.post(`${API_URL}/sheet-join/apply/`, payload, { timeout: 120000 });
+    return axios.post(`${API_URL}/sheet-join/apply/`, payload, { timeout: 0 });
   },
 
   getManufacturerDirectory: () => {
-    return axios.get(`${API_URL}/manufacturers/`, { timeout: 120000 });
+    return axios.get(`${API_URL}/manufacturers/`, { timeout: 0 });
   },
 
   searchManufacturers: (query, limit = 25) => {
     return axios.get(`${API_URL}/manufacturers/search/`, {
       params: { q: query, limit },
-      timeout: 60000
+      timeout: 0
     });
   },
 
   getProviderCredentials: (scopeId = 'default') => {
     return axios.get(`${API_URL}/settings/provider-credentials/`, {
       params: { scope_id: scopeId },
-      timeout: 30000
+      timeout: 0
     });
   },
 
@@ -202,7 +202,7 @@ const api = {
     return axios.post(`${API_URL}/settings/provider-credentials/`, {
       scope_id: scopeId,
       providers
-    }, { timeout: 30000 });
+    }, { timeout: 0 });
   },
 
   // entity_id is the key the server resolves on; entity_name is sent alongside
@@ -211,7 +211,7 @@ const api = {
   getEditorDefaultSettings: (entityName, entityId = '') => {
     return axios.get(`${API_URL}/settings/editor-defaults/`, {
       params: { entity_name: entityName, ...(entityId ? { entity_id: entityId } : {}) },
-      timeout: 30000
+      timeout: 0
     });
   },
 
@@ -220,13 +220,13 @@ const api = {
       entity_name: entityName,
       ...(entityId ? { entity_id: entityId } : {}),
       ...settings
-    }, { timeout: 30000 });
+    }, { timeout: 0 });
   },
 
   deleteProviderCredential: (provider, scopeId = 'default') => {
     return axios.delete(`${API_URL}/settings/provider-credentials/${provider}/`, {
       params: { scope_id: scopeId },
-      timeout: 30000
+      timeout: 0
     });
   },
 
@@ -234,7 +234,7 @@ const api = {
     return axios.post(`${API_URL}/settings/provider-credentials/${provider}/test/`, {
       scope_id: scopeId,
       mpn
-    }, { timeout: 60000 });
+    }, { timeout: 0 });
   },
 
   /**
@@ -266,7 +266,7 @@ const api = {
         headers: {
           'Content-Type': 'multipart/form-data'
         },
-        timeout: 300000 // 5 min — multi-page PDFs render page images server-side; don't abort early
+        timeout: 0 // 5 min — multi-page PDFs render page images server-side; don't abort early
       });
       return response;
     } catch (error) {
@@ -285,7 +285,7 @@ const api = {
     try {
       showGlobalLoader(true);
       const response = await axios.post(`${API_URL}/pdf/process/`, data, {
-        timeout: 120000 // 2 minute timeout for OCR processing
+        timeout: 0 // 2 minute timeout for OCR processing
       });
       return response;
     } catch (error) {
@@ -304,7 +304,7 @@ const api = {
     try {
       showGlobalLoader(true);
       const response = await axios.post(`${API_URL}/pdf/process-compare/`, data, {
-        timeout: 300000 // Compare mode can run both native parsing and Azure OCR
+        timeout: 0 // Compare mode can run both native parsing and Azure OCR
       });
       return response;
     } catch (error) {
@@ -408,7 +408,7 @@ const api = {
         zone_ids: zoneIds
         // enhance_preset intentionally omitted; backend picks best automatically
       }, {
-        timeout: 120000 // 2 minutes for processing
+        timeout: 0 // 2 minutes for processing
       });
       return response;
     } catch (error) {
@@ -433,7 +433,7 @@ const api = {
         // 'columns' = each box is a column; 'table' = one box is the whole table
         zone_mode: zoneMode
       }, {
-        timeout: 120000
+        timeout: 0
       });
       return response;
     } catch (error) {
@@ -618,9 +618,11 @@ const api = {
     return axios.get(`${API_URL}/data/`, {
       params,
       signal: options.signal,
-      timeout: (options.timeoutMs != null)
-        ? options.timeoutMs
-        : (pageSize > 2000 ? 120000 : (pageSize > 1000 ? 60000 : (pageSize > 500 ? 30000 : 15000)))
+      // No timeout, whatever the page size. The sliding scale here assumed a
+      // bigger page needs longer, which is true, but it also meant a small page
+      // gave up after fifteen seconds - and the browser giving up does not stop
+      // the server, it just stops anyone listening for the answer.
+      timeout: (options.timeoutMs != null) ? options.timeoutMs : 0
     });
   },
     
@@ -707,7 +709,7 @@ const api = {
         session_id: sessionId,
         ...(artifactType ? { artifact_type: artifactType } : {})
       },
-      timeout: 30000
+      timeout: 0
     }),
 
   saveIntermediateArtifact: ({
@@ -727,19 +729,19 @@ const api = {
       label,
       metadata,
       file_format: fileFormat
-    }, { timeout: 120000 }),
+    }, { timeout: 0 }),
 
   downloadIntermediateArtifact: (artifactId) =>
     axios.get(`${API_URL}/intermediate-artifacts/${artifactId}/download/`, {
       responseType: 'blob',
-      timeout: 120000
+      timeout: 0
     }),
 
   deleteIntermediateArtifact: (artifactId) =>
-    axios.delete(`${API_URL}/intermediate-artifacts/${artifactId}/`, { timeout: 30000 }),
+    axios.delete(`${API_URL}/intermediate-artifacts/${artifactId}/`, { timeout: 0 }),
 
   getBomWorkflowTemplates: () =>
-    axios.get(`${API_URL}/bom-workflow-templates/`, { timeout: 30000 }),
+    axios.get(`${API_URL}/bom-workflow-templates/`, { timeout: 0 }),
 
   saveBomWorkflowTemplate: ({ name, description = '', sourceSignature = {}, workflow = {} }) =>
     axios.post(`${API_URL}/bom-workflow-templates/`, {
@@ -747,10 +749,10 @@ const api = {
       description,
       source_signature: sourceSignature,
       workflow
-    }, { timeout: 60000 }),
+    }, { timeout: 0 }),
 
   getBomStructures: () =>
-    axios.get(`${API_URL}/bom/structures/`, { timeout: 30000 }),
+    axios.get(`${API_URL}/bom/structures/`, { timeout: 0 }),
 
   saveBomStructure: ({ name = '', headers = [], rows = [], roles = {}, config = {}, sourceSignature = {}, workflow = {}, confidence = 1 }) =>
     axios.post(`${API_URL}/bom/structures/`, {
@@ -762,7 +764,7 @@ const api = {
       source_signature: sourceSignature,
       workflow,
       confidence
-    }, { timeout: 60000 }),
+    }, { timeout: 0 }),
 
   matchBomStructures: ({ headers = [], rows = [], roles = {}, config = {}, sourceSignature = {}, limit = 5 }) =>
     axios.post(`${API_URL}/bom/structures/match/`, {
@@ -772,16 +774,16 @@ const api = {
       config,
       source_signature: sourceSignature,
       limit
-    }, { timeout: 60000 }),
+    }, { timeout: 0 }),
 
   getBomWorkflowTemplate: (templateId) =>
-    axios.get(`${API_URL}/bom-workflow-templates/${templateId}/`, { timeout: 30000 }),
+    axios.get(`${API_URL}/bom-workflow-templates/${templateId}/`, { timeout: 0 }),
 
   deleteBomWorkflowTemplate: (templateId) =>
-    axios.delete(`${API_URL}/bom-workflow-templates/${templateId}/`, { timeout: 30000 }),
+    axios.delete(`${API_URL}/bom-workflow-templates/${templateId}/`, { timeout: 0 }),
 
   getProcessingTemplates: () =>
-    axios.get(`${API_URL}/processing-templates/`, { timeout: 30000 }),
+    axios.get(`${API_URL}/processing-templates/`, { timeout: 0 }),
 
   saveProcessingTemplate: ({
     name,
@@ -802,13 +804,13 @@ const api = {
       stages,
       provider_snapshot: providerSnapshot,
       metadata
-    }, { timeout: 60000 }),
+    }, { timeout: 0 }),
 
   getProcessingTemplate: (templateId) =>
-    axios.get(`${API_URL}/processing-templates/${templateId}/`, { timeout: 30000 }),
+    axios.get(`${API_URL}/processing-templates/${templateId}/`, { timeout: 0 }),
 
   updateProcessingTemplate: (templateId, payload = {}) =>
-    axios.patch(`${API_URL}/processing-templates/${templateId}/`, payload, { timeout: 60000 }),
+    axios.patch(`${API_URL}/processing-templates/${templateId}/`, payload, { timeout: 0 }),
 
   validateProcessingTemplate: (templateId, { sourceRequirements = {}, headerMatchThreshold = 80 } = {}) =>
     axios.post(`${API_URL}/processing-templates/${templateId}/validate/`, {
@@ -816,7 +818,7 @@ const api = {
         ...sourceRequirements,
         header_match_threshold: headerMatchThreshold
       }
-    }, { timeout: 60000 }),
+    }, { timeout: 0 }),
 
   createProcessingTemplateEditorSession: ({
     templateId = null,
@@ -829,10 +831,10 @@ const api = {
       template_name: templateName,
       headers,
       rows
-    }, { timeout: 120000 }),
+    }, { timeout: 0 }),
 
   deleteProcessingTemplate: (templateId) =>
-    axios.delete(`${API_URL}/processing-templates/${templateId}/`, { timeout: 30000 }),
+    axios.delete(`${API_URL}/processing-templates/${templateId}/`, { timeout: 0 }),
 
   // ==========================================
   // 5️⃣ DASHBOARD ENDPOINTS
@@ -1494,7 +1496,7 @@ const api = {
     if (manufacturerHeader) payload.manufacturer_header = manufacturerHeader;
     if (cacheOnly) payload.cache_only = true;
     if (persistResults) payload.persist_results = true;
-    return axios.post(`${API_URL}/mpn/validate/`, payload, { timeout: 600000 });
+    return axios.post(`${API_URL}/mpn/validate/`, payload, { timeout: 0 });
   },
 
   /**
@@ -1511,7 +1513,7 @@ const api = {
     payload.column_provider_mappings = getColumnProviderMappings();
     if (mpnHeader) payload.mpn_header = mpnHeader;
     if (manufacturerHeader) payload.manufacturer_header = manufacturerHeader;
-    return axios.post(`${API_URL}/mpn/validate-warm/`, payload, { timeout: 120000 });
+    return axios.post(`${API_URL}/mpn/validate-warm/`, payload, { timeout: 0 });
   },
 
   /**
@@ -1526,14 +1528,14 @@ const api = {
     payload.pair_manufacturers = pairManufacturers;
     if (splitOptions) payload.split_options = splitOptions;
     if (manufacturerOverrides && Object.keys(manufacturerOverrides).length) payload.manufacturer_overrides = manufacturerOverrides;
-    return axios.post(`${API_URL}/mpn/split-cells/`, payload, { timeout: 120000 });
+    return axios.post(`${API_URL}/mpn/split-cells/`, payload, { timeout: 0 });
   },
 
   /** Find rows where the manufacturer split won't match the MPN count (for the review screen). */
   analyzeMpnPairing: (sessionId, mpnHeader, manufacturerHeader, splitOptions = null) => {
     const payload = { session_id: sessionId, mpn_header: mpnHeader, manufacturer_header: manufacturerHeader };
     if (splitOptions) payload.split_options = splitOptions;
-    return axios.post(`${API_URL}/mpn/analyze-pairing/`, payload, { timeout: 120000 });
+    return axios.post(`${API_URL}/mpn/analyze-pairing/`, payload, { timeout: 0 });
   },
 
   parseProducerColumn: (sessionId, producerHeader, mpnHeader = null, manufacturerHeader = null, splitOptions = null, mpnHeaders = null, manufacturerHeaders = null) => {
@@ -1544,7 +1546,7 @@ const api = {
     if (Array.isArray(mpnHeaders) && mpnHeaders.length) payload.mpn_headers = mpnHeaders;
     if (Array.isArray(manufacturerHeaders) && manufacturerHeaders.length) payload.manufacturer_headers = manufacturerHeaders;
     if (splitOptions) payload.split_options = splitOptions;
-    return axios.post(`${API_URL}/mpn/parse-producer/`, payload, { timeout: 120000 });
+    return axios.post(`${API_URL}/mpn/parse-producer/`, payload, { timeout: 0 });
   },
 
   /**
@@ -1572,7 +1574,7 @@ const api = {
     return axios.post(`${API_URL}/transforms/cleanup-grid-rows/`, {
       session_id: sessionId,
       column,
-    }, { timeout: 120000 });
+    }, { timeout: 0 });
   },
 
   /** Delete rows where a column meets a condition (is_empty/not_empty/equals/not_equals/contains). */
@@ -1582,7 +1584,7 @@ const api = {
       column,
       operator,
       compare,
-    }, { timeout: 120000 });
+    }, { timeout: 0 });
   },
 
   /**
@@ -1601,16 +1603,16 @@ const api = {
       session_id: sessionId,
       rows: [rowNumber],
       row_values: rowValues || {},
-    }, { timeout: 120000 });
+    }, { timeout: 0 });
   },
 
   /** Download the BOM this app generated from the user's own normalized rows. */
   downloadDemoBomSheet: (sessionId) =>
-    axios.get(`${API_URL}/bom/download/${sessionId}/`, { responseType: 'blob', timeout: 120000 }),
+    axios.get(`${API_URL}/bom/download/${sessionId}/`, { responseType: 'blob', timeout: 0 }),
 
   /** Generated BOM as JSON: headers, rows, item rows, stats, warnings. */
   generateBomSheet: (sessionId) =>
-    axios.get(`${API_URL}/bom/generate/${sessionId}/`, { timeout: 120000 }),
+    axios.get(`${API_URL}/bom/generate/${sessionId}/`, { timeout: 0 }),
 
   /** Infer BOM normalizer role mappings from headers and sampled rows. */
   inferBomRoles: ({ headers, rows, options, sampleSize, sourceSignature = {}, config = {} }) =>
@@ -1621,7 +1623,7 @@ const api = {
       sampleSize,
       source_signature: sourceSignature,
       config,
-    }, { timeout: 120000 }),
+    }, { timeout: 0 }),
 
   /** Backend-owned pattern groups and FactWise field interpretation for the normalizer teach popup. */
   inferBomFieldPatterns: ({ headers, rows, roles, config, selectedColumns = [], options = {} }) =>
@@ -1632,7 +1634,7 @@ const api = {
       config,
       selected_columns: selectedColumns,
       options,
-    }, { timeout: 120000 }),
+    }, { timeout: 0 }),
 
   /** Backend-authoritative BOM normalization. */
   normalizeBom: ({ headers, rows, roles, config }) =>
@@ -1641,7 +1643,7 @@ const api = {
       rows,
       roles,
       config,
-    }, { timeout: 180000 }),
+    }, { timeout: 0 }),
 
   /** Derive reusable backend parser rules from one corrected teach-popup row. */
   teachBomFieldPattern: ({
@@ -1695,7 +1697,7 @@ const api = {
       occurrence_id: occurrenceId,
       confirm_interpretation: confirmInterpretation,
       persist,
-    }, { timeout: 120000 }),
+    }, { timeout: 0 }),
 
   /** Apply one backend parsing/cleanup rule to every detected pattern for a mapped field. */
   applyBomFieldPatternBulkControls: ({
@@ -1719,13 +1721,13 @@ const api = {
       field,
       controls,
       confirm,
-    }, { timeout: 180000 }),
+    }, { timeout: 0 }),
 
   /** Learn only user-confirmed MPN/MFR values and pairs from the field-pattern review popup. */
   learnBomFieldPatterns: ({ groups = [] }) =>
     axios.post(`${API_URL}/bom/field-patterns/learn/`, {
       groups,
-    }, { timeout: 120000 }),
+    }, { timeout: 0 }),
 
   /** Persist confirmed interpretations and return the backend-normalized preview. */
   applyBomFieldPatterns: ({ headers, rows, roles, config, reviewReceipt = '', confirmationTokens = [], persist = true }) =>
@@ -1737,7 +1739,7 @@ const api = {
       review_receipt: reviewReceipt,
       confirmation_tokens: confirmationTokens,
       persist,
-    }, { timeout: 180000 }),
+    }, { timeout: 0 }),
 
   /** Promote final user-accepted normalized MPN/MFR values into the database directory. */
   confirmBomDirectory: ({ headers, rows, roles, config, structureFingerprint = '' }) =>
@@ -1747,7 +1749,7 @@ const api = {
       roles,
       config,
       structureFingerprint,
-    }, { timeout: 180000 }),
+    }, { timeout: 0 }),
 
   /**
    * Hand the bulk-import result back so the revision can be finished elsewhere.
@@ -1758,11 +1760,11 @@ const api = {
    * GET /bom/revision-handoff/<sessionId>/.
    */
   saveBomRevisionHandoff: (sessionId, handoff) =>
-    axios.post(`${API_URL}/bom/revision-handoff/${sessionId}/`, handoff, { timeout: 30000 }),
+    axios.post(`${API_URL}/bom/revision-handoff/${sessionId}/`, handoff, { timeout: 0 }),
 
   /** Everything a caller needs to finish a revision this session started. */
   getBomRevisionHandoff: (sessionId) =>
-    axios.get(`${API_URL}/bom/revision-handoff/${sessionId}/`, { timeout: 30000 }),
+    axios.get(`${API_URL}/bom/revision-handoff/${sessionId}/`, { timeout: 0 }),
 
   /**
    * Detect duplicate BOM rows across / within levels for a session. Returns
@@ -1773,7 +1775,7 @@ const api = {
    * Empty groups list = nothing to ask the user about.
    */
   detectBomDuplicatePolicy: (sessionId) =>
-    axios.get(`${API_URL}/bom/duplicate-policy/${sessionId}/`, { timeout: 120000 }),
+    axios.get(`${API_URL}/bom/duplicate-policy/${sessionId}/`, { timeout: 0 }),
 
   /**
    * Store a duplicate-handling policy on the session. Applied automatically
@@ -1783,33 +1785,33 @@ const api = {
    *         per_group_target_level: { [signature_id]: level } }
    */
   setBomDuplicatePolicy: (sessionId, body) =>
-    axios.post(`${API_URL}/bom/duplicate-policy/${sessionId}/`, body, { timeout: 30000 }),
+    axios.post(`${API_URL}/bom/duplicate-policy/${sessionId}/`, body, { timeout: 0 }),
 
   /** Clear any stored duplicate-handling policy for this session. */
   clearBomDuplicatePolicy: (sessionId) =>
-    axios.delete(`${API_URL}/bom/duplicate-policy/${sessionId}/`, { timeout: 30000 }),
+    axios.delete(`${API_URL}/bom/duplicate-policy/${sessionId}/`, { timeout: 0 }),
 
   /** Import an edited export back into the SAME session (keeps mappings/tags/MPN). */
   importEditedSheet: (sessionId, file) => {
     const form = new FormData();
     form.append('file', file);
-    return axios.post(`${API_URL}/import/${sessionId}/`, form, { timeout: 180000 });
+    return axios.post(`${API_URL}/import/${sessionId}/`, form, { timeout: 0 });
   },
 
   /** Per-source MPN validity + lifecycle counts across every row in the session. */
   mpnValidationSummary: (sessionId) =>
-    axios.get(`${API_URL}/mpn/summary/${sessionId}/`, { timeout: 120000 }),
+    axios.get(`${API_URL}/mpn/summary/${sessionId}/`, { timeout: 0 }),
 
   /** Validate the generated BOM against BOM rules only (not item rules). */
   validateBomSheet: (sessionId) =>
-    axios.get(`${API_URL}/bom/validate/${sessionId}/`, { timeout: 120000 }),
+    axios.get(`${API_URL}/bom/validate/${sessionId}/`, { timeout: 0 }),
 
   /** Nested BOM tree (FG → sub-assemblies → components) built from the generated BOM. */
   getBomTree: (sessionId) =>
-    axios.get(`${API_URL}/bom/tree/${sessionId}/`, { timeout: 60000 }),
+    axios.get(`${API_URL}/bom/tree/${sessionId}/`, { timeout: 0 }),
 
   getDemoBomTree: (sessionId) =>
-    axios.get(`${API_URL}/demo/bom-tree/${sessionId}/`, { timeout: 60000 }),
+    axios.get(`${API_URL}/demo/bom-tree/${sessionId}/`, { timeout: 0 }),
 
   /**
    * Fold repeated column groups into rows.
@@ -1824,7 +1826,7 @@ const api = {
       on_partial: onPartial,
       keep_rows_without_groups: keepRowsWithoutGroups,
       preview
-    }, { timeout: 120000 });
+    }, { timeout: 0 });
   },
 
   /**
@@ -1839,7 +1841,7 @@ const api = {
     return axios.post(`${API_URL}/transforms/expand-alternate-columns/`, {
       session_id: sessionId,
       alternate_sets: alternateSets,
-    }, { timeout: 120000 });
+    }, { timeout: 0 });
   },
 
   /**
@@ -1876,7 +1878,7 @@ const api = {
       keep_source_column: keepSourceColumn,
       overwrite_existing: overwriteExisting,
       preview
-    }, { timeout: 120000 });
+    }, { timeout: 0 });
   },
 
   /** Split one column into rows and copy only the selected columns to added rows. */
@@ -1893,7 +1895,7 @@ const api = {
     delimiter,
     copy_column_indices: copyColumnIndices,
     preview
-  }, { timeout: 120000 }),
+  }, { timeout: 0 }),
 
   /** Copy one column's values into another column (both must exist). */
   copyColumn: (sessionId, sourceColumn, targetColumn, onlyEmpty = false) =>
@@ -1902,14 +1904,14 @@ const api = {
       source_column: sourceColumn,
       target_column: targetColumn,
       only_empty: onlyEmpty,
-    }, { timeout: 120000 }),
+    }, { timeout: 0 }),
 
   /** Apply a reusable rule that fills an existing column or creates a new one. */
   fillOrCreateColumn: (sessionId, rule) =>
     axios.post(`${API_URL}/transforms/fill-or-create-column/`, {
       session_id: sessionId,
       rule,
-    }, { timeout: 120000 }),
+    }, { timeout: 0 }),
 
   /** Set a fixed value for a column — all cells, or only the empty ones. */
   setColumnDefault: (sessionId, column, value, onlyEmpty = true, condition = null) =>
@@ -1919,7 +1921,7 @@ const api = {
       value,
       only_empty: onlyEmpty,
       ...(condition ? { condition } : {}),
-    }, { timeout: 120000 }),
+    }, { timeout: 0 }),
 
   /** Inspect the actual values in a column and suggest suspicious values. */
   analyzeColumnValues: (sessionId, column, validation = {}) =>
@@ -1928,7 +1930,7 @@ const api = {
       column,
       action: 'analyze',
       validation,
-    }, { timeout: 120000 }),
+    }, { timeout: 0 }),
 
   /** Fill blank cells or replace exact user-selected values. */
   fillMissingValues: (sessionId, column, targetMode, selectedValues, strategy, defaultValue = '', validation = {}, sourceColumn = '') =>
@@ -1942,7 +1944,7 @@ const api = {
       default_value: defaultValue,
       source_column: sourceColumn,
       validation,
-    }, { timeout: 120000 }),
+    }, { timeout: 0 }),
 
   /**
    * Group rows under parent/header rows and reshape into item rows.
@@ -1957,7 +1959,7 @@ const api = {
       fill_only_blank: fillOnlyBlank,
       emit,
       preview
-    }, { timeout: 120000 });
+    }, { timeout: 0 });
   },
 
   /**
@@ -1968,7 +1970,7 @@ const api = {
     return axios.post(`${API_URL}/transforms/fill-required-defaults/`, {
       session_id: sessionId,
       defaults
-    }, { timeout: 120000 });
+    }, { timeout: 0 });
   },
 
   /**
@@ -1983,7 +1985,7 @@ const api = {
       dupe_columns: dupeColumns,
       boolean_columns: booleanColumns,
       validators,
-    }, { timeout: 60000 });
+    }, { timeout: 0 });
   },
 
   /**
@@ -1998,7 +2000,7 @@ const api = {
       blank_strategy: blankStrategy,
       duplicate_strategy: duplicateStrategy,
       prefix, separator, start, padding, increment,
-    }, { timeout: 120000 });
+    }, { timeout: 0 });
   },
 
   /**
@@ -2010,7 +2012,7 @@ const api = {
       session_id: sessionId,
       mappings,
       preview
-    }, { timeout: 120000 });
+    }, { timeout: 0 });
   },
 
   /**
@@ -2021,7 +2023,7 @@ const api = {
     const providerScopeId = getProviderCredentialScopeId();
     if (providerScopeId) payload.provider_credential_scope_id = providerScopeId;
     payload.validation_providers = getSelectedValidationProviders();
-    return axios.post(`${API_URL}/mpn/validate-parser-specs/`, payload, { timeout: 300000 });
+    return axios.post(`${API_URL}/mpn/validate-parser-specs/`, payload, { timeout: 0 });
   },
 
   /**
@@ -2034,7 +2036,7 @@ const api = {
     const payload = { session_id: sessionId };
     if (mpnHeader) payload.mpn_header = mpnHeader;
     if (manufacturerHeader) payload.manufacturer_header = manufacturerHeader;
-    return axios.post(`${API_URL}/mpn/restore-from-cache/`, payload, { timeout: 30000 });
+    return axios.post(`${API_URL}/mpn/restore-from-cache/`, payload, { timeout: 0 });
   },
 
   /**
