@@ -11668,18 +11668,24 @@ const EnhancedDataEditor = () => {
                   already decided this per row - it is the same value the
                   MPN Validity column carries - so this reads it rather than
                   re-deriving it, and the popup cannot disagree with the grid. */}
-              <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: `repeat(${Number(mpnSummary.skippedByRule) > 0 ? 4 : 3}, minmax(0, 1fr))` }, gap: 1.25, mb: 2 }}>
+              <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'repeat(3, minmax(0, 1fr))' }, gap: 1.25, mb: 2 }}>
                 {[
                   { key: 'valid', label: 'Valid', value: mpnSummary.breakdown.overall.valid ?? 0, hint: 'at least one source found it', color: t.color.success, bg: t.state.successBg },
                   { key: 'invalid', label: 'Invalid', value: mpnSummary.breakdown.overall.invalid ?? 0, hint: 'every source that answered said no', color: t.color.warningText, bg: t.state.warningBg },
-                  { key: 'unknown', label: 'Unknown', value: mpnSummary.breakdown.overall.unknown ?? 0, hint: 'nobody answered', color: t.text.secondary, bg: t.surface.subtle },
                   // Skipped rows have blank source columns, so they are ALREADY
-                  // inside Unknown. Shown as a subset rather than a fourth
-                  // category, because four numbers that look like they add up
-                  // to the row count and do not is worse than not showing it.
-                  ...(Number(mpnSummary.skippedByRule) > 0
-                    ? [{ key: 'skipped', label: 'Skipped', value: mpnSummary.skippedByRule, hint: 'of those Unknown — excluded by your Settings rule', color: t.text.secondary, bg: t.surface.subtle }]
-                    : []),
+                  // inside this number. Said here rather than as a fourth tile:
+                  // four figures that look like they should add up to the row
+                  // count, and do not, are worse than one sentence.
+                  {
+                    key: 'unknown',
+                    label: 'Unknown',
+                    value: mpnSummary.breakdown.overall.unknown ?? 0,
+                    hint: Number(mpnSummary.skippedByRule) > 0
+                      ? `nobody answered — ${mpnSummary.skippedByRule} of these were excluded by your Settings rule`
+                      : 'nobody answered',
+                    color: t.text.secondary,
+                    bg: t.surface.subtle,
+                  },
                 ].map((tile) => (
                   <Box key={tile.key} sx={{ p: 1.5, borderRadius: '12px', border: `1px solid ${t.border.default}`, bgcolor: tile.bg, minWidth: 0 }}>
                     <Typography sx={{ fontSize: 22, fontWeight: 800, color: tile.color, lineHeight: 1.1 }}>

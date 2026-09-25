@@ -2005,6 +2005,38 @@ const Settings = () => {
                   <Grid item xs={12}>
                     <Paper elevation={0} sx={{ p: 2.25, borderRadius: '14px', border: `1px solid ${t.border.subtle}`, bgcolor: t.surface.panel }}>
                       <Typography sx={{ fontSize: 16, fontWeight: 400, color: t.text.heading }}>
+                        Item name behavior
+                      </Typography>
+                      <Typography sx={{ mt: 0.5, mb: 1.5, fontSize: 12.5, color: t.text.secondary }}>
+                        What fills Item name when the sheet did not.
+                      </Typography>
+                      <FormControlLabel
+                        control={(
+                          <Switch
+                            size="small"
+                            checked={Boolean(itemDirectoryDefaults.mpnAutofillItemName)}
+                            onChange={(event) => handleItemDirectoryDefaultChange('mpnAutofillItemName', event.target.checked)}
+                          />
+                        )}
+                        label={(
+                          <Box>
+                            <Typography sx={{ fontSize: 13.5, fontWeight: 600, color: t.text.heading }}>
+                              Fill a blank Item name from the MPN sources
+                            </Typography>
+                            <Typography sx={{ fontSize: 12, color: t.text.secondary }}>
+                              Runs after MPN validation, and only where Item name is empty — a name
+                              your sheet supplied is never replaced. Takes DigiKey first, then Mouser,
+                              then Element14.
+                            </Typography>
+                          </Box>
+                        )}
+                      />
+                    </Paper>
+                  </Grid>
+
+                  <Grid item xs={12}>
+                    <Paper elevation={0} sx={{ p: 2.25, borderRadius: '14px', border: `1px solid ${t.border.subtle}`, bgcolor: t.surface.panel }}>
+                      <Typography sx={{ fontSize: 16, fontWeight: 400, color: t.text.heading }}>
                         MPN validation rules
                       </Typography>
                       <Typography sx={{ mt: 0.5, mb: 2, fontSize: 12.5, color: t.text.secondary }}>
@@ -2013,28 +2045,6 @@ const Settings = () => {
                         verdict reads Unknown, which is what blank already means.
                       </Typography>
                       <Grid container spacing={1.5}>
-                        <Grid item xs={12}>
-                          <FormControlLabel
-                            control={(
-                              <Switch
-                                size="small"
-                                checked={Boolean(itemDirectoryDefaults.mpnAutofillItemName)}
-                                onChange={(event) => handleItemDirectoryDefaultChange('mpnAutofillItemName', event.target.checked)}
-                              />
-                            )}
-                            label={(
-                              <Box>
-                                <Typography sx={{ fontSize: 13.5, fontWeight: 600, color: t.text.heading }}>
-                                  Fill a blank Item name from the sources
-                                </Typography>
-                                <Typography sx={{ fontSize: 12, color: t.text.secondary }}>
-                                  Only where Item name is empty — a name your sheet supplied is never
-                                  replaced. Takes DigiKey first, then Mouser, then Element14.
-                                </Typography>
-                              </Box>
-                            )}
-                          />
-                        </Grid>
                         <Grid item xs={12} sm={5}>
                           <TextField
                             select
