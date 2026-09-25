@@ -113,6 +113,30 @@ const ITEM_CODE_CONDITION_OPTIONS = [
   { value: 'is_empty', label: 'is empty' },
   { value: 'not_empty', label: 'is not empty' },
 ];
+// Which rows an MPN check is allowed to touch. A provider lookup costs quota
+// and minutes, so a sheet that already marks which lines are worth checking
+// should be able to say so instead of paying for all of them.
+const MPN_VALIDATION_MODE_OPTIONS = [
+  { value: 'always', label: 'Always validate' },
+  { value: 'only_when', label: 'Only validate when...' },
+  { value: 'skip_when', label: "Don't validate when..." },
+];
+// Operator values are the ones editor_defaults.MPN_RULE_OPERATORS accepts -
+// they are the contract between this panel and the server, not labels.
+const MPN_VALIDATION_CONDITION_OPTIONS = [
+  { value: 'contains', label: 'contains' },
+  { value: 'not_contains', label: 'does not contain' },
+  { value: 'equals', label: 'equals' },
+  { value: 'not_equals', label: 'does not equal' },
+  { value: 'is_empty', label: 'is empty' },
+  { value: 'is_not_empty', label: 'is not empty' },
+];
+const MPN_VALIDATION_MATCH_OPTIONS = [
+  { value: 'all', label: 'all conditions (AND)' },
+  { value: 'any', label: 'any condition (OR)' },
+];
+const createMpnValidationCondition = () => ({ column: '', operator: 'contains', value: '' });
+
 const ITEM_CODE_VALUE_SOURCE_OPTIONS = [
   { value: 'default', label: 'Default value' },
   { value: 'column', label: 'Value from a column' },
@@ -871,6 +895,33 @@ const Settings = () => {
       }
       return next;
     });
+  };
+
+  const mpnValidationConditions = React.useMemo(() => {
+    const saved = itemDirectoryDefaults.mpnValidationConditions;
+    return Array.isArray(saved) && saved.length ? saved : [createMpnValidationCondition()];
+  }, [itemDirectoryDefaults.mpnValidationConditions]);
+
+  const updateMpnValidationCondition = (index, changes) => {
+    const next = mpnValidationConditions.map((condition, i) => (
+      i === index ? { ...condition, ...changes } : condition
+    ));
+    handleItemDirectoryDefaultChange('mpnValidationConditions', next);
+  };
+
+  const addMpnValidationCondition = () => {
+    handleItemDirectoryDefaultChange(
+      'mpnValidationConditions',
+      [...mpnValidationConditions, createMpnValidationCondition()],
+    );
+  };
+
+  const removeMpnValidationCondition = (index) => {
+    const next = mpnValidationConditions.filter((_, i) => i !== index);
+    handleItemDirectoryDefaultChange(
+      'mpnValidationConditions',
+      next.length ? next : [createMpnValidationCondition()],
+    );
   };
 
   const handleItemDirectoryDefaultChange = (key, value) => {
@@ -1944,6 +1995,139 @@ const Settings = () => {
                               <Typography variant="caption" sx={{ display: 'block', color: t.text.secondary, mt: -0.5, ml: 3.75 }}>
                                 Always on — Item code must be unique, so every row needs its own number.
                               </Typography>
+                            </Grid>
+                          </>
+                        )}
+                      </Grid>
+                    </Paper>
+                  </Grid>
+
+                  <Grid item xs={12}>
+                    <Paper elevation={0} sx={{ p: 2.25, borderRadius: '14px', border: `1px solid ${t.border.subtle}`, bgcolor: t.surface.panel }}>
+                      <Typography sx={{ fontSize: 16, fontWeight: 400, color: t.text.heading }}>
+                        MPN validation rules
+                      </Typography>
+                      <Typography sx={{ mt: 0.5, mb: 2, fontSize: 12.5, color: t.text.secondary }}>
+                        Which rows are sent to DigiKey, Mouser and Element14. A row left
+                        out is not checked at all — its source columns stay blank and its
+                        verdict reads Unknown, which is what blank already means.
+                      </Typography>
+                      <Grid container spacing={1.5}>
+                        <Grid item xs={12}>
+                          <FormControlLabel
+                            control={(
+                              <Switch
+                                size="small"
+                                checked={Boolean(itemDirectoryDefaults.mpnAutofillItemName)}
+                                onChange={(event) => handleItemDirectoryDefaultChange('mpnAutofillItemName', event.target.checked)}
+                              />
+                            )}
+                            label={(
+                              <Box>
+                                <Typography sx={{ fontSize: 13.5, fontWeight: 600, color: t.text.heading }}>
+                                  Fill a blank Item name from the sources
+                                </Typography>
+                                <Typography sx={{ fontSize: 12, color: t.text.secondary }}>
+                                  Only where Item name is empty — a name your sheet supplied is never
+                                  replaced. Takes DigiKey first, then Mouser, then Element14.
+                                </Typography>
+                              </Box>
+                            )}
+                          />
+                        </Grid>
+                        <Grid item xs={12} sm={5}>
+                          <TextField
+                            select
+                            fullWidth
+                            size="small"
+                            label="When to validate"
+                            value={itemDirectoryDefaults.mpnValidationMode || 'always'}
+                            onChange={(event) => handleItemDirectoryDefaultChange('mpnValidationMode', event.target.value)}
+                            sx={fieldSx}
+                          >
+                            {MPN_VALIDATION_MODE_OPTIONS.map(option => (
+                              <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
+                            ))}
+                          </TextField>
+                        </Grid>
+                        {(itemDirectoryDefaults.mpnValidationMode || 'always') !== 'always' && (
+                          <>
+                            <Grid item xs={12} sm={4}>
+                              <TextField
+                                select
+                                fullWidth
+                                size="small"
+                                label="Match"
+                                value={itemDirectoryDefaults.mpnValidationMatch || 'all'}
+                                onChange={(event) => handleItemDirectoryDefaultChange('mpnValidationMatch', event.target.value)}
+                                sx={fieldSx}
+                              >
+                                {MPN_VALIDATION_MATCH_OPTIONS.map(option => (
+                                  <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
+                                ))}
+                              </TextField>
+                            </Grid>
+                            <Grid item xs={12} />
+                            {mpnValidationConditions.map((condition, conditionIndex) => (
+                              <Grid item xs={12} key={`mpn-condition-${conditionIndex}`}>
+                                <Grid container spacing={1.5} alignItems="center">
+                                  <Grid item xs={12} sm={4}>
+                                    <TextField
+                                      select
+                                      fullWidth
+                                      size="small"
+                                      label={`Condition ${conditionIndex + 1}`}
+                                      value={condition.column || ''}
+                                      onChange={(event) => updateMpnValidationCondition(conditionIndex, { column: event.target.value })}
+                                      sx={fieldSx}
+                                    >
+                                      <MenuItem value="">Source column</MenuItem>
+                                      {itemCodeSourceColumnOptions.map(option => (
+                                        <MenuItem key={option} value={option}>{displayHeaderName(option, itemCodeSourceColumnOptions)}</MenuItem>
+                                      ))}
+                                    </TextField>
+                                  </Grid>
+                                  <Grid item xs={12} sm={3}>
+                                    <TextField
+                                      select
+                                      fullWidth
+                                      size="small"
+                                      label="Condition"
+                                      value={condition.operator || 'contains'}
+                                      onChange={(event) => updateMpnValidationCondition(conditionIndex, { operator: event.target.value })}
+                                      sx={fieldSx}
+                                    >
+                                      {MPN_VALIDATION_CONDITION_OPTIONS.map(option => (
+                                        <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
+                                      ))}
+                                    </TextField>
+                                  </Grid>
+                                  {!['is_empty', 'is_not_empty'].includes(condition.operator || 'contains') && (
+                                    <Grid item xs={12} sm={4}>
+                                      <TextField
+                                        fullWidth
+                                        size="small"
+                                        label="Text"
+                                        value={condition.value || ''}
+                                        onChange={(event) => updateMpnValidationCondition(conditionIndex, { value: event.target.value })}
+                                        sx={fieldSx}
+                                      />
+                                    </Grid>
+                                  )}
+                                  {mpnValidationConditions.length > 1 && (
+                                    <Grid item xs={12} sm={1}>
+                                      <IconButton size="small" onClick={() => removeMpnValidationCondition(conditionIndex)}>
+                                        <DeleteIcon fontSize="small" />
+                                      </IconButton>
+                                    </Grid>
+                                  )}
+                                </Grid>
+                              </Grid>
+                            ))}
+                            <Grid item xs={12}>
+                              <Button size="small" startIcon={<AddIcon />} onClick={addMpnValidationCondition}>
+                                Add another condition
+                              </Button>
                             </Grid>
                           </>
                         )}

@@ -229,6 +229,102 @@ def _join_separator(value):
     return JOIN_DEFAULT_SEPARATOR if value is None else str(value)
 
 
+#: Which rows an MPN check is allowed to touch.
+#:
+#: Three modes, because "check everything" and "check nothing unless" are
+#: different questions and a sheet usually wants one or the other:
+#:
+#:   always     - every row with an MPN, which is what it always did.
+#:   only_when  - check ONLY the rows the conditions match. An allow-list, for
+#:                a sheet where a small marked subset is worth the API calls.
+#:   skip_when  - check every row EXCEPT the ones the conditions match. A
+#:                block-list, for a sheet carrying drawings or obsolete lines
+#:                that would burn a provider quota for nothing.
+#:
+#: Several conditions are joined by `match`: 'all' is AND, 'any' is OR.
+MPN_RULE_MODES = ('always', 'only_when', 'skip_when')
+MPN_RULE_OPERATORS = ('contains', 'not_contains', 'equals', 'not_equals',
+                      'is_empty', 'is_not_empty')
+
+
+def _mpn_condition_matches(value, operator, expected=''):
+    """One condition against one cell. Case- and whitespace-insensitive."""
+    text = str(value or '').strip()
+    wanted = str(expected or '').strip()
+    if operator == 'is_empty':
+        return not text
+    if operator == 'is_not_empty':
+        return bool(text)
+    lowered = text.casefold()
+    wanted_lower = wanted.casefold()
+    if operator == 'equals':
+        return lowered == wanted_lower
+    if operator == 'not_equals':
+        return lowered != wanted_lower
+    if operator == 'contains':
+        return wanted_lower in lowered
+    if operator == 'not_contains':
+        return wanted_lower not in lowered
+    # An operator nobody recognises must not quietly match everything.
+    return False
+
+
+def saved_mpn_validation_rule(settings_obj):
+    """The Settings panel's MPN validation rule, or None when it is 'always'.
+
+    Returns {'mode', 'match', 'conditions': [{'column','operator','value'}]}.
+    A rule with no usable condition is no rule: guessing one would silently
+    stop checking a sheet the user expected to be checked.
+    """
+    ui = (getattr(settings_obj, 'ui_defaults', None) or {}) if settings_obj else {}
+    mode = str(ui.get('mpnValidationMode') or 'always').strip()
+    if mode not in MPN_RULE_MODES or mode == 'always':
+        return None
+
+    match = str(ui.get('mpnValidationMatch') or 'all').strip()
+    if match not in ('all', 'any'):
+        match = 'all'
+
+    conditions = []
+    for raw_condition in (ui.get('mpnValidationConditions') or []):
+        if not isinstance(raw_condition, dict):
+            continue
+        column = str(raw_condition.get('column') or '').strip()
+        operator = str(raw_condition.get('operator') or 'contains').strip()
+        if not column or operator not in MPN_RULE_OPERATORS:
+            continue
+        conditions.append({
+            'column': column,
+            'operator': operator,
+            'value': str(raw_condition.get('value') or ''),
+        })
+    if not conditions:
+        return None
+    return {'mode': mode, 'match': match, 'conditions': conditions}
+
+
+def mpn_rule_allows_row(rule, row_dict):
+    """Whether this row should be sent to the providers.
+
+    True when there is no rule, so every caller can ask unconditionally.
+    A condition naming a column the sheet does not have never matches - the
+    sheet simply cannot answer it - which keeps a rule saved for one customer
+    from silently emptying another customer's check.
+    """
+    if not rule:
+        return True
+    results = []
+    for condition in rule['conditions']:
+        column = condition['column']
+        if column not in (row_dict or {}):
+            results.append(False)
+            continue
+        results.append(_mpn_condition_matches(
+            row_dict.get(column), condition['operator'], condition['value']))
+    matched = all(results) if rule['match'] == 'all' else any(results)
+    return matched if rule['mode'] == 'only_when' else not matched
+
+
 def _saved_item_code_rule(settings_obj):
     """The Settings panel's item code rule, in the modes only the browser ran.
 

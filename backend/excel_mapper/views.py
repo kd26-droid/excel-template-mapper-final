@@ -5634,7 +5634,7 @@ def get_headers(request, session_id):
                 if mpn_validation.get('column') and mpn_validation.get('results'):
 
                     # Add base MPN validation columns
-                    base_validation_columns = ['MPN Validity',  # mirrors mpn_views.CONSOLIDATED_MPN_COLUMN
+                    base_validation_columns = ['MPN Validity', 'Alternate available',  # mirrors mpn_views.CONSOLIDATED_MPN_COLUMN
                                                'MPN valid (DigiKey)', 'DigiKey Status', 'DigiKey EOL Status', 'DigiKey Discontinued', 'DigiKey Part Number', 'DigiKey Category']
                     _add_mpn_validation_columns(template_headers_to_use, base_validation_columns)
 
@@ -5709,7 +5709,7 @@ def get_headers(request, session_id):
             if mpn_validation.get('column') and mpn_validation.get('results'):
 
                 # Add base MPN validation columns
-                base_validation_columns = ['MPN Validity',  # mirrors mpn_views.CONSOLIDATED_MPN_COLUMN
+                base_validation_columns = ['MPN Validity', 'Alternate available',  # mirrors mpn_views.CONSOLIDATED_MPN_COLUMN
                                                'MPN valid (DigiKey)', 'DigiKey Status', 'DigiKey EOL Status', 'DigiKey Discontinued', 'DigiKey Part Number', 'DigiKey Category']
                 _add_mpn_validation_columns(complete_template_headers, base_validation_columns)
 
@@ -6916,7 +6916,7 @@ def data_view(request):
                             max_canonical_mpns = min(len(all_canonicals), 5)  # Cap at 5 columns
 
                 # Add base MPN validation columns to headers if not present
-                base_validation_columns = ['MPN Validity',  # mirrors mpn_views.CONSOLIDATED_MPN_COLUMN
+                base_validation_columns = ['MPN Validity', 'Alternate available',  # mirrors mpn_views.CONSOLIDATED_MPN_COLUMN
                                                'MPN valid (DigiKey)', 'DigiKey Status', 'DigiKey EOL Status', 'DigiKey Discontinued', 'DigiKey Part Number', 'DigiKey Category']
                 _add_mpn_validation_columns(headers_to_use, base_validation_columns)
 
@@ -9523,7 +9523,7 @@ def download_file(request, session_id=None):
                                 max_canonical_mpns = min(len(all_canonicals), 5)  # Cap at 5 columns
 
                     # Add base MPN validation columns to base headers if not present
-                    base_validation_columns = ['MPN Validity',  # mirrors mpn_views.CONSOLIDATED_MPN_COLUMN
+                    base_validation_columns = ['MPN Validity', 'Alternate available',  # mirrors mpn_views.CONSOLIDATED_MPN_COLUMN
                                                'MPN valid (DigiKey)', 'DigiKey Status', 'DigiKey EOL Status', 'DigiKey Discontinued', 'DigiKey Part Number', 'DigiKey Category']
                     _add_mpn_validation_columns(base_headers, base_validation_columns)
 
@@ -9670,7 +9670,7 @@ def download_file(request, session_id=None):
                             max_canonical_mpns = min(len(all_canonicals), 5)  # Cap at 5 columns
 
                     # Add base MPN validation columns
-                    base_validation_columns = ['MPN Validity',  # mirrors mpn_views.CONSOLIDATED_MPN_COLUMN
+                    base_validation_columns = ['MPN Validity', 'Alternate available',  # mirrors mpn_views.CONSOLIDATED_MPN_COLUMN
                                                'MPN valid (DigiKey)', 'DigiKey Status', 'DigiKey EOL Status', 'DigiKey Discontinued', 'DigiKey Part Number', 'DigiKey Category']
                     _add_mpn_validation_columns(all_headers, base_validation_columns)
 

@@ -141,6 +141,11 @@ class Element14Client:
             'canonical_mpn': canonical if valid else None,
             'all_canonical_mpns': candidates if valid else [],
             'element14_part_number': first.get('sku') or first.get('id'),
+            # Taken as the API gives it. Element14 writes the whole title -
+            # "KYOCERA AVX - 06035A221JAT2A - SMD Multilayer Ceramic Capacitor"
+            # - so it reads longer than the other two, manufacturer and part
+            # number included.
+            'description': str(first.get('displayName') or '').strip(),
             'lifecycle': {
                 'status': first.get('productStatus') or 'Unknown',
                 'endOfLife': None,

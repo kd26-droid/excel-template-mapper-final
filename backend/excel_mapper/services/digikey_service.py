@@ -630,6 +630,19 @@ class DigiKeyClient:
                     'lastBuyChance': matched_product.get('DateLastBuyChance'),
                 } if matched_product else None
 
+                # The short one. `DetailedDescription` is a paragraph of
+                # supplier copy; `ProductDescription` is the line a person would
+                # recognise - "CAP CER 220PF 50V X7R 0603" - which is what an
+                # item name wants.
+                product_description = ''
+                if matched_product:
+                    description_block = matched_product.get('Description') or {}
+                    if isinstance(description_block, dict):
+                        product_description = str(
+                            description_block.get('ProductDescription') or '').strip()
+                    elif isinstance(description_block, str):
+                        product_description = description_block.strip()
+
                 if valid:
                     res = {
                         'valid': True,
@@ -638,6 +651,7 @@ class DigiKeyClient:
                         'dkpn': dkpn,
                         'lifecycle': lifecycle,
                         'category': category_info,
+                        'description': product_description,
                         'site': self.site,
                         'lang': self.lang,
                         'currency': self.currency,

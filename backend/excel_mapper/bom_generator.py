@@ -60,6 +60,14 @@ BOM_BASE_COLUMNS = [
     'BOM currency',
     'Level',
     'Raw material code',
+    # The customer's own number for that raw material, beside the item code the
+    # export references it by. The two are different strings on every sheet
+    # whose item codes are generated - THALES lines read
+    # "71256L35DB_RENESAS" while the customer calls it A1002703 - so a reader
+    # checking the BOM against the source had nothing in common to match on.
+    # FactWise reads these columns by header name and knows no field called
+    # this, so it is carried for the reader and ignored by the importer.
+    'Raw material CPN',
     'Sub BOM ID',
     'Description',
     'Cost per unit',
@@ -664,6 +672,13 @@ def generate_multi_level_bom(tree, bom_header, alternates_of=None, records=None,
             else:
                 # A leaf is a part, so this cell references the item.
                 row['Raw material code'] = child_code
+            # Read from the source record rather than from the tree code: the
+            # tree is keyed on whichever column identified a row, which is the
+            # CPN on most sheets but falls back to Item code or MPN when a sheet
+            # has no CPN column - and on those the tree code is not a CPN at
+            # all. Blank when the sheet never supplied one, which is honest.
+            source_record = child.get('source') or {}
+            row['Raw material CPN'] = _text(source_record.get(F_CPN))
             row['Description'] = child.get('description', '')
             row['Quantity'] = child.get('quantity', '')
             row['Measurement unit'] = child.get('uom', '')

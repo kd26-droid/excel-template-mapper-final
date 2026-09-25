@@ -46,6 +46,62 @@ PROVIDER_VALID_COLUMNS = (
 )
 
 
+#: One Yes/No for "is there another part number we could buy instead".
+#:
+#: A canonical MPN is a source's own number for the part. Any source returning
+#: one means something is listed and orderable under a number we know, so one
+#: is enough - the point is whether an alternative exists at all, not how many.
+ALTERNATE_AVAILABLE_COLUMN = 'Alternate available'
+
+
+def _canonical_mpn_columns(headers):
+    """Every canonical column, including DigiKey's numbered extras.
+
+    DigiKey can return several matches and gets 'DigiKey Canonical MPN 2', '3'
+    and so on, so a fixed tuple would read the first and miss the rest.
+    """
+    return [column for column in (headers or [])
+            if isinstance(column, str) and 'canonical mpn' in column.lower()]
+
+
+def apply_alternate_available_column(headers, rows):
+    """Write Yes/No per row, adding the column when it is missing.
+
+    Called from the same places as the verdict column, for the same reason: a
+    column that only one write path fills is a column that is present and empty
+    on every other path, and empty is indistinguishable from No.
+    """
+    if not isinstance(headers, list) or not isinstance(rows, list):
+        return 0
+    canonical_columns = _canonical_mpn_columns(headers)
+    if not canonical_columns:
+        return 0
+
+    if ALTERNATE_AVAILABLE_COLUMN not in headers:
+        # Beside the verdict it sits next to in meaning, when that exists.
+        if CONSOLIDATED_MPN_COLUMN in headers:
+            insert_at = headers.index(CONSOLIDATED_MPN_COLUMN) + 1
+        else:
+            insert_at = min(headers.index(c) for c in canonical_columns)
+        headers.insert(insert_at, ALTERNATE_AVAILABLE_COLUMN)
+        for row in rows:
+            if isinstance(row, list) and len(row) > insert_at:
+                row.insert(insert_at, '')
+
+    target = headers.index(ALTERNATE_AVAILABLE_COLUMN)
+    sources = [headers.index(c) for c in canonical_columns]
+    written = 0
+    for row in rows:
+        if not isinstance(row, list):
+            continue
+        while len(row) < len(headers):
+            row.append('')
+        row[target] = 'Yes' if any(
+            str(row[index] or '').strip() for index in sources) else 'No'
+        written += 1
+    return written
+
+
 def apply_consolidated_mpn_column(headers, rows):
     """Write the one-column verdict, adding the column when it is missing.
 
@@ -1169,6 +1225,7 @@ def mpn_parse_producer_column(request):
         # Same verdict on this path. Values reaching the grid from the cache are
         # values a person will read.
         apply_consolidated_mpn_column(headers, rows)
+        apply_alternate_available_column(headers, rows)
 
         enhanced_result = {
             'headers': headers,
@@ -1578,9 +1635,39 @@ def mpn_validate_warm(request):
 
         selected_providers = _selected_validation_providers(request)
         client = _digikey_client_for_request(request) if 'digikey' in selected_providers else DigiKeyClient(allow_env_fallback=False)
+        # The entity's MPN rule. This loop decides what is sent to the
+        # providers, so the rule has to be applied HERE - applying it only
+        # where results are written would skip the columns while still paying
+        # for every lookup, which is the whole cost the rule exists to avoid.
+        from .editor_defaults import (get_editor_defaults_for_entity,
+                                      saved_mpn_validation_rule,
+                                      mpn_rule_allows_row)
+        warm_rule = None
+        try:
+            warm_entity = (
+                str(request.data.get('entity_name') or '').strip()
+                or str(request.headers.get('X-Entity-Name') or '').strip()
+                or str((info or {}).get('editor_defaults_entity_name') or '').strip()
+                or str((info or {}).get('entity_name') or '').strip()
+            )
+            warm_rule = saved_mpn_validation_rule(
+                get_editor_defaults_for_entity(warm_entity))
+        except Exception as rule_error:
+            # Unreadable rule means check everything, which is how it behaved
+            # before the rule existed.
+            logger.warning("MPN validation rule ignored (warm): %s", rule_error)
+            warm_rule = None
+
         unique = []
         seen = set()
+        skipped_by_rule = 0
         for row in rows:
+            if warm_rule is not None:
+                row_dict = {h: (row[i] if i < len(row) else '')
+                            for i, h in enumerate(headers)}
+                if not mpn_rule_allows_row(warm_rule, row_dict):
+                    skipped_by_rule += 1
+                    continue
             raw = row[mi] if mi < len(row) else ''
             norm = client.normalize_mpn(raw)
             if not norm or norm in seen:
@@ -1776,6 +1863,10 @@ def mpn_validate_warm(request):
             'total': total,
             'validated': min(next_offset, total),
             'done': done,
+            # Rows the Settings rule excluded before any provider was asked, so
+            # "fewer checks than rows" is explainable rather than looking like
+            # the run quietly missed some.
+            'skipped_by_rule': skipped_by_rule,
             'timings_ms': timings_ms,
             'validation_providers': sorted(selected_providers),
             # Empty on a healthy run. A populated list means those providers were
@@ -1876,6 +1967,28 @@ def mpn_validate(request):
         if manufacturer_header and manufacturer_header not in headers:
             manufacturer_header = None
 
+        # The entity's MPN rule, resolved once. A provider call costs quota and
+        # minutes, so a sheet that marks which lines are worth checking should
+        # be able to say so rather than paying for all of them.
+        from .editor_defaults import (get_editor_defaults_for_entity,
+                                      saved_mpn_validation_rule,
+                                      mpn_rule_allows_row)
+        mpn_rule = None
+        try:
+            entity_name = (
+                str(request.data.get('entity_name') or '').strip()
+                or str(request.headers.get('X-Entity-Name') or '').strip()
+                or str((info or {}).get('editor_defaults_entity_name') or '').strip()
+                or str((info or {}).get('entity_name') or '').strip()
+            )
+            mpn_rule = saved_mpn_validation_rule(
+                get_editor_defaults_for_entity(entity_name))
+        except Exception as rule_error:
+            # A rule that cannot be read must not stop the check: falling back
+            # to "validate everything" is the behaviour from before it existed.
+            logger.warning("MPN validation rule ignored: %s", rule_error)
+            mpn_rule = None
+
         # Convert to dict rows for easier handling
         dict_rows = []
         for row in rows:
@@ -1890,7 +2003,15 @@ def mpn_validate(request):
         mfrs: List[Optional[str]] = []
         seen_norm = set()
         skipped_empty = 0
+        skipped_by_rule = 0
         for d in dict_rows:
+            # Checked before the MPN is read: a row the rule excludes is not a
+            # row we looked at and found nothing on, it is a row nobody asked
+            # about. Its provider columns stay blank and the verdict reads
+            # Unknown, which is what blank already means.
+            if not mpn_rule_allows_row(mpn_rule, d):
+                skipped_by_rule += 1
+                continue
             raw = d.get(mpn_header, '')
             norm = client.normalize_mpn(raw)
             if not norm:
@@ -2216,7 +2337,88 @@ def mpn_validate(request):
                         if element14_cat_idx is not None:
                             rows[i][element14_cat_idx] = ''
 
+        # Fill a blank Item name from whichever source described the part.
+        #
+        # Only where it is blank: a name the sheet supplied is the customer's
+        # own words for their own part, and a distributor's catalogue line is
+        # not an improvement on it. Off unless the entity turned it on, because
+        # supplier copy appearing in item names without anyone asking is worse
+        # than an empty column.
+        #
+        # DigiKey, then Mouser, then Element14 - the order the user asked for,
+        # and also shortest-first: Element14 returns the whole title with the
+        # manufacturer and part number in it, so it is the least name-like.
+        names_filled = 0
+        try:
+            autofill_on = False
+            settings_obj = None
+            try:
+                entity_for_names = (
+                    str(request.data.get('entity_name') or '').strip()
+                    or str(request.headers.get('X-Entity-Name') or '').strip()
+                    or str((info or {}).get('editor_defaults_entity_name') or '').strip()
+                    or str((info or {}).get('entity_name') or '').strip()
+                )
+                from .editor_defaults import get_editor_defaults_for_entity
+                settings_obj = get_editor_defaults_for_entity(entity_for_names)
+                autofill_on = bool(
+                    ((getattr(settings_obj, 'ui_defaults', None) or {})
+                     .get('mpnAutofillItemName')))
+            except Exception as settings_error:
+                logger.warning("Item name autofill setting unread: %s", settings_error)
+
+            if autofill_on and 'Item name' in headers:
+                name_idx = headers.index('Item name')
+                for i, d in enumerate(dict_rows):
+                    if i >= len(rows) or not isinstance(rows[i], list):
+                        continue
+                    while len(rows[i]) < len(headers):
+                        rows[i].append('')
+                    if str(rows[i][name_idx] or '').strip():
+                        continue
+                    raw_mpn = d.get(mpn_header, '')
+                    if not str(raw_mpn or '').strip():
+                        continue
+                    candidates = [
+                        (results_map or {}).get(client.normalize_mpn(raw_mpn)) or {},
+                        (mouser_results_map or {}).get(
+                            mouser_client.normalize_mpn(raw_mpn)) or {},
+                        (element14_results_map or {}).get(
+                            element14_client.normalize_mpn(raw_mpn)) or {},
+                    ]
+                    for candidate in candidates:
+                        description = str(candidate.get('description') or '').strip()
+                        if description:
+                            rows[i][name_idx] = description
+                            names_filled += 1
+                            break
+        except Exception as autofill_error:
+            # A failed autofill must never lose a validation run.
+            logger.warning("Item name autofill skipped: %s", autofill_error)
+
         apply_consolidated_mpn_column(headers, rows)
+        apply_alternate_available_column(headers, rows)
+
+        # The same verdict the grid shows, counted for the completion summary.
+        # Read back from the column rather than recomputed, so the popup can
+        # never disagree with the sheet it is describing.
+        #
+        # `valid` / `invalid` below are per PROVIDER LOOKUP, not per row: a part
+        # found at Mouser and nowhere else counts once valid and twice invalid,
+        # which reads as mostly-bad when it is a part you can buy. These are per
+        # row, and one source confirming it is enough.
+        consolidated_counts = {'Valid': 0, 'Invalid': 0, 'Unknown': 0}
+        try:
+            if CONSOLIDATED_MPN_COLUMN in headers:
+                verdict_at = headers.index(CONSOLIDATED_MPN_COLUMN)
+                for verdict_row in rows:
+                    if not isinstance(verdict_row, list) or verdict_at >= len(verdict_row):
+                        continue
+                    verdict = str(verdict_row[verdict_at] or '').strip() or 'Unknown'
+                    if verdict in consolidated_counts:
+                        consolidated_counts[verdict] += 1
+        except Exception as summary_error:
+            logger.warning("Consolidated MPN summary skipped: %s", summary_error)
 
         # Update the session with enhanced data
         enhanced_result = {
@@ -2281,6 +2483,18 @@ def mpn_validate(request):
         return Response({
             'success': True,
             'mpn_header': mpn_header,
+            # Per ROW, across all three sources — see the note where these are
+            # counted. This is the number to show a person.
+            'consolidated_valid': consolidated_counts['Valid'],
+            'consolidated_invalid': consolidated_counts['Invalid'],
+            'consolidated_unknown': consolidated_counts['Unknown'],
+            # Rows the Settings rule excluded, so fewer checks than rows is
+            # explainable rather than alarming.
+            'skipped_by_rule': skipped_by_rule,
+            'skipped_empty': skipped_empty,
+            # Blank item names filled from a source, so the change is reported
+            # rather than just appearing in the grid.
+            'names_filled': names_filled,
             'total_unique': total_unique,
             'cache_hits': cache_hits,
             'api_calls': api_calls,

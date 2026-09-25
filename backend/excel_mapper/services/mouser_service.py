@@ -127,6 +127,8 @@ class MouserClient:
                 'canonical_mpn': first_part.get('ManufacturerPartNumber'),
                 'all_canonical_mpns': all_mpns,
                 'mouser_part_number': first_part.get('MouserPartNumber'),
+                # Mouser's own one-line description of the part.
+                'description': str(first_part.get('Description') or '').strip(),
                 'lifecycle': {
                     'status': first_part.get('LifecycleStatus') or 'Unknown',
                     'endOfLife': None,  # Mouser doesn't provide this

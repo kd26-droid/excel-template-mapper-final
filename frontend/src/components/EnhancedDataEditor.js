@@ -7908,6 +7908,12 @@ const EnhancedDataEditor = () => {
                       let total = 0;
                       let shown = false;
                       let validatedCount = 0;
+                      // Rows the Settings MPN rule excluded. Reported by the
+                      // warm endpoint, which is where the decision is made.
+                      let skippedByRule = 0;
+                      // Blank item names filled from a source, when the entity
+                      // turned that on. Reported so it is not a silent edit.
+                      let namesFilled = 0;
                       // Providers that could not be reached. Their columns come back
                       // blank, which must not be read as "no match".
                       const providerFailures = new Map();
@@ -7928,6 +7934,8 @@ const EnhancedDataEditor = () => {
                           if (f && f.provider) providerFailures.set(f.provider, f);
                         });
                         validatedCount = Math.min(d.validated || 0, total);
+                        skippedByRule = Number(d.skipped_by_rule) || skippedByRule;
+                        namesFilled = Number(d.names_filled) || namesFilled;
                         setMpnProgress({ done: validatedCount, total });
                         // Build + render the grid from the cache so far (live fill-in).
                         try {
@@ -7961,6 +7969,11 @@ const EnhancedDataEditor = () => {
                         total,
                         failed: Math.max(0, total - validatedCount),
                         breakdown,
+                        // Rows the Settings rule excluded. Reported so a smaller
+                        // number of checks than rows is explainable rather than
+                        // looking like the run quietly missed some.
+                        skippedByRule: skippedByRule,
+                        namesFilled: namesFilled,
                         providerFailures: Array.from(providerFailures.values()),
                       });
                       setMpnSummaryOpen(true);
@@ -11639,6 +11652,54 @@ const EnhancedDataEditor = () => {
                   {' '}columns for it do not mean the part is invalid.
                 </Alert>
               ))}
+            </>
+          )}
+
+          {mpnSummary?.breakdown?.overall && (
+            <>
+              <Divider sx={{ my: 2 }} />
+              <Typography variant="subtitle2" sx={{ mb: 1, fontSize: 13.5, fontWeight: 650, color: t.text.heading }}>
+                Overall — {mpnSummary.breakdown.total_rows} rows
+              </Typography>
+              {/* One verdict per ROW, which is not what the per-source cards
+                  below add up to. A part stocked only by Mouser is one valid
+                  row and two "not found"s; read source by source it looks
+                  mostly bad, when it is a part you can buy today. The server
+                  already decided this per row - it is the same value the
+                  MPN Validity column carries - so this reads it rather than
+                  re-deriving it, and the popup cannot disagree with the grid. */}
+              <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: `repeat(${Number(mpnSummary.skippedByRule) > 0 ? 4 : 3}, minmax(0, 1fr))` }, gap: 1.25, mb: 2 }}>
+                {[
+                  { key: 'valid', label: 'Valid', value: mpnSummary.breakdown.overall.valid ?? 0, hint: 'at least one source found it', color: t.color.success, bg: t.state.successBg },
+                  { key: 'invalid', label: 'Invalid', value: mpnSummary.breakdown.overall.invalid ?? 0, hint: 'every source that answered said no', color: t.color.warningText, bg: t.state.warningBg },
+                  { key: 'unknown', label: 'Unknown', value: mpnSummary.breakdown.overall.unknown ?? 0, hint: 'nobody answered', color: t.text.secondary, bg: t.surface.subtle },
+                  // Skipped rows have blank source columns, so they are ALREADY
+                  // inside Unknown. Shown as a subset rather than a fourth
+                  // category, because four numbers that look like they add up
+                  // to the row count and do not is worse than not showing it.
+                  ...(Number(mpnSummary.skippedByRule) > 0
+                    ? [{ key: 'skipped', label: 'Skipped', value: mpnSummary.skippedByRule, hint: 'of those Unknown — excluded by your Settings rule', color: t.text.secondary, bg: t.surface.subtle }]
+                    : []),
+                ].map((tile) => (
+                  <Box key={tile.key} sx={{ p: 1.5, borderRadius: '12px', border: `1px solid ${t.border.default}`, bgcolor: tile.bg, minWidth: 0 }}>
+                    <Typography sx={{ fontSize: 22, fontWeight: 800, color: tile.color, lineHeight: 1.1 }}>
+                      {tile.value}
+                    </Typography>
+                    <Typography sx={{ fontSize: 13, fontWeight: 700, color: t.text.heading }}>
+                      {tile.label}
+                    </Typography>
+                    <Typography sx={{ fontSize: 11.5, color: t.text.secondary }}>
+                      {tile.hint}
+                    </Typography>
+                  </Box>
+                ))}
+              </Box>
+              {Number(mpnSummary.namesFilled) > 0 && (
+                <Typography sx={{ mb: 2, fontSize: 12.5, color: t.text.secondary }}>
+                  {mpnSummary.namesFilled} blank Item name{Number(mpnSummary.namesFilled) === 1 ? ' was' : 's were'} filled
+                  from the sources. Names your sheet already had were left alone.
+                </Typography>
+              )}
             </>
           )}
 
