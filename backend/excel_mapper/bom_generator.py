@@ -903,18 +903,30 @@ def _record_identity(record):
 # duplicate group - leaving the assembly listing the same child twice, which
 # the import rejects. Two rows with one item code are one item; if their text
 # disagrees that is a data inconsistency, not two different parts.
-_RECORD_IDENTITY_SKIP = {
-    F_LEVEL, F_QUANTITY, F_SOURCE_ROW,
-    F_PARENT_KEY, 'parent',
-    F_DESCRIPTION, 'Notes', 'Internal notes',
-    '__grid_row__',
-    'rule', 'confidence', 'discardedText',
-}
+#: What has to agree before two rows with one item code are one part.
+#:
+#: An ALLOW-list, not a skip-list, and that is the whole point. A record carries
+#: every raw column of the customer's sheet alongside the fields we mapped, and
+#: comparing all of them meant the ERP's own bookkeeping decided what a part is.
+#: SAP numbers each exported line in `Nbr` - 1, 2, 3 down the file, 1,307
+#: distinct values in 1,307 rows - so two copies of one screw could never match,
+#: no duplicate group ever formed, the aggregate policy never fired, and a
+#: 1,306-line BOM was blocked by 290 "listed twice" rows nobody could act on:
+#: `Nbr` is not a column the editor shows, so there was nothing on screen to fix.
+#:
+#: Naming the offenders instead would have fixed that one sheet. THALES brings
+#: `Repere Topo`, `IR`, `Amdt`; Honeywell brings `Reference Designator`,
+#: `Pack Count`, `Legacy Part ID`. The list is never finished, so the question is
+#: inverted: compare what the app owns and the user can see, and nothing else.
+#:
+#: Level, quantity and parent stay out - they are what the duplicate policy
+#: negotiates - and so does free text, for the reason above.
+_RECORD_SIGNATURE_FIELDS = (F_CPN, F_MPN, 'manufacturer', 'uom')
 
 
 def _record_signature(record):
-    keys = sorted(k for k in record.keys() if k not in _RECORD_IDENTITY_SKIP)
-    return tuple((k, str(record.get(k) or '').strip()) for k in keys)
+    return tuple((key, str(record.get(key) or '').strip())
+                 for key in _RECORD_SIGNATURE_FIELDS)
 
 
 def find_records_duplicate_groups(records):

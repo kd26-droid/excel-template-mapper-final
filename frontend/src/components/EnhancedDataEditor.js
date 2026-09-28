@@ -8197,7 +8197,17 @@ const EnhancedDataEditor = () => {
               headers={(columnDefs || []).map(c => c.headerName || c.field)}
               rows={(rowData || []).map(r => (columnDefs || []).map(c => r?.[c.field]))}
             />
-            <BomDuplicatePolicyBanner sessionId={sessionId} refreshKey={totalRows} />
+            {/* Both, because either alone goes stale. The row COUNT misses every
+                edit that changes values without adding or removing a row - fill a
+                column, remove characters, resolve a conflict - and the banner then
+                kept describing the sheet as it was before the tool ran, with no
+                sign it was out of date; the only way back was reloading the page.
+                `sessionVersion` mirrors the session's template_version, which the
+                backend bumps on every write, so a value-only edit refreshes too. */}
+            <BomDuplicatePolicyBanner
+              sessionId={sessionId}
+              refreshKey={`${totalRows}:${sessionVersion}`}
+            />
             {dupHighlight && (
               <Alert
                 severity="warning"
