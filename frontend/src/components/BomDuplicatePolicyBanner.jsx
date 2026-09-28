@@ -7,6 +7,8 @@ import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
 import WarningAmberOutlinedIcon from '@mui/icons-material/WarningAmberOutlined';
 import api from '../services/api';
 import BomDuplicatePolicyDialog from './BomDuplicatePolicyDialog';
+import { useThemeContext } from '../utils/ThemeContext';
+import { buildFactWisePageTokens, factWiseCancelButtonSx } from '../utils/factwisePageStyles';
 
 const DEFAULT_POLICY = 'aggregate_per_level';
 
@@ -65,6 +67,9 @@ const shortLabel = (value) => (
  *   refreshKey (optional) — bump to force re-detect (e.g., after grid edits).
  */
 const BomDuplicatePolicyBanner = ({ sessionId, refreshKey }) => {
+  const { isDarkMode, tokens: themeTokens } = useThemeContext();
+  const fwTokens = buildFactWisePageTokens(isDarkMode, themeTokens);
+  const cancelButtonSx = factWiseCancelButtonSx(fwTokens);
   const [groups, setGroups] = useState([]);
   const [policy, setPolicy] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -301,7 +306,7 @@ const BomDuplicatePolicyBanner = ({ sessionId, refreshKey }) => {
       </Alert>
       <Dialog open={reviewOpen} onClose={() => setReviewOpen(false)} maxWidth="sm" fullWidth>
         <DialogTitle sx={{ pb: 0.5 }}>
-          <Typography variant="h6" sx={{ fontWeight: 800 }}>
+          <Typography variant="h6" sx={{ fontWeight: 600 }}>
             One item code, two different parts
           </Typography>
           <Typography variant="body2" color="text.secondary">
@@ -316,7 +321,7 @@ const BomDuplicatePolicyBanner = ({ sessionId, refreshKey }) => {
           <Stack gap={1.5}>
             {conflicts.map((conflict) => (
               <Box key={conflict.code}>
-                <Typography variant="body2" sx={{ fontWeight: 700 }}>
+                <Typography variant="body2" sx={{ fontWeight: 600 }}>
                   {conflict.code}
                   <Box component="span" sx={{ fontWeight: 400, opacity: 0.7 }}>
                     {` — ${conflict.rows} rows`}
@@ -348,7 +353,7 @@ const BomDuplicatePolicyBanner = ({ sessionId, refreshKey }) => {
                             variant={chosen ? 'filled' : 'outlined'}
                             onClick={() => toggleValue(conflict.code, field.column, v)}
                             label={v === '' ? '(blank)' : v}
-                            sx={{ fontFamily: 'monospace' }}
+                            sx={{ fontFamily: 'var(--fw-font-stack)' }}
                           />
                         );
                       })}
@@ -395,7 +400,7 @@ const BomDuplicatePolicyBanner = ({ sessionId, refreshKey }) => {
                           />
                           <Typography
                             variant="caption"
-                            sx={{ fontFamily: 'monospace', fontWeight: 700, ml: 0.5 }}
+                            sx={{ fontFamily: 'var(--fw-font-stack)', fontWeight: 600, ml: 0.5 }}
                           >
                             {joinSelected(
                               field.values,
@@ -428,7 +433,11 @@ const BomDuplicatePolicyBanner = ({ sessionId, refreshKey }) => {
                 : `${pendingWrites().length} field${pendingWrites().length === 1 ? '' : 's'} will be written.`}
             </Typography>
           )}
-          <Button onClick={() => setReviewOpen(false)} disabled={Boolean(applying)}>
+          <Button
+            onClick={() => setReviewOpen(false)}
+            disabled={Boolean(applying)}
+            sx={cancelButtonSx}
+          >
             Cancel
           </Button>
           <Button

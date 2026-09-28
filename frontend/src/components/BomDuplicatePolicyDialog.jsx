@@ -16,6 +16,8 @@ import {
   Typography,
 } from '@mui/material';
 import api from '../services/api';
+import { useThemeContext } from '../utils/ThemeContext';
+import { buildFactWisePageTokens, factWiseCancelButtonSx } from '../utils/factwisePageStyles';
 
 // The two policy values this dialog can store. The backend still understands
 // three older modes (target-level picks and across-level merges); nothing here
@@ -109,6 +111,9 @@ const quantityKey = (signatureId, level) => `${signatureId}::${level}`;
  *   onApplied      () => void      — policy stored on session; caller resumes its export
  */
 const BomDuplicatePolicyDialog = ({ open, sessionId, onClose, onApplied }) => {
+  const { isDarkMode, tokens: themeTokens } = useThemeContext();
+  const fwTokens = buildFactWisePageTokens(isDarkMode, themeTokens);
+  const cancelButtonSx = factWiseCancelButtonSx(fwTokens);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
@@ -275,7 +280,7 @@ const BomDuplicatePolicyDialog = ({ open, sessionId, onClose, onApplied }) => {
                   sx={{ py: 1, borderBottom: '1px dashed', borderColor: 'divider', '&:last-child': { borderBottom: 'none' } }}
                 >
                   <Stack direction="row" alignItems="center" gap={1} flexWrap="wrap">
-                    <Typography variant="body2" sx={{ fontFamily: 'monospace', fontWeight: 600 }}>
+                    <Typography variant="body2" sx={{ fontFamily: 'var(--fw-font-stack)', fontWeight: 600 }}>
                       {group.raw_material_code || '(no code)'}
                     </Typography>
                     <Chip
@@ -315,7 +320,7 @@ const BomDuplicatePolicyDialog = ({ open, sessionId, onClose, onApplied }) => {
                               size="small"
                               variant="outlined"
                               label={`qty ${occurrence.quantity || '?'}`}
-                              sx={{ fontFamily: 'monospace', fontSize: 11 }}
+                              sx={{ fontFamily: 'var(--fw-font-stack)', fontSize: 11 }}
                             />
                           ))}
                         </Stack>
@@ -328,7 +333,7 @@ const BomDuplicatePolicyDialog = ({ open, sessionId, onClose, onApplied }) => {
                           onChange={(e) => setQuantity(key, e.target.value)}
                           error={invalid}
                           helperText={invalid ? 'Must be a number' : undefined}
-                          inputProps={{ inputMode: 'decimal', style: { fontFamily: 'monospace', width: 92 } }}
+                          inputProps={{ inputMode: 'decimal', style: { fontFamily: 'var(--fw-font-stack)', width: 92 } }}
                         />
                       </Stack>
                     );
@@ -346,7 +351,7 @@ const BomDuplicatePolicyDialog = ({ open, sessionId, onClose, onApplied }) => {
         )}
       </DialogContent>
       <DialogActions>
-        <Button onClick={handleClose} disabled={saving}>Cancel</Button>
+        <Button onClick={handleClose} disabled={saving} sx={cancelButtonSx}>Cancel</Button>
         <Button
           variant="contained"
           onClick={visibleGroups.length === 0 ? onApplied : handleApply}

@@ -187,7 +187,7 @@ function PaneCell({ side, row }) {
       {/* Type badge — sub-BOM triangle vs raw material dot, keeps them
           distinguishable without a whole extra column. */}
       <Typography sx={{
-        fontSize: 10, color: palette.text, fontWeight: 700,
+        fontSize: 10, color: palette.text, fontWeight: 600,
         minWidth: 14, textAlign: 'center',
       }}>
         {isSubBom ? '▸' : '•'}
@@ -196,7 +196,7 @@ function PaneCell({ side, row }) {
       {/* Code (mono, prominent) + name (secondary). Same layout FW uses. */}
       <Box sx={{ flex: 1, minWidth: 0 }}>
         <Typography sx={{
-          fontSize: 13, fontFamily: 'monospace', fontWeight: 600,
+          fontSize: 13, fontFamily: 'var(--fw-font-stack)', fontWeight: 600,
           color: palette.text || 'text.primary',
           whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
         }}>
@@ -221,7 +221,7 @@ function PaneCell({ side, row }) {
             <Stack direction="row" spacing={0.5} alignItems="center" justifyContent="flex-end">
               <Typography sx={{
                 fontSize: 12,
-                fontWeight: 700,
+                fontWeight: 600,
                 color: side === 'left' ? PALETTE.deleted.text : PALETTE.added.text,
               }}>
                 qty {qty}
@@ -230,7 +230,7 @@ function PaneCell({ side, row }) {
                 size="small"
                 label={side === 'left' ? 'OLD' : 'NEW'}
                 sx={{
-                  height: 16, fontSize: 9, fontWeight: 700,
+                  height: 16, fontSize: 9, fontWeight: 600,
                   bgcolor: side === 'left' ? PALETTE.deleted.border : PALETTE.added.border,
                   color: 'white',
                 }}
@@ -250,7 +250,7 @@ function PaneCell({ side, row }) {
           size="small"
           label={palette.label}
           sx={{
-            height: 20, fontSize: 10, fontWeight: 700,
+            height: 20, fontSize: 10, fontWeight: 600,
             bgcolor: palette.border,
             color: 'white',
             letterSpacing: 0.5,
@@ -361,7 +361,7 @@ export default function FactwiseRevisionDiffDialog({
     >
       <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', pb: 1 }}>
         <Box>
-          <Typography variant="h6" sx={{ fontWeight: 700 }}>
+          <Typography variant="h6" sx={{ fontWeight: 600 }}>
             Review revision {reviseBomCode ? `— ${reviseBomCode}` : ''}
           </Typography>
           <Typography variant="caption" sx={{ color: 'text.secondary' }}>
@@ -424,7 +424,7 @@ export default function FactwiseRevisionDiffDialog({
                   <Typography sx={{ fontSize: 11, color: 'text.secondary', fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.5 }}>
                     {tile.label}
                   </Typography>
-                  <Typography sx={{ fontSize: 28, fontWeight: 700, color: tile.color, lineHeight: 1.2 }}>
+                  <Typography sx={{ fontSize: 28, fontWeight: 600, color: tile.color, lineHeight: 1.2 }}>
                     {tile.value}
                   </Typography>
                 </Box>
@@ -465,7 +465,7 @@ export default function FactwiseRevisionDiffDialog({
               zIndex: 2,
             }}>
               <Box sx={{ px: 2, py: 1.5, borderLeft: `4px solid ${PALETTE.deleted.border}` }}>
-                <Typography sx={{ fontSize: 11, color: PALETTE.deleted.text, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                <Typography sx={{ fontSize: 11, color: PALETTE.deleted.text, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.5 }}>
                   Current — {leftLabel?.code || 'R4'}
                 </Typography>
                 <Typography sx={{ fontSize: 12, color: 'text.secondary' }}>
@@ -474,7 +474,7 @@ export default function FactwiseRevisionDiffDialog({
               </Box>
               <Box />
               <Box sx={{ px: 2, py: 1.5, borderLeft: `4px solid ${PALETTE.added.border}` }}>
-                <Typography sx={{ fontSize: 11, color: PALETTE.added.text, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                <Typography sx={{ fontSize: 11, color: PALETTE.added.text, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.5 }}>
                   Uploaded sheet — {rightLabel?.code || 'preview'}
                 </Typography>
                 <Typography sx={{ fontSize: 12, color: 'text.secondary' }}>

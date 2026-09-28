@@ -38,8 +38,13 @@ import {
   CallSplit as CallSplitIcon
 } from '@mui/icons-material';
 import api from '../services/api';
+import { useThemeContext } from '../utils/ThemeContext';
+import { buildFactWisePageTokens, factWiseCancelButtonSx } from '../utils/factwisePageStyles';
 
 const ExpandColumnGroupsDialog = ({ open, onClose, sessionId, onApplied }) => {
+  const { isDarkMode, tokens: themeTokens } = useThemeContext();
+  const fwTokens = buildFactWisePageTokens(isDarkMode, themeTokens);
+  const cancelButtonSx = factWiseCancelButtonSx(fwTokens);
   const [sourceColumns, setSourceColumns] = useState([]);
   const [columnsLoading, setColumnsLoading] = useState(false);
   const [preview, setPreview] = useState(null);
@@ -149,7 +154,7 @@ const ExpandColumnGroupsDialog = ({ open, onClose, sessionId, onApplied }) => {
           </Box>
         ) : (
           <>
-            <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1 }}>
+            <Typography variant="subtitle2" sx={{ fontWeight: 600, mb: 1 }}>
               1. What each row should end up with
             </Typography>
             <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
@@ -199,7 +204,7 @@ const ExpandColumnGroupsDialog = ({ open, onClose, sessionId, onApplied }) => {
 
             <Divider sx={{ my: 2 }} />
 
-            <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1 }}>
+            <Typography variant="subtitle2" sx={{ fontWeight: 600, mb: 1 }}>
               2. Which existing columns to pull from
             </Typography>
             <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
@@ -335,7 +340,7 @@ const ExpandColumnGroupsDialog = ({ open, onClose, sessionId, onApplied }) => {
         )}
       </DialogContent>
       <DialogActions>
-        <Button onClick={onClose} disabled={running}>Cancel</Button>
+        <Button onClick={onClose} disabled={running} sx={cancelButtonSx}>Cancel</Button>
         <Button onClick={handlePreview} disabled={previewLoading || running || !canSubmit}>
           {previewLoading ? 'Previewing...' : 'Preview'}
         </Button>

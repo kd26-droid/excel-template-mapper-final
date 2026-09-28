@@ -48,6 +48,15 @@ import {
 } from '@mui/icons-material';
 import api, { setGlobalLoaderCallback } from '../services/api';
 import { useThemeContext } from '../utils/ThemeContext';
+import {
+  buildFactWisePageTokens,
+  factWiseCardSx,
+  factWiseGlowSx,
+  factWiseGridOverlaySx,
+  factWisePageShellSx,
+  factWisePrimaryButtonSx,
+  factWiseTopShadeSx,
+} from '../utils/factwisePageStyles';
 
 // ─── Styled animated buttons (matching final-2 UI) ──────────────────────────
 
@@ -583,24 +592,9 @@ const Dashboard = () => {
   const [sessionPage, setSessionPage] = useState(0);
   const [sessionRowsPerPage, setSessionRowsPerPage] = useState(10);
 
-  // Mouse background glow position
-  const [mousePos, setMousePos] = useState({ x: 50, y: 50 });
-
-
   useEffect(() => {
     setGlobalLoaderCallback(setGlobalLoading);
     return () => setGlobalLoaderCallback(null);
-  }, []);
-
-  useEffect(() => {
-    const handleMouseMove = (e) => {
-      setMousePos({
-        x: (e.clientX / window.innerWidth) * 100,
-        y: (e.clientY / window.innerHeight) * 100
-      });
-    };
-    window.addEventListener('mousemove', handleMouseMove);
-    return () => window.removeEventListener('mousemove', handleMouseMove);
   }, []);
 
   // Fetch Dashboard Data
@@ -743,34 +737,12 @@ const Dashboard = () => {
   }, [filteredRules, tagPage, tagRowsPerPage]);
 
   // Derived tokens for panel styling
-  const Ze = {
-    bg: t.background.app,
-    text: t.text.primary,
-    muted: t.text.secondary,
-    surface: t.surface.card,
-    surfaceSolid: t.surface.cardSolid || t.surface.card,
-    surfaceSoft: t.surface.elevatedSoft || t.surface.card,
-    border: t.border.default,
-    subtleBorder: t.border.subtle,
-    tableLine: t.table.line,
-    rowLine: t.table.rowLine,
-    rowHover: t.table.hover,
-    activeRow: t.table.selected,
-    cardShadow: t.shadow.card,
-    panelShadow: t.shadow.card,
-    inputBg: t.surface.input,
-    searchBg: t.surface.input,
-    controlBg: t.surface.control
-  };
+  const Ze = buildFactWisePageTokens(isDarkMode, t);
 
   const cardStyle = {
-    borderRadius: '18px',
-    border: `1px solid ${Ze.border}`,
-    bgcolor: Ze.surface,
-    color: Ze.text,
-    backdropFilter: 'blur(16px) saturate(180%)',
-    WebkitBackdropFilter: 'blur(16px) saturate(180%)',
-    boxShadow: Ze.cardShadow
+    ...factWiseCardSx(Ze),
+    backdropFilter: 'none',
+    WebkitBackdropFilter: 'none'
   };
 
   const handleApplyTemplate = (tmpl) => {
@@ -843,45 +815,74 @@ const Dashboard = () => {
   return (
     <Box
       sx={{
-        position: 'relative',
+        ...factWisePageShellSx(Ze),
         p: { xs: 2, md: 3 },
-        bgcolor: Ze.bg,
-        color: Ze.text,
-        minHeight: '100vh',
-        width: '100%',
-        overflow: 'hidden'
+        '& .MuiCardContent-root': {
+          position: 'relative',
+        },
+        '& .MuiButton-root': {
+          minHeight: 36,
+          borderRadius: '999px',
+          fontSize: '13px',
+          fontWeight: 500,
+          letterSpacing: 0,
+          textTransform: 'none',
+        },
+        '& .MuiButton-contained': {
+          ...factWisePrimaryButtonSx,
+          background: `${factWisePrimaryButtonSx.background} !important`,
+          color: `${factWisePrimaryButtonSx.color} !important`,
+        },
+        '& .MuiButton-contained:hover': {
+          ...factWisePrimaryButtonSx['&:hover'],
+          background: `${factWisePrimaryButtonSx.background} !important`,
+        },
+        '& .MuiChip-root': {
+          borderRadius: '999px',
+          fontWeight: 600,
+        },
+        '& .MuiTableContainer-root': {
+          borderRadius: '14px',
+          backgroundColor: `${Ze.table} !important`,
+        },
+        '& .MuiTableCell-root': {
+          borderColor: `${Ze.rowLine} !important`,
+          color: `${Ze.text} !important`,
+        },
+        '& .MuiTableHead-root .MuiTableCell-root': {
+          backgroundColor: `${Ze.tableHeader} !important`,
+          color: `${Ze.muted} !important`,
+          fontSize: '11px !important',
+          fontWeight: '600 !important',
+          letterSpacing: '0 !important',
+          textTransform: 'none',
+        },
+        '& .MuiTableBody-root .MuiTableCell-root': {
+          fontSize: '12px',
+          fontWeight: 500,
+        },
+        '& .MuiOutlinedInput-root': {
+          borderRadius: '10px',
+          backgroundColor: Ze.searchBg,
+        },
+        '& .MuiOutlinedInput-notchedOutline': {
+          borderColor: `${Ze.subtleBorder} !important`,
+        },
+        '& .MuiInputBase-input': {
+          fontSize: '12px',
+          fontWeight: 500,
+        },
       }}
     >
-      {/* Background glow circle following mouse */}
-      <Box
-        sx={{
-          pointerEvents: 'none',
-          position: 'absolute',
-          transition: 'all 0.7s cubic-bezier(0.16, 1, 0.3, 1)',
-          borderRadius: '50%',
-          opacity: 0.36,
-          width: '62vw',
-          height: '62vw',
-          left: `${mousePos.x}%`,
-          top: `${mousePos.y}%`,
-          transform: 'translate(-50%, -50%)',
-          filter: 'blur(90px)',
-          background: 'radial-gradient(circle, var(--color-brand, #2383e2) 0%, transparent 70%)',
-          zIndex: 0
-        }}
-      />
-
-      {/* Grid Pattern Overlay */}
-      <Box
-        className="auth-grid-pattern"
-        sx={{ position: 'absolute', inset: 0, pointerEvents: 'none', opacity: 0.45, zIndex: 0 }}
-      />
+      <Box sx={factWiseTopShadeSx(isDarkMode)} />
+      <Box sx={factWiseGlowSx(Ze)} />
+      <Box sx={factWiseGridOverlaySx(Ze)} />
 
       <Box sx={{ position: 'relative', zIndex: 1 }}>
         {/* Title Bar */}
         <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3, flexWrap: 'wrap', gap: 2 }}>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-            <Typography variant="h5" fontWeight="700" sx={{ color: Ze.text, letterSpacing: '-0.025em' }}>
+            <Typography variant="h5" sx={{ color: Ze.text, fontSize: '18.5px', fontWeight: 600, lineHeight: 1.42, letterSpacing: 0 }}>
               FactWise BOM Scrubber
             </Typography>
           </Box>
@@ -895,42 +896,42 @@ const Dashboard = () => {
             <Card sx={{ ...cardStyle, height: '100%', minHeight: 145 }}>
               <CardContent sx={{ p: 2.25, '&:last-child': { pb: 2.25 }, height: '100%', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
                 <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1.5 }}>
-                  <Typography variant="subtitle2" fontWeight="700" sx={{ color: Ze.text, fontSize: '14px' }}>
+                  <Typography variant="subtitle2" fontWeight="600" sx={{ color: Ze.text, fontSize: '13px' }}>
                     Quick Metrics
                   </Typography>
                   <Chip
                     label="Realtime"
                     size="small"
-                    sx={{ height: 18, fontSize: '10px', bgcolor: isDarkMode ? 'rgba(255, 255, 255, 0.06)' : '#eef2f7', color: Ze.muted, borderRadius: '4px' }}
+                    sx={{ height: 18, fontSize: '9.5px', bgcolor: isDarkMode ? 'rgba(255, 255, 255, 0.06)' : '#eef2f7', color: Ze.muted, borderRadius: '4px' }}
                   />
                 </Box>
                 <Grid container spacing={1}>
                   <Grid item xs={4}>
                     <Box sx={{ p: 1.25, bgcolor: isDarkMode ? 'rgba(59, 130, 246, 0.08)' : 'rgba(37, 99, 235, 0.06)', borderRadius: '10px', border: isDarkMode ? '1px solid rgba(59, 130, 246, 0.2)' : '1px solid rgba(37, 99, 235, 0.2)' }}>
-                      <Typography variant="caption" fontWeight="600" sx={{ color: isDarkMode ? '#93c5fd' : '#1d4ed8', fontSize: '10px', display: 'block', mb: 0.25 }}>
+                      <Typography variant="caption" fontWeight="600" sx={{ color: isDarkMode ? '#93c5fd' : '#1d4ed8', fontSize: '9.5px', display: 'block', mb: 0.25 }}>
                         Templates
                       </Typography>
-                      <Typography variant="h6" fontWeight="700" sx={{ color: Ze.text, fontFamily: '"JetBrains Mono", monospace' }}>
+                      <Typography variant="h6" fontWeight="600" sx={{ color: Ze.text, fontFamily: 'var(--fw-font-stack)', fontSize: '17px', lineHeight: 1.25 }}>
                         {templateStats.totalTemplates}
                       </Typography>
                     </Box>
                   </Grid>
                   <Grid item xs={4}>
                     <Box sx={{ p: 1.25, bgcolor: isDarkMode ? 'rgba(168, 85, 247, 0.08)' : 'rgba(124, 58, 237, 0.06)', borderRadius: '10px', border: isDarkMode ? '1px solid rgba(168, 85, 247, 0.2)' : '1px solid rgba(124, 58, 237, 0.2)' }}>
-                      <Typography variant="caption" fontWeight="600" sx={{ color: isDarkMode ? '#e9d5ff' : '#6d28d9', fontSize: '10px', display: 'block', mb: 0.25 }}>
+                      <Typography variant="caption" fontWeight="600" sx={{ color: isDarkMode ? '#e9d5ff' : '#6d28d9', fontSize: '9.5px', display: 'block', mb: 0.25 }}>
                         Column Rules
                       </Typography>
-                      <Typography variant="h6" fontWeight="700" sx={{ color: Ze.text, fontFamily: '"JetBrains Mono", monospace' }}>
+                      <Typography variant="h6" fontWeight="600" sx={{ color: Ze.text, fontFamily: 'var(--fw-font-stack)', fontSize: '17px', lineHeight: 1.25 }}>
                         {columnRules.length}
                       </Typography>
                     </Box>
                   </Grid>
                   <Grid item xs={4}>
                     <Box sx={{ p: 1.25, bgcolor: isDarkMode ? 'rgba(16, 185, 129, 0.08)' : 'rgba(5, 150, 105, 0.06)', borderRadius: '10px', border: isDarkMode ? '1px solid rgba(16, 185, 129, 0.2)' : '1px solid rgba(5, 150, 105, 0.2)' }}>
-                      <Typography variant="caption" fontWeight="600" sx={{ color: isDarkMode ? '#a7f3d0' : '#047857', fontSize: '10px', display: 'block', mb: 0.25 }}>
+                      <Typography variant="caption" fontWeight="600" sx={{ color: isDarkMode ? '#a7f3d0' : '#047857', fontSize: '9.5px', display: 'block', mb: 0.25 }}>
                         Uploads
                       </Typography>
-                      <Typography variant="h6" fontWeight="700" sx={{ color: Ze.text, fontFamily: '"JetBrains Mono", monospace' }}>
+                      <Typography variant="h6" fontWeight="600" sx={{ color: Ze.text, fontFamily: 'var(--fw-font-stack)', fontSize: '17px', lineHeight: 1.25 }}>
                         {uploads.length}
                       </Typography>
                     </Box>
@@ -946,15 +947,15 @@ const Dashboard = () => {
               <CardContent sx={{ p: 2.25, '&:last-child': { pb: 2.25 }, height: '100%', display: 'flex', flexDirection: 'column' }}>
                 <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
                   <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                    <StarIcon sx={{ fontSize: 16, color: '#fbbf24' }} />
-                    <Typography variant="subtitle2" fontWeight="700" sx={{ color: Ze.text, fontSize: '14px' }}>
+                    <StarIcon sx={{ fontSize: 15, color: '#fbbf24' }} />
+                    <Typography variant="subtitle2" fontWeight="600" sx={{ color: Ze.text, fontSize: '13px' }}>
                       Top 3 Processing Templates
                     </Typography>
                   </Box>
                   <Chip
                     label="Leaderboard"
                     size="small"
-                    sx={{ height: 18, fontSize: '10px', bgcolor: isDarkMode ? 'rgba(245, 158, 11, 0.12)' : 'rgba(245, 158, 11, 0.15)', color: isDarkMode ? '#fbbf24' : '#b45309', border: '1px solid rgba(245, 158, 11, 0.3)', borderRadius: '4px' }}
+                    sx={{ height: 18, fontSize: '9.5px', bgcolor: isDarkMode ? 'rgba(245, 158, 11, 0.12)' : 'rgba(245, 158, 11, 0.15)', color: isDarkMode ? '#fbbf24' : '#b45309', border: '1px solid rgba(245, 158, 11, 0.3)', borderRadius: '4px' }}
                   />
                 </Box>
                 {templateStats.top3Templates && templateStats.top3Templates.length > 0 ? (
@@ -1002,11 +1003,11 @@ const Dashboard = () => {
                                 border: `1px solid ${rank.text}40`
                               }}
                             >
-                              <Typography variant="caption" fontWeight="800" sx={{ fontSize: '10px', color: rank.text }}>
+                              <Typography variant="caption" fontWeight="600" sx={{ fontSize: '9.5px', color: rank.text }}>
                                 {rank.label}
                               </Typography>
                             </Box>
-                            <Typography variant="body2" fontWeight="600" noWrap sx={{ color: Ze.text, fontSize: '12px' }}>
+                            <Typography variant="body2" fontWeight="600" noWrap sx={{ color: Ze.text, fontSize: '11.5px' }}>
                               {tmpl.name}
                             </Typography>
                           </Box>
@@ -1014,7 +1015,7 @@ const Dashboard = () => {
                             <Chip
                               label={`${tmpl.stage_count || 0} stages`}
                               size="small"
-                              sx={{ height: 16, fontSize: '9px', bgcolor: isDarkMode ? 'rgba(255,255,255,0.06)' : '#eef2f7', color: Ze.muted }}
+                              sx={{ height: 16, fontSize: '8.75px', bgcolor: isDarkMode ? 'rgba(255,255,255,0.06)' : '#eef2f7', color: Ze.muted }}
                             />
                             {/* Animated expand-on-hover Use button (fits cleanly inside row surface) */}
                             <UseButton
@@ -1067,10 +1068,10 @@ const Dashboard = () => {
                 <Avatar sx={{ bgcolor: 'rgba(35, 131, 226, 0.2)', color: '#60a5fa', width: 36, height: 36, mx: 'auto', mb: 1 }}>
                   <UploadFileIcon sx={{ fontSize: 20 }} />
                 </Avatar>
-                <Typography variant="subtitle2" fontWeight="700" sx={{ color: Ze.text, fontSize: '13px' }}>
+                <Typography variant="subtitle2" fontWeight="600" sx={{ color: Ze.text, fontSize: '12.5px' }}>
                   Upload New File
                 </Typography>
-                <Typography variant="caption" sx={{ color: Ze.muted, fontSize: '11px', display: 'block' }}>
+                <Typography variant="caption" sx={{ color: Ze.muted, fontSize: '10.5px', display: 'block' }}>
                   Drag & drop Excel or PDF BOM
                 </Typography>
               </CardContent>
@@ -1118,7 +1119,7 @@ const Dashboard = () => {
                       sx={{
                         height: 32,
                         px: 2,
-                        fontSize: '12px',
+                        fontSize: '11.5px',
                         fontWeight: 600,
                         textTransform: 'none',
                         borderRadius: '999px',
@@ -1142,9 +1143,9 @@ const Dashboard = () => {
                           px: 0.8,
                           py: 0.1,
                           borderRadius: '999px',
-                          fontSize: '10px',
-                          fontWeight: 700,
-                          fontFamily: '"JetBrains Mono", monospace',
+                          fontSize: '9.5px',
+                          fontWeight: 600,
+                          fontFamily: 'var(--fw-font-stack)',
                           bgcolor: isActive ? 'rgba(255, 255, 255, 0.22)' : isDarkMode ? 'rgba(255, 255, 255, 0.06)' : '#eef2f7',
                           color: isActive ? '#ffffff' : Ze.muted
                         }}
@@ -1230,7 +1231,7 @@ const Dashboard = () => {
                     <TableContainer>
                       <Table size="small">
                         <TableHead>
-                          <TableRow sx={{ '& th': { borderBottom: `1px solid ${Ze.tableLine}`, color: Ze.muted, fontSize: '11px', fontWeight: 600, textTransform: 'uppercase' } }}>
+                          <TableRow sx={{ '& th': { borderBottom: `1px solid ${Ze.tableLine}`, color: Ze.muted, fontSize: '10.5px', fontWeight: 600, textTransform: 'uppercase' } }}>
                             <TableCell style={{ width: 40 }} />
                             <TableCell>File / Session Name</TableCell>
                             <TableCell>Processed Date</TableCell>
@@ -1248,7 +1249,7 @@ const Dashboard = () => {
                                     cursor: 'pointer',
                                     bgcolor: isExpanded ? Ze.activeRow : 'transparent',
                                     '&:hover': { bgcolor: Ze.rowHover },
-                                    '& td': { borderBottom: isExpanded ? 'none' : `1px solid ${Ze.rowLine}`, color: Ze.text, fontSize: '13px' }
+                                    '& td': { borderBottom: isExpanded ? 'none' : `1px solid ${Ze.rowLine}`, color: Ze.text, fontSize: '12.25px' }
                                   }}
                                 >
                                   <TableCell onClick={() => setExpandedSessionId(isExpanded ? null : session.session_id)}>
@@ -1276,7 +1277,7 @@ const Dashboard = () => {
                                           <path d="M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z" />
                                         </svg>
                                       </Box>
-                                      <Typography variant="body2" fontWeight="700" sx={{ fontSize: '13px', color: Ze.text }}>
+                                      <Typography variant="body2" fontWeight="600" sx={{ fontSize: '12.25px', color: Ze.text }}>
                                         {cleanFileName(session.client_file || session.original_client_name || session.file_name || session.session_id)}
                                       </Typography>
                                     </Box>
@@ -1291,7 +1292,7 @@ const Dashboard = () => {
                                       sx={{
                                         height: 22,
                                         px: 1,
-                                        fontSize: '11px',
+                                        fontSize: '10.5px',
                                         fontWeight: 600,
                                         borderRadius: '999px',
                                         bgcolor: isDarkMode ? 'rgba(16, 185, 129, 0.15)' : 'rgba(16, 185, 129, 0.12)',
@@ -1321,11 +1322,11 @@ const Dashboard = () => {
                                       >
                                         <Typography
                                           variant="caption"
-                                          fontWeight="700"
+                                          fontWeight="600"
                                           sx={{
                                             color: Ze.muted,
                                             letterSpacing: '0.06em',
-                                            fontSize: '11px',
+                                            fontSize: '10.5px',
                                             textTransform: 'uppercase',
                                             display: 'block',
                                             mb: 2
@@ -1357,11 +1358,11 @@ const Dashboard = () => {
                                                   <Avatar sx={{ width: 22, height: 22, bgcolor: isDarkMode ? 'rgba(59, 130, 246, 0.25)' : 'rgba(37, 99, 235, 0.15)', color: isDarkMode ? '#60a5fa' : '#2563eb' }}>
                                                     <DescriptionIcon sx={{ fontSize: 13 }} />
                                                   </Avatar>
-                                                  <Typography variant="subtitle2" fontWeight="700" sx={{ color: isDarkMode ? '#60a5fa' : '#1d4ed8', fontSize: '13px' }}>
+                                                  <Typography variant="subtitle2" fontWeight="600" sx={{ color: isDarkMode ? '#60a5fa' : '#1d4ed8', fontSize: '12.5px' }}>
                                                     Client Original File
                                                   </Typography>
                                                 </Box>
-                                                <Typography variant="body2" fontWeight="700" sx={{ color: Ze.text, fontSize: '13px', mb: 2, wordBreak: 'break-all' }}>
+                                                <Typography variant="body2" fontWeight="600" sx={{ color: Ze.text, fontSize: '12.25px', mb: 2, wordBreak: 'break-all' }}>
                                                   {cleanFileName(session.client_file || session.original_client_name || session.file_name || session.session_id)}
                                                 </Typography>
                                               </Box>
@@ -1396,16 +1397,16 @@ const Dashboard = () => {
                                                   <Avatar sx={{ width: 22, height: 22, bgcolor: isDarkMode ? 'rgba(16, 185, 129, 0.25)' : 'rgba(16, 185, 129, 0.15)', color: isDarkMode ? '#34d399' : '#059669' }}>
                                                     <DescriptionIcon sx={{ fontSize: 13 }} />
                                                   </Avatar>
-                                                  <Typography variant="subtitle2" fontWeight="700" sx={{ color: isDarkMode ? '#34d399' : '#047857', fontSize: '13px' }}>
+                                                  <Typography variant="subtitle2" fontWeight="600" sx={{ color: isDarkMode ? '#34d399' : '#047857', fontSize: '12.5px' }}>
                                                     FW Mapped Sheet
                                                   </Typography>
                                                 </Box>
                                                 <Typography
                                                   variant="body2"
-                                                  fontWeight="700"
+                                                  fontWeight="600"
                                                   sx={{
                                                     color: session.has_mappings ? Ze.text : Ze.muted,
-                                                    fontSize: '13px',
+                                                    fontSize: '12.25px',
                                                     mb: 2,
                                                     wordBreak: 'break-all'
                                                   }}
@@ -1445,11 +1446,11 @@ const Dashboard = () => {
                                                   <Avatar sx={{ width: 22, height: 22, bgcolor: isDarkMode ? 'rgba(168, 85, 247, 0.25)' : 'rgba(124, 58, 237, 0.15)', color: isDarkMode ? '#c084fc' : '#6d28d9' }}>
                                                     <DescriptionIcon sx={{ fontSize: 13 }} />
                                                   </Avatar>
-                                                  <Typography variant="subtitle2" fontWeight="700" sx={{ color: isDarkMode ? '#c084fc' : '#6d28d9', fontSize: '13px' }}>
+                                                  <Typography variant="subtitle2" fontWeight="600" sx={{ color: isDarkMode ? '#c084fc' : '#6d28d9', fontSize: '12.5px' }}>
                                                     FW Template File
                                                   </Typography>
                                                 </Box>
-                                                <Typography variant="body2" fontWeight="700" sx={{ color: Ze.text, fontSize: '13px', mb: 2, wordBreak: 'break-all' }}>
+                                                <Typography variant="body2" fontWeight="600" sx={{ color: Ze.text, fontSize: '12.25px', mb: 2, wordBreak: 'break-all' }}>
                                                   {cleanFileName(session.template_file || session.template_name || 'Standard Template')}
                                                 </Typography>
                                               </Box>
@@ -1464,12 +1465,12 @@ const Dashboard = () => {
                                         </Grid>
 
                                         {/* Footer details row */}
-                                        <Box sx={{ mt: 2.5, display: 'flex', alignItems: 'center', gap: 3, fontSize: '12px', color: Ze.muted }}>
-                                          <Typography variant="caption" sx={{ color: Ze.muted, fontSize: '12px' }}>
-                                            Rows Processed: <span style={{ color: isDarkMode ? '#ffffff' : '#0f172a', fontWeight: 700 }}>{session.rows_processed || 0}</span>
+                                        <Box sx={{ mt: 2.5, display: 'flex', alignItems: 'center', gap: 3, fontSize: '11.5px', color: Ze.muted }}>
+                                          <Typography variant="caption" sx={{ color: Ze.muted, fontSize: '11.5px' }}>
+                                            Rows Processed: <span style={{ color: isDarkMode ? '#ffffff' : '#0f172a', fontWeight: 600 }}>{session.rows_processed || 0}</span>
                                           </Typography>
-                                          <Typography variant="caption" sx={{ color: Ze.muted, fontSize: '12px' }}>
-                                            Date: <span style={{ color: isDarkMode ? '#ffffff' : '#0f172a', fontWeight: 700 }}>{formatDisplayDate(session.created || session.upload_date || session.created_at)}</span>
+                                          <Typography variant="caption" sx={{ color: Ze.muted, fontSize: '11.5px' }}>
+                                            Date: <span style={{ color: isDarkMode ? '#ffffff' : '#0f172a', fontWeight: 600 }}>{formatDisplayDate(session.created || session.upload_date || session.created_at)}</span>
                                           </Typography>
                                         </Box>
                                       </Box>
@@ -1565,15 +1566,15 @@ const Dashboard = () => {
                               <LibraryBooksIcon sx={{ fontSize: 18 }} />
                             </Avatar>
                             <Box sx={{ minWidth: 0 }}>
-                              <Typography variant="subtitle2" fontWeight="600" noWrap sx={{ color: Ze.text, fontSize: '13px' }}>
+                              <Typography variant="subtitle2" fontWeight="600" noWrap sx={{ color: Ze.text, fontSize: '12.5px' }}>
                                 {tmpl.name}
                               </Typography>
                               <Box sx={{ display: 'flex', gap: 1, mt: 0.5, alignItems: 'center', flexWrap: 'wrap' }}>
                                 <Chip label={`${tmpl.stage_count || 0} stages`} size="small"
-                                  sx={{ height: 18, fontSize: '10px', bgcolor: 'rgba(37, 99, 235, 0.15)', color: '#60a5fa' }} />
+                                  sx={{ height: 18, fontSize: '9.5px', bgcolor: 'rgba(37, 99, 235, 0.15)', color: '#60a5fa' }} />
                                 <Chip label={`Used ${tmpl.usage_count || 0}×`} size="small"
-                                  sx={{ height: 18, fontSize: '10px', bgcolor: 'rgba(96, 165, 250, 0.15)', color: '#60a5fa' }} />
-                                <Typography variant="caption" sx={{ color: Ze.muted, fontSize: '10px' }}>
+                                  sx={{ height: 18, fontSize: '9.5px', bgcolor: 'rgba(96, 165, 250, 0.15)', color: '#60a5fa' }} />
+                                <Typography variant="caption" sx={{ color: Ze.muted, fontSize: '9.5px' }}>
                                   {formatDisplayDate(tmpl.created_at || tmpl.created)}
                                 </Typography>
                               </Box>
@@ -1677,17 +1678,17 @@ const Dashboard = () => {
                               <ScienceIcon sx={{ fontSize: 18 }} />
                             </Avatar>
                             <Box sx={{ minWidth: 0 }}>
-                              <Typography variant="subtitle2" fontWeight="600" noWrap sx={{ color: Ze.text, fontSize: '13px' }}>
+                              <Typography variant="subtitle2" fontWeight="600" noWrap sx={{ color: Ze.text, fontSize: '12.5px' }}>
                                 {rule.name}
                               </Typography>
                               <Box sx={{ display: 'flex', gap: 1, mt: 0.5, alignItems: 'center', flexWrap: 'wrap' }}>
                                 {rule.target_column && (
                                   <Chip label={rule.target_column} size="small"
-                                    sx={{ height: 18, fontSize: '10px', bgcolor: 'rgba(16, 185, 129, 0.15)', color: '#34d399' }} />
+                                    sx={{ height: 18, fontSize: '9.5px', bgcolor: 'rgba(16, 185, 129, 0.15)', color: '#34d399' }} />
                                 )}
                                 <Chip label={rule.value_mode || 'rule'} size="small"
-                                  sx={{ height: 18, fontSize: '10px', bgcolor: 'rgba(52, 211, 153, 0.15)', color: '#34d399' }} />
-                                <Typography variant="caption" sx={{ color: Ze.muted, fontSize: '10px' }}>
+                                  sx={{ height: 18, fontSize: '9.5px', bgcolor: 'rgba(52, 211, 153, 0.15)', color: '#34d399' }} />
+                                <Typography variant="caption" sx={{ color: Ze.muted, fontSize: '9.5px' }}>
                                   Used {rule.usage_count || 0}× · {formatDisplayDate(rule.created_at)}
                                 </Typography>
                               </Box>

@@ -221,7 +221,7 @@ export default function FactwiseNewTagsPopup({
           pr: 2,
         }}
       >
-        <Typography variant="h6" sx={{ fontWeight: 650 }}>
+        <Typography variant="h6" sx={{ fontWeight: 500 }}>
           New tags detected
         </Typography>
         <IconButton

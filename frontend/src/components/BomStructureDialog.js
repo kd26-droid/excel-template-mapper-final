@@ -38,7 +38,7 @@ import {
   Dialog, DialogTitle, DialogContent, DialogActions, Button, Box, Typography,
   Checkbox, FormControlLabel, FormControl, InputLabel, Select, MenuItem,
   TextField, RadioGroup, Radio, Alert, Divider, Chip, Stepper, Step, StepLabel,
-  Autocomplete, CircularProgress,
+  Autocomplete, CircularProgress, Paper,
 } from '@mui/material';
 import { AccountTree as AccountTreeIcon } from '@mui/icons-material';
 import {
@@ -48,6 +48,17 @@ import {
 import {
   readBomRevisionIntent, saveBomRevisionIntent, clearBomRevisionIntent,
 } from '../utils/bomRevisionIntent';
+import { useThemeContext } from '../utils/ThemeContext';
+import {
+  buildFactWisePageTokens,
+  factWiseAlertSx,
+  factWiseCancelButtonSx,
+  factWiseFieldSx,
+  factWiseInputLabelSx,
+  factWisePrimaryButtonSx,
+  factWiseSelectFieldSx,
+  factWiseSelectMenuProps,
+} from '../utils/factwisePageStyles';
 
 // Headers that mean "this column holds the BOM level". Matched whole-string so
 // that "Level of detail" or "Service level" do not produce a false positive.
@@ -335,16 +346,16 @@ const blankSubBom = (assembly = {}) => ({
   baseQuantity: DEFAULT_BASE_QUANTITY,
 });
 
-const ExampleTree = () => (
+const ExampleTree = ({ tokens }) => (
   <Box
     sx={{
-      p: 2,
-      borderRadius: 1,
-      border: theme => `1px solid ${theme.palette.divider}`,
-      bgcolor: 'action.hover',
-      fontFamily: 'monospace',
-      fontSize: 13,
-      lineHeight: 1.9,
+      p: 1.75,
+      borderRadius: '12px',
+      border: tokens ? `1px solid ${tokens.strongBorder}` : theme => `1px solid ${theme.palette.divider}`,
+      bgcolor: tokens ? tokens.surfaceSoft : 'action.hover',
+      fontFamily: 'var(--fw-font-stack)',
+      fontSize: 12.5,
+      lineHeight: 1.85,
     }}
   >
     {EXAMPLE_TREE.map((node, index) => (
@@ -353,13 +364,13 @@ const ExampleTree = () => (
           {node.depth > 0 ? '└── ' : ''}
           <Box
             component="span"
-            sx={{ fontWeight: node.depth === 0 ? 700 : 400 }}
+            sx={{ fontWeight: node.depth === 0 ? 600 : 400 }}
           >
             {node.text}
           </Box>
         </Box>
         {node.note && (
-          <Typography variant="caption" sx={{ ml: 1.5, color: 'text.secondary' }}>
+          <Typography variant="caption" sx={{ ml: 1.5, color: tokens?.muted || 'text.secondary', fontSize: 11.5, fontWeight: 400 }}>
             {node.note}
           </Typography>
         )}
@@ -762,6 +773,8 @@ const BomStructureDialog = ({
   loadProjectSlots = fetchProjectBomSlots,
   loadBomDetail = fetchEnterpriseBomDetail,
 }) => {
+  const { isDarkMode, tokens: themeTokens } = useThemeContext();
+  const fwTokens = buildFactWisePageTokens(isDarkMode, themeTokens);
   const [step, setStep] = useState(0);
   const [answers, setAnswers] = useState({});
   const [error, setError] = useState('');
@@ -810,6 +823,215 @@ const BomStructureDialog = ({
   const getSheetRecordsRef = useRef(getSheetRecords);
   const getSheetPreambleRowsRef = useRef(getSheetPreambleRows);
   const initialAnswersRef = useRef(initialAnswers);
+  const dialogFieldSx = factWiseFieldSx(fwTokens, { height: 36 });
+  const dialogSelectSx = factWiseSelectFieldSx(fwTokens, { height: 36 });
+  const dialogInputLabelSx = factWiseInputLabelSx(fwTokens);
+  const dialogSelectMenuProps = factWiseSelectMenuProps(fwTokens, {
+    width: { xs: 'calc(100vw - 48px)', sm: 280 },
+    maxHeight: 240,
+  });
+  const dialogAlertSx = (severity = 'info', sx = {}) => factWiseAlertSx(fwTokens, severity, {
+    borderRadius: '10px',
+    fontSize: '12px',
+    fontWeight: 400,
+    py: 0.55,
+    px: 1.15,
+    sx,
+  });
+  const dialogAutocompleteFieldSx = {
+    ...dialogFieldSx,
+    '& .MuiAutocomplete-inputRoot': {
+      minHeight: '36px !important',
+      height: 'auto !important',
+      py: '0 !important',
+      pr: '34px !important',
+      alignItems: 'center',
+    },
+    '& .MuiAutocomplete-inputRoot .MuiAutocomplete-input': {
+      minWidth: '72px !important',
+      height: '34px !important',
+      py: '0 !important',
+      px: '0 !important',
+      fontSize: '13px',
+      fontWeight: 400,
+    },
+    '& .MuiAutocomplete-endAdornment': {
+      right: 8,
+    },
+    '& .MuiAutocomplete-tag': {
+      height: 22,
+      my: 0.25,
+      borderRadius: '999px',
+      bgcolor: fwTokens.primarySoft,
+      color: fwTokens.primaryText,
+      border: `1px solid ${fwTokens.strongBorder}`,
+      fontSize: 11.5,
+      fontWeight: 400,
+      '& .MuiChip-label': {
+        px: 0.9,
+      },
+      '& .MuiChip-deleteIcon': {
+        fontSize: 15,
+        color: fwTokens.muted,
+      },
+    },
+  };
+  const dialogAutocompletePaperSx = {
+    mt: 0.45,
+    bgcolor: fwTokens.surface,
+    color: fwTokens.text,
+    border: `1px solid ${fwTokens.strongBorder}`,
+    borderRadius: '9px',
+    boxShadow: isDarkMode
+      ? '0 18px 38px -24px rgba(0, 0, 0, 0.82)'
+      : '0 18px 34px -26px rgba(15, 23, 42, 0.28)',
+    overflow: 'hidden',
+    '& .MuiAutocomplete-noOptions': {
+      px: 1.6,
+      py: 1,
+      color: fwTokens.muted,
+      fontSize: 12.5,
+      fontWeight: 400,
+    },
+  };
+  const dialogAutocompleteListboxSx = {
+    py: 0.35,
+    maxHeight: 210,
+    '& .MuiAutocomplete-option': {
+      minHeight: 34,
+      alignItems: 'flex-start',
+      px: 1.35,
+      py: 0.58,
+      color: fwTokens.text,
+      fontSize: 12.5,
+      fontWeight: 400,
+      lineHeight: 1.3,
+      '&[aria-selected="true"]': {
+        bgcolor: isDarkMode ? 'rgba(0, 122, 255, 0.14)' : '#e8f3ff',
+        color: fwTokens.text,
+      },
+      '&.Mui-focused': {
+        bgcolor: isDarkMode ? 'rgba(148, 163, 184, 0.09)' : '#f3f8ff',
+      },
+    },
+  };
+  const renderAutocompletePaper = (props) => (
+    <Paper {...props} elevation={0} sx={dialogAutocompletePaperSx} />
+  );
+  const stepCopySx = {
+    mb: 1.6,
+    color: fwTokens.muted,
+    fontSize: 13,
+    fontWeight: 400,
+    lineHeight: 1.45,
+  };
+  const optionCardSx = (active) => ({
+    p: 1.7,
+    mb: 1.25,
+    borderRadius: '12px',
+    border: active ? `1px solid ${fwTokens.primary}` : `1px solid ${fwTokens.strongBorder}`,
+    bgcolor: active ? fwTokens.primarySoft : fwTokens.inputBg,
+    transition: 'border-color 180ms ease, background-color 180ms ease, box-shadow 180ms ease',
+    boxShadow: active ? `0 10px 22px -18px ${fwTokens.primary}` : 'none',
+    '&:hover': {
+      borderColor: active ? fwTokens.primary : fwTokens.primaryHover,
+      bgcolor: active ? fwTokens.primarySoft : fwTokens.surfaceSoft,
+    },
+  });
+  const panelSx = (active = false) => ({
+    mb: 1.25,
+    borderRadius: '12px',
+    border: active ? `1px solid ${fwTokens.primary}` : `1px solid ${fwTokens.strongBorder}`,
+    bgcolor: active ? fwTokens.primarySoft : fwTokens.surfaceSoft,
+    px: 1.5,
+    py: 1.25,
+    transition: 'border-color 180ms ease, background-color 180ms ease',
+  });
+  const bomDetailCardSx = {
+    mb: 1.35,
+    p: 1.25,
+    borderRadius: '12px',
+    border: `1px solid ${fwTokens.strongBorder}`,
+    bgcolor: isDarkMode ? 'rgba(23, 26, 33, 0.92)' : '#f8fafc',
+    boxShadow: isDarkMode
+      ? 'inset 0 1px 0 rgba(255, 255, 255, 0.035)'
+      : '0 10px 24px -22px rgba(15, 23, 42, 0.28), inset 0 1px 0 rgba(255,255,255,0.9)',
+  };
+  const bomDetailHeaderSx = {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 1,
+    mb: 1,
+    flexWrap: 'wrap',
+  };
+  const bomLevelLabelSx = {
+    display: 'inline-flex',
+    alignItems: 'center',
+    height: 22,
+    px: 0.85,
+    borderRadius: '999px',
+    bgcolor: isDarkMode ? 'rgba(0, 122, 255, 0.14)' : '#e8f3ff',
+    color: fwTokens.primaryText,
+    border: `1px solid ${isDarkMode ? 'rgba(0, 122, 255, 0.24)' : '#bfdbfe'}`,
+    fontSize: 11.5,
+    fontWeight: 500,
+    lineHeight: 1,
+  };
+  const bomLevelMetaSx = {
+    color: fwTokens.muted,
+    fontSize: 12,
+    fontWeight: 400,
+    lineHeight: 1.35,
+    minWidth: 0,
+    flex: '1 1 260px',
+  };
+  const bomFieldGroupSx = (accent = fwTokens.primary) => ({
+    pl: 1.15,
+    borderLeft: `2px solid ${accent}`,
+  });
+  const bomFieldsGridSx = {
+    display: 'grid',
+    gap: 1,
+    gridTemplateColumns: {
+      xs: '1fr',
+      sm: 'repeat(2, minmax(0, 1fr))',
+      md: 'minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.15fr)',
+    },
+  };
+  const stepTransitionSx = {
+    animation: 'bomStructureStepIn 260ms cubic-bezier(0.22, 1, 0.36, 1)',
+    transformOrigin: 'center top',
+    '@keyframes bomStructureStepIn': {
+      '0%': {
+        opacity: 0,
+        transform: 'translateX(16px) scale(0.992)',
+      },
+      '100%': {
+        opacity: 1,
+        transform: 'translateX(0) scale(1)',
+      },
+    },
+    '@media (prefers-reduced-motion: reduce)': {
+      animation: 'none',
+    },
+  };
+  const softButtonSx = {
+    minWidth: 78,
+    height: 34,
+    borderRadius: '999px',
+    textTransform: 'none',
+    fontSize: 13,
+    fontWeight: 500,
+    color: fwTokens.primaryText,
+    '&:hover': {
+      bgcolor: fwTokens.primarySoft,
+    },
+  };
+  const cancelButtonSx = factWiseCancelButtonSx(fwTokens, {
+    minWidth: 78,
+    height: 34,
+  });
   useEffect(() => {
     sheetNamesRef.current = sheetNames;
     getSheetHeadersRef.current = getSheetHeaders;
@@ -1348,6 +1570,11 @@ const BomStructureDialog = ({
   }, [mode, leveledSheets.length, sheetsNeedingRoot.length]);
 
   const currentKey = steps[Math.min(step, steps.length - 1)]?.key || 'sheets';
+  const dialogWidth = currentKey === 'finishedGood'
+    ? 'min(840px, calc(100vw - 32px))'
+    : currentKey === 'sheets' || currentKey === 'tree'
+      ? 'min(760px, calc(100vw - 32px))'
+      : 'min(700px, calc(100vw - 32px))';
 
   const validateStep = useCallback(() => {
     if (currentKey === 'reviseBom') {
@@ -1677,8 +1904,8 @@ const BomStructureDialog = ({
   // mind and come back to it with Back like every other answer here.
   const renderMode = () => (
     <>
-      <Typography variant="body2" sx={{ mb: 2, color: 'text.secondary' }}>
-        Is this file a new BOM, or a new revision of a BOM that already exists?
+      <Typography variant="body2" sx={stepCopySx}>
+        Choose how this upload should be treated.
       </Typography>
       <RadioGroup
         value={mode}
@@ -1688,32 +1915,25 @@ const BomStructureDialog = ({
           {
             value: MODE_CREATE,
             title: 'Create a new BOM',
-            detail: 'Describe the structure in this file and build a BOM from it.',
+            detail: 'Build a BOM from this file.',
           },
           {
             value: MODE_REVISE,
             title: 'Revise an existing BOM',
-            detail: 'Pick the BOM this file updates. Its structure, finished good and units are inherited.',
+            detail: 'Update an existing BOM revision.',
           },
         ].map(option => (
           <Box
             key={option.value}
-            sx={{
-              p: 2,
-              mb: 1.5,
-              borderRadius: 1,
-              border: theme => `1px solid ${
-                mode === option.value ? theme.palette.primary.main : theme.palette.divider
-              }`,
-            }}
+            sx={optionCardSx(mode === option.value)}
           >
             <FormControlLabel
               value={option.value}
-              control={<Radio />}
-              label={<Typography sx={{ fontWeight: 600 }}>{option.title}</Typography>}
+              control={<Radio size="small" />}
+              label={<Typography sx={{ fontWeight: 500, fontSize: 14, color: fwTokens.text }}>{option.title}</Typography>}
               sx={{ m: 0 }}
             />
-            <Typography variant="caption" sx={{ display: 'block', ml: 4, color: 'text.secondary' }}>
+            <Typography variant="caption" sx={{ display: 'block', ml: 3.6, color: fwTokens.muted, fontSize: 12, fontWeight: 400, lineHeight: 1.4 }}>
               {option.detail}
             </Typography>
           </Box>
@@ -1724,14 +1944,16 @@ const BomStructureDialog = ({
 
   const renderReviseBom = () => (
     <>
-      <Typography variant="body2" sx={{ mb: 2, color: 'text.secondary' }}>
-        Which BOM does this file revise? The new revision is created from it, so
-        everything this dialog would otherwise ask about structure comes from there.
+      <Typography variant="body2" sx={stepCopySx}>
+        Select the BOM this file updates.
       </Typography>
       <Autocomplete
         size="small"
         options={bomChoices}
         value={reviseBom}
+        PaperComponent={renderAutocompletePaper}
+        ListboxProps={{ sx: dialogAutocompleteListboxSx }}
+        noOptionsText="No BOMs available"
         onChange={(_, value) => { setReviseBom(value); setPrefilled(false); setError(''); }}
         loading={bomsLoading}
         getOptionLabel={option => (option ? String(option.bom_code || option.enterprise_bom_id || '') : '')}
@@ -1739,9 +1961,11 @@ const BomStructureDialog = ({
         renderOption={(props, option) => (
           <li {...props} key={option.enterprise_bom_id}>
             <Box>
-              <Typography variant="body2">{option.bom_code || option.enterprise_bom_id}</Typography>
+              <Typography variant="body2" sx={{ color: fwTokens.text, fontSize: 12.5, fontWeight: 400, lineHeight: 1.25 }}>
+                {option.bom_code || option.enterprise_bom_id}
+              </Typography>
               {option.version ? (
-                <Typography variant="caption" color="text.secondary">
+                <Typography variant="caption" sx={{ color: fwTokens.muted, fontSize: 11.5, fontWeight: 400 }}>
                   {`currently v${option.version}`}
                   {option.revisions?.length > 1 ? ` · ${option.revisions.length} revisions` : ''}
                 </Typography>
@@ -1753,14 +1977,15 @@ const BomStructureDialog = ({
           <TextField
             {...params}
             label="BOM to revise"
+            sx={dialogAutocompleteFieldSx}
             error={Boolean(bomsError || baseBomError)}
             helperText={
               bomsError
               || baseBomError
-              || (prefilled && reviseBom ? 'Carried over from your last export — change it if this file revises something else.' : '')
+              || (prefilled && reviseBom ? 'Carried from your last export.' : '')
               || (!bomsLoading && !bomOptions.length
-                ? 'No BOMs came back. Check that you are signed in to FactWise.'
-                : 'One entry per BOM, showing its current revision.')
+                ? 'No BOMs available.'
+                : 'Current revision shown.')
             }
             InputProps={{
               ...params.InputProps,
@@ -1782,8 +2007,8 @@ const BomStructureDialog = ({
   // something broken rather than something not asked for.
   const renderReviseProject = () => (
     <>
-      <Typography variant="body2" sx={{ mb: 2, color: 'text.secondary' }}>
-        Do you want to revise this BOM on an <strong>existing</strong> project too?
+      <Typography variant="body2" sx={stepCopySx}>
+        Should this revision also update an existing project?
       </Typography>
       <RadioGroup
         row
@@ -1791,8 +2016,8 @@ const BomStructureDialog = ({
         onChange={(e) => { setReviseOnProject(e.target.value === 'true'); setError(''); }}
         sx={{ mb: 1 }}
       >
-        <FormControlLabel value="true" control={<Radio />} label="Yes" />
-        <FormControlLabel value="false" control={<Radio />} label="No" />
+        <FormControlLabel value="true" control={<Radio size="small" />} label="Yes" />
+        <FormControlLabel value="false" control={<Radio size="small" />} label="No" />
       </RadioGroup>
 
       {reviseOnProject === true && (
@@ -1801,6 +2026,9 @@ const BomStructureDialog = ({
             size="small"
             options={projectChoices}
             value={reviseProject}
+            PaperComponent={renderAutocompletePaper}
+            ListboxProps={{ sx: dialogAutocompleteListboxSx }}
+            noOptionsText="No projects available"
             onChange={(_, value) => { setReviseProject(value); setPrefilled(false); setError(''); }}
             loading={projectsLoading}
             disabled={!reviseBom}
@@ -1813,8 +2041,10 @@ const BomStructureDialog = ({
             renderOption={(props, option) => (
               <li {...props} key={option.project_id}>
                 <Box>
-                  <Typography variant="body2">{option.project_name || option.project_code}</Typography>
-                  <Typography variant="caption" color="text.secondary">
+                  <Typography variant="body2" sx={{ color: fwTokens.text, fontSize: 12.5, fontWeight: 400, lineHeight: 1.25 }}>
+                    {option.project_name || option.project_code}
+                  </Typography>
+                  <Typography variant="caption" sx={{ color: fwTokens.muted, fontSize: 11.5, fontWeight: 400 }}>
                     {[
                       option.project_code,
                       // Closed projects are returned too — the API deliberately
@@ -1833,6 +2063,7 @@ const BomStructureDialog = ({
               <TextField
                 {...params}
                 label="Project"
+                sx={dialogAutocompleteFieldSx}
                 error={Boolean(projectsError)}
                 helperText={
                   projectsError
@@ -1864,6 +2095,9 @@ const BomStructureDialog = ({
                 size="small"
                 options={slotOptions}
                 value={reviseSlots}
+                PaperComponent={renderAutocompletePaper}
+                ListboxProps={{ sx: dialogAutocompleteListboxSx }}
+                noOptionsText="No slots available"
                 onChange={(_, value) => { setReviseSlots(value); setError(''); }}
                 loading={slotsLoading}
                 getOptionLabel={option => (option
@@ -1877,12 +2111,12 @@ const BomStructureDialog = ({
                 renderOption={(props, option) => (
                   <li {...props} key={option.bom_module_id}>
                     <Box>
-                      <Typography variant="body2">
+                      <Typography variant="body2" sx={{ color: fwTokens.text, fontSize: 12.5, fontWeight: 400, lineHeight: 1.25 }}>
                         {`#${slotOrdinal(option)}  `}
                         {option.bom_code || option.bom_module_id}
                         {option.version ? `  ·  v${option.version}` : ''}
                       </Typography>
-                      <Typography variant="caption" color="text.secondary">
+                      <Typography variant="caption" sx={{ color: fwTokens.muted, fontSize: 11.5, fontWeight: 400 }}>
                         {[
                           option.row_count
                             ? `${option.row_count} row${option.row_count === 1 ? '' : 's'}`
@@ -1905,6 +2139,7 @@ const BomStructureDialog = ({
                   <TextField
                     {...params}
                     label="Slots to move onto the new revision"
+                    sx={dialogAutocompleteFieldSx}
                     error={Boolean(slotsError)}
                     helperText={
                       slotsError
@@ -1939,12 +2174,13 @@ const BomStructureDialog = ({
   // sheet it is about rather than on a second screen.
   const renderSheets = () => (
     <>
-      <Typography variant="body2" sx={{ mb: 2, color: 'text.secondary' }}>
-        Which of these sheets contain a BOM, and does each one have levels? Sheets left
-        unchecked are still uploaded and mapped — they are just not used to build a BOM.
+      <Typography variant="body2" sx={stepCopySx}>
+        Choose the sheets that should build a BOM.
       </Typography>
       {sheetNames.length === 0 && (
-        <Alert severity="info">No sheets were detected in this file.</Alert>
+        <Alert severity="info" sx={dialogAlertSx('info')}>
+          No sheets were detected in this file.
+        </Alert>
       )}
       {sheetNames.map((name) => {
         const answer = answers[name] || blankSheetAnswer();
@@ -1953,31 +2189,39 @@ const BomStructureDialog = ({
         return (
           <Box
             key={name}
-            sx={{
-              mb: 1.5,
-              borderRadius: 1,
-              border: theme => `1px solid ${theme.palette.divider}`,
-              bgcolor: answer.hasBom ? 'action.hover' : 'transparent',
-              px: 1.5,
-              py: 0.5,
-            }}
+            sx={panelSx(Boolean(answer.hasBom))}
           >
             <FormControlLabel
               control={
                 <Checkbox
+                  size="small"
                   checked={Boolean(answer.hasBom)}
                   onChange={e => patch(name, { hasBom: e.target.checked })}
                 />
               }
               label={
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                  <span>{name}</span>
-                  <Chip size="small" variant="outlined" label={`${headers.length} columns`} />
+                  <Typography component="span" sx={{ color: fwTokens.text, fontSize: 13.5, fontWeight: 500 }}>
+                    {name}
+                  </Typography>
+                  <Chip
+                    size="small"
+                    variant="outlined"
+                    label={`${headers.length} columns`}
+                    sx={{
+                      height: 20,
+                      fontSize: 11,
+                      fontWeight: 500,
+                      color: fwTokens.muted,
+                      borderColor: fwTokens.strongBorder,
+                    }}
+                  />
                 </Box>
               }
+              sx={{ m: 0 }}
             />
             {answer.hasBom && (
-              <Box sx={{ pl: 4, pb: 1 }}>
+              <Box sx={{ pl: { xs: 0, sm: 3.5 }, pt: 1, pb: 0.25 }}>
                 <RadioGroup
                   row
                   value={answer.hasLevels ? 'yes' : 'no'}
@@ -2003,22 +2247,23 @@ const BomStructureDialog = ({
                   <FormControlLabel
                     value="no"
                     control={<Radio size="small" />}
-                    label="Single level — one flat list of components"
+                    label="Single level"
                   />
                   <FormControlLabel
                     value="yes"
                     control={<Radio size="small" />}
-                    label="Multi level — has sub-assemblies"
+                    label="Multi level"
                   />
                 </RadioGroup>
                 {answer.hasLevels && (
                   <>
-                    <FormControl size="small" sx={{ minWidth: 260, mt: 0.5 }}>
-                      <InputLabel>Level column</InputLabel>
+                    <FormControl size="small" sx={{ ...dialogFieldSx, width: 'min(260px, 100%)', mt: 0.75 }}>
+                      <InputLabel sx={dialogInputLabelSx}>Level column</InputLabel>
                       <Select
-                        label="Level column"
                         value={headers.includes(answer.levelColumn) ? answer.levelColumn : ''}
                         onChange={e => patch(name, { levelColumn: e.target.value })}
+                        sx={dialogSelectSx}
+                        MenuProps={dialogSelectMenuProps}
                       >
                         {headers.map(header => (
                           <MenuItem key={header} value={header}>{header}</MenuItem>
@@ -2026,8 +2271,8 @@ const BomStructureDialog = ({
                       </Select>
                     </FormControl>
                     {autoDetected && answer.levelColumn === autoDetected && (
-                      <Typography variant="caption" sx={{ display: 'block', mt: 0.5, color: 'text.secondary' }}>
-                        Detected “{autoDetected}” automatically — change it if that is the wrong column.
+                      <Typography variant="caption" sx={{ display: 'block', mt: 0.65, color: fwTokens.muted, fontSize: 11.5, fontWeight: 400 }}>
+                        Auto-detected "{autoDetected}".
                       </Typography>
                     )}
                   </>
@@ -2042,15 +2287,14 @@ const BomStructureDialog = ({
 
   const renderTree = () => (
     <>
-      <Typography variant="body2" sx={{ mb: 2, color: 'text.secondary' }}>
-        A BOM with levels is built as a tree: a finished good at the top, sub-assemblies
-        beneath it, and raw materials at the leaves. This is an example, not your data.
+      <Typography variant="body2" sx={stepCopySx}>
+        Confirm the detected tree shape.
       </Typography>
-      <ExampleTree />
-      <Divider sx={{ my: 2.5 }} />
+      <ExampleTree tokens={fwTokens} />
+      <Divider sx={{ my: 2.25, borderColor: fwTokens.subtleBorder }} />
       {leveledSheets.map((name) => (
-        <Box key={name} sx={{ mb: 2 }}>
-          <Typography variant="subtitle2">
+        <Box key={name} sx={{ mb: 1.5 }}>
+          <Typography variant="subtitle2" sx={{ color: fwTokens.text, fontSize: 13, fontWeight: 500, mb: 0.5 }}>
             Is “{name}” structured like this?
           </Typography>
           <RadioGroup
@@ -2062,9 +2306,8 @@ const BomStructureDialog = ({
             <FormControlLabel value="no" control={<Radio size="small" />} label="No" />
           </RadioGroup>
           {answers[name]?.treeConfirmed === false && (
-            <Alert severity="warning" sx={{ mt: 0.5 }}>
-              A BOM will not be generated for this sheet. It is still uploaded, mapped and
-              exported to the item directory — only the BOM is skipped.
+            <Alert severity="warning" sx={dialogAlertSx('warning', { mt: 0.5 })}>
+              BOM generation will be skipped for this sheet.
             </Alert>
           )}
         </Box>
@@ -2074,10 +2317,10 @@ const BomStructureDialog = ({
 
   const renderFinishedGood = () => (
     <>
-      <Typography variant="body2" sx={{ mb: 2, color: 'text.secondary' }}>
+      <Typography variant="body2" sx={stepCopySx}>
         {revisionTargetCode
-          ? `The finished good comes from ${reviseBom?.bom_code || 'the BOM you are revising'} and does not change — every revision of a BOM shares one finished good item. Only the BOM code gains the new revision number. The sub-assemblies below are still yours to name.`
-          : 'Every BOM needs a finished good — the thing it builds. FactWise counts BOM levels from 1, so that finished good’s own BOM is Level 1 and the assemblies inside it are Level 2. A single-level sheet lists components but not the thing they build; a multi-level sheet usually names its assembly above the table. Either way it becomes an item in the item directory as well.'}
+          ? `Finished good is inherited from ${reviseBom?.bom_code || 'the selected BOM'}.`
+          : 'Confirm the finished good and BOM details.'}
       </Typography>
       {sheetsNeedingRoot.map((name) => {
         const answer = answers[name] || blankSheetAnswer();
@@ -2089,8 +2332,8 @@ const BomStructureDialog = ({
         const code = revisionFinishedGoodCode || String(header.finishedGoodCode || '').trim();
         const structure = answer.hasLevels ? structureFor(name) : null;
         return (
-          <Box key={name} sx={{ mb: 3 }}>
-            <Typography variant="subtitle2" sx={{ mb: 1 }}>{name}</Typography>
+          <Box key={name} sx={{ mb: 1.5 }}>
+            <Typography variant="subtitle2" sx={{ mb: 0.7, color: fwTokens.text, fontSize: 13, fontWeight: 500 }}>{name}</Typography>
 
             {/* Rendered for EVERY sheet, not only levelled ones. The root's own
                 five fields live in this card, and a flat sheet has no
@@ -2098,25 +2341,19 @@ const BomStructureDialog = ({
                 no fields at all while Continue still demanded a finished good
                 code. Only the parts that actually read `structure` — the
                 sub-assembly rows and the documents checkbox — are conditional. */}
-              <Box
-                sx={{
-                  mb: 2,
-                  p: 1.5,
-                  borderRadius: 1,
-                  border: theme => `1px solid ${theme.palette.divider}`,
-                  bgcolor: 'action.hover',
-                }}
-              >
-                <Box sx={{ display: 'flex', alignItems: 'baseline', gap: 1, mb: 0.5 }}>
-                  <Typography variant="caption" sx={{ fontWeight: 700, width: 110 }}>
+              <Box sx={bomDetailCardSx}>
+                <Box sx={bomDetailHeaderSx}>
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.85, minWidth: 0, flex: '1 1 auto', flexWrap: 'wrap' }}>
+                    <Box component="span" sx={bomLevelLabelSx}>
                     Level 1 BOM
-                  </Typography>
-                  <Typography variant="caption" sx={{ color: code ? 'text.primary' : 'error.main' }}>
-                    {code
-                      ? `${code}${(revisionFinishedGoodCode ? reviseBomFinishedGood?.name : header.itemName)
-                        ? ` — ${revisionFinishedGoodCode ? reviseBomFinishedGood.name : header.itemName}` : ''}`
-                      : 'not found in the sheet — name it below'}
-                  </Typography>
+                    </Box>
+                    <Typography variant="caption" sx={{ ...bomLevelMetaSx, color: code ? fwTokens.muted : 'error.main' }}>
+                      {code
+                        ? `${code}${(revisionFinishedGoodCode ? reviseBomFinishedGood?.name : header.itemName)
+                          ? ` — ${revisionFinishedGoodCode ? reviseBomFinishedGood.name : header.itemName}` : ''}`
+                        : 'not found in the sheet — name it below'}
+                    </Typography>
+                  </Box>
                   {/* No "auto-detected" chip. Every BOM on this screen came out
                       of the sheet — the root as its shallowest row, the
                       sub-assemblies from the parent column — so the label was
@@ -2130,11 +2367,24 @@ const BomStructureDialog = ({
                       came from the BOM the user picked, not from the file — so
                       it keeps its chip. */}
                   {revisionTargetCode && (
-                    <Chip size="small" variant="outlined" label={`revising as ${revisionTargetCode}`} />
+                    <Chip
+                      size="small"
+                      variant="outlined"
+                      label={`revising as ${revisionTargetCode}`}
+                      sx={{
+                        height: 20,
+                        maxWidth: 230,
+                        fontSize: 11,
+                        fontWeight: 500,
+                        borderColor: fwTokens.strongBorder,
+                        '& .MuiChip-label': {
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                        },
+                      }}
+                    />
                   )}
-                  <Typography variant="caption" sx={{ color: 'text.secondary' }}>
-                    {revisionTargetCode ? '— inherited from the BOM being revised' : ''}
-                  </Typography>
                 </Box>
 
                 {/* The root's own five fields, inline and first.
@@ -2144,30 +2394,15 @@ const BomStructureDialog = ({
                     good and BOM code too, every BOM on this screen answers the
                     same five questions, so they belong in one list in tree
                     order with the root at the top. */}
-                <Box
-                  sx={{
-                    mb: 1.5,
-                    pl: 1.5,
-                    borderLeft: theme => `2px solid ${theme.palette.primary.main}`,
-                  }}
-                >
-                  <Box
-                    sx={{
-                      display: 'grid',
-                      gap: 1,
-                      gridTemplateColumns: {
-                        xs: '1fr',
-                        sm: 'repeat(2, minmax(0, 1fr))',
-                        md: 'minmax(140px, 1fr) minmax(140px, 1fr) minmax(150px, 1.2fr) minmax(105px, 0.6fr) minmax(95px, 0.5fr)',
-                      },
-                    }}
-                  >
+                <Box sx={{ ...bomFieldGroupSx(fwTokens.primary), mb: 1.15 }}>
+                  <Box sx={bomFieldsGridSx}>
                     <TextField
                       size="small"
                       required
                       label="Finished good code"
                       value={revisionFinishedGoodCode || header.finishedGoodCode}
                       disabled={Boolean(revisionFinishedGoodCode)}
+                      sx={dialogFieldSx}
                       onChange={(e) => {
                         const next = { finishedGoodCode: e.target.value };
                         if (!header.bomCodeTouched) next.bomCode = e.target.value;
@@ -2181,6 +2416,7 @@ const BomStructureDialog = ({
                       label="BOM code"
                       value={revisionTargetCode || header.bomCode}
                       disabled={Boolean(revisionTargetCode)}
+                      sx={dialogFieldSx}
                       onChange={(e) => {
                         const next = { bomCode: e.target.value, bomCodeTouched: true };
                         if (!header.bomNameTouched) next.bomName = e.target.value;
@@ -2191,20 +2427,23 @@ const BomStructureDialog = ({
                       size="small"
                       label="BOM name"
                       value={header.bomName}
+                      sx={dialogFieldSx}
                       onChange={e => patchHeader(name, { bomName: e.target.value, bomNameTouched: true })}
                     />
                     <TextField
                       size="small"
                       required
-                      label="Measurement unit"
+                      label="UOM"
                       value={header.measurementUnit}
+                      sx={dialogFieldSx}
                       onChange={e => patchHeader(name, { measurementUnit: e.target.value })}
                     />
                     <TextField
                       size="small"
                       type="number"
-                      label="Base quantity"
+                      label="Base qty"
                       value={header.baseQuantity}
+                      sx={dialogFieldSx}
                       onChange={e => patchHeader(name, { baseQuantity: e.target.value })}
                     />
                   </Box>
@@ -2226,15 +2465,14 @@ const BomStructureDialog = ({
                   <Box
                     key={assembly.code}
                     sx={{
-                      mb: 1.5,
-                      pl: 1.5,
-                      borderLeft: theme => `2px solid ${theme.palette.divider}`,
+                      mb: 1.15,
+                      ...bomFieldGroupSx(fwTokens.subtleBorder),
                     }}
                   >
-                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
-                      <Typography variant="caption" sx={{ fontWeight: 700 }}>
+                    <Box sx={{ ...bomDetailHeaderSx, mb: 0.85 }}>
+                      <Box component="span" sx={{ ...bomLevelLabelSx, bgcolor: 'transparent', color: fwTokens.text }}>
                         {`Level ${assembly.levelLabel} BOM`}
-                      </Typography>
+                      </Box>
                       {/* The code as the SHEET states it, so a renamed sub-BOM
                           can still be traced back to the row it came from.
                           Hidden once it matches, where it would only repeat the
@@ -2244,21 +2482,22 @@ const BomStructureDialog = ({
                           size="small"
                           variant="outlined"
                           label={`from sheet: ${assembly.code}`}
-                          sx={{ height: 20, fontSize: 11 }}
+                          sx={{
+                            height: 20,
+                            maxWidth: 220,
+                            fontSize: 11,
+                            fontWeight: 500,
+                            borderColor: fwTokens.strongBorder,
+                            '& .MuiChip-label': {
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              whiteSpace: 'nowrap',
+                            },
+                          }}
                         />
                       )}
                     </Box>
-                    <Box
-                      sx={{
-                        display: 'grid',
-                        gap: 1,
-                        gridTemplateColumns: {
-                          xs: '1fr',
-                          sm: 'repeat(2, minmax(0, 1fr))',
-                          md: 'minmax(140px, 1fr) minmax(140px, 1fr) minmax(150px, 1.2fr) minmax(105px, 0.6fr) minmax(95px, 0.5fr)',
-                        },
-                      }}
-                    >
+                    <Box sx={bomFieldsGridSx}>
                       {/* Same five fields as the Level 1 BOM, in the same
                           order. A sub-assembly is a BOM like any other; the
                           only reason it used to show four was that its item
@@ -2268,6 +2507,7 @@ const BomStructureDialog = ({
                         required
                         label="Finished good code"
                         value={subBomValue(name, assembly, 'finishedGoodCode')}
+                        sx={dialogFieldSx}
                         onChange={(e) => {
                           const next = { finishedGoodCode: e.target.value };
                           if (!subBomValue(name, assembly, 'bomCodeTouched')) next.bomCode = e.target.value;
@@ -2279,6 +2519,7 @@ const BomStructureDialog = ({
                         required
                         label="BOM code"
                         value={subBomValue(name, assembly, 'bomCode')}
+                        sx={dialogFieldSx}
                         onChange={e => patchSubBom(name, assembly.code, {
                           bomCode: e.target.value, bomCodeTouched: true,
                         })}
@@ -2287,20 +2528,23 @@ const BomStructureDialog = ({
                         size="small"
                         label="BOM name"
                         value={subBomValue(name, assembly, 'bomName')}
+                        sx={dialogFieldSx}
                         onChange={e => patchSubBom(name, assembly.code, { bomName: e.target.value })}
                       />
                       <TextField
                         size="small"
                         required
-                        label="Measurement unit"
+                        label="UOM"
                         value={subBomValue(name, assembly, 'measurementUnit')}
+                        sx={dialogFieldSx}
                         onChange={e => patchSubBom(name, assembly.code, { measurementUnit: e.target.value })}
                       />
                       <TextField
                         size="small"
                         type="number"
-                        label="Base quantity"
+                        label="Base qty"
                         value={subBomValue(name, assembly, 'baseQuantity')}
+                        sx={dialogFieldSx}
                         onChange={e => patchSubBom(name, assembly.code, { baseQuantity: e.target.value })}
                       />
                     </Box>
@@ -2324,23 +2568,106 @@ const BomStructureDialog = ({
   }[currentKey];
 
   return (
-    <Dialog open={open} onClose={onClose} maxWidth="lg" fullWidth>
-      <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+    <Dialog
+      open={open}
+      onClose={onClose}
+      maxWidth={false}
+      PaperProps={{
+        sx: {
+          width: dialogWidth,
+          maxHeight: 'min(720px, calc(100vh - 48px))',
+          borderRadius: '16px',
+          overflow: 'hidden',
+          bgcolor: fwTokens.surface,
+          color: fwTokens.text,
+          border: `1px solid ${fwTokens.strongBorder}`,
+          boxShadow: fwTokens.cardShadow,
+          transition: 'width 220ms cubic-bezier(0.22, 1, 0.36, 1)',
+        },
+      }}
+    >
+      <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1, px: 2.5, py: 1.8, borderBottom: `1px solid ${fwTokens.subtleBorder}` }}>
         <AccountTreeIcon fontSize="small" />
-        BOM structure
+        <Typography component="span" sx={{ fontSize: 17, fontWeight: 600, lineHeight: 1.25 }}>
+          BOM structure
+        </Typography>
       </DialogTitle>
-      <DialogContent dividers>
-        <Stepper activeStep={Math.min(step, steps.length - 1)} sx={{ mb: 3 }}>
+      <DialogContent
+        dividers
+        sx={{
+          px: 2.5,
+          py: 2.1,
+          borderColor: fwTokens.subtleBorder,
+          '& .MuiFormControlLabel-label': {
+            fontSize: 13,
+            fontWeight: 400,
+            color: fwTokens.text,
+            lineHeight: 1.3,
+          },
+          '& .MuiRadio-root, & .MuiCheckbox-root': {
+            color: fwTokens.muted,
+            '&.Mui-checked': {
+              color: fwTokens.primary,
+            },
+          },
+          '& .MuiTypography-body2': {
+            fontWeight: 400,
+          },
+        }}
+      >
+        <Stepper
+          activeStep={Math.min(step, steps.length - 1)}
+          sx={{
+            mb: 2.2,
+            '& .MuiStepConnector-line': {
+              borderColor: fwTokens.strongBorder,
+            },
+            '& .MuiStepLabel-label': {
+              fontSize: 12.5,
+              fontWeight: 500,
+              lineHeight: 1.25,
+              color: `${fwTokens.muted} !important`,
+              '&.Mui-active, &.Mui-completed': {
+                color: `${fwTokens.text} !important`,
+                fontWeight: 500,
+              },
+            },
+            '& .MuiStepIcon-root': {
+              fontSize: 21,
+              color: isDarkMode ? 'rgba(148, 163, 184, 0.7)' : '#94a3b8',
+              '&.Mui-active, &.Mui-completed': {
+                color: fwTokens.primary,
+              },
+            },
+          }}
+        >
           {steps.map(s => (
             <Step key={s.key}><StepLabel>{s.label}</StepLabel></Step>
           ))}
         </Stepper>
-        {body ? body() : null}
-        {error && <Alert severity="error" sx={{ mt: 2 }}>{error}</Alert>}
+        {body ? (
+          <Box key={currentKey} sx={stepTransitionSx}>
+            {body()}
+          </Box>
+        ) : null}
+        {error && <Alert severity="error" sx={dialogAlertSx('error', { mt: 2 })}>{error}</Alert>}
       </DialogContent>
-      <DialogActions>
-        <Button onClick={handleBack}>{step === 0 ? 'Cancel' : 'Back'}</Button>
-        <Button variant="contained" onClick={handleNext}>
+      <DialogActions sx={{ px: 2.5, py: 1.6, gap: 1, borderTop: `1px solid ${fwTokens.subtleBorder}` }}>
+        <Button
+          onClick={handleBack}
+          sx={step === 0 ? cancelButtonSx : softButtonSx}
+        >
+          {step === 0 ? 'Cancel' : 'Back'}
+        </Button>
+        <Button
+          variant="contained"
+          onClick={handleNext}
+          sx={{
+            ...factWisePrimaryButtonSx,
+            minWidth: 78,
+            height: 34,
+          }}
+        >
           {step === steps.length - 1 ? 'Continue' : 'Next'}
         </Button>
       </DialogActions>

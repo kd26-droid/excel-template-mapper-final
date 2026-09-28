@@ -17,6 +17,8 @@ import {
 } from '@mui/material';
 import { CallMerge as CallMergeIcon } from '@mui/icons-material';
 import api from '../services/api';
+import { useThemeContext } from '../utils/ThemeContext';
+import { buildFactWisePageTokens, factWiseCancelButtonSx } from '../utils/factwisePageStyles';
 
 const TESTS = [
   { value: 'blank', label: 'is empty', needsValue: false },
@@ -28,6 +30,9 @@ const TESTS = [
 ];
 
 const CarryForwardDialog = ({ open, onClose, sessionId, onApplied }) => {
+  const { isDarkMode, tokens: themeTokens } = useThemeContext();
+  const fwTokens = buildFactWisePageTokens(isDarkMode, themeTokens);
+  const cancelButtonSx = factWiseCancelButtonSx(fwTokens);
   const [columns, setColumns] = useState([]);
   const [loading, setLoading] = useState(false);
   const [preview, setPreview] = useState(null);
@@ -105,7 +110,7 @@ const CarryForwardDialog = ({ open, onClose, sessionId, onApplied }) => {
           </Box>
         ) : (
           <>
-            <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1 }}>A row is a summary/header row when…</Typography>
+            <Typography variant="subtitle2" sx={{ fontWeight: 600, mb: 1 }}>A row is a summary/header row when…</Typography>
             <Box sx={{ display: 'flex', gap: 1.5, mb: 2, flexWrap: 'wrap', alignItems: 'center' }}>
               <FormControl size="small" sx={{ minWidth: 200, flex: 1 }}>
                 <InputLabel>Column</InputLabel>
@@ -129,7 +134,7 @@ const CarryForwardDialog = ({ open, onClose, sessionId, onApplied }) => {
 
             <Divider sx={{ my: 2 }} />
 
-            <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1 }}>Copy details down from the summary row (optional)</Typography>
+            <Typography variant="subtitle2" sx={{ fontWeight: 600, mb: 1 }}>Copy details down from the summary row (optional)</Typography>
             <FormControl size="small" fullWidth sx={{ mb: 2 }}>
               <InputLabel>Columns to copy into the rows below</InputLabel>
               <Select
@@ -191,7 +196,7 @@ const CarryForwardDialog = ({ open, onClose, sessionId, onApplied }) => {
         )}
       </DialogContent>
       <DialogActions>
-        <Button onClick={onClose} disabled={running}>Cancel</Button>
+        <Button onClick={onClose} disabled={running} sx={cancelButtonSx}>Cancel</Button>
         <Button onClick={handlePreview} disabled={previewLoading || running || !canSubmit}>
           {previewLoading ? 'Previewing...' : 'Preview'}
         </Button>

@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap');
 
 @tailwind base;
 @tailwind components;
@@ -8,47 +8,50 @@
    CSS Custom Properties — dark mode is default, light via [data-theme]
    ═══════════════════════════════════════════════════════════════════════════ */
 :root {
-  --color-brand: #2563eb;
-  --color-primary: #2563eb;
-  --color-background: #0b0f19;
-  --color-card: rgba(19, 24, 35, 0.75);
-  --color-muted: #1e293b;
-  --color-border: rgba(255,255,255,0.14);
+  --fw-font-stack: "Inter Variable", Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --color-brand: #007aff;
+  --color-primary: #007aff;
+  --color-background: #0f131a;
+  --color-card: #171b23;
+  --color-muted: #1b1d23;
+  --color-border: #94a3b82e;
   --color-foreground: #f8fafc;
   --color-muted-foreground: #94a3b8;
 
-  --fw-menu-bg: #0d1527;
-  --fw-menu-border: rgba(255,255,255,0.14);
-  --fw-menu-shadow: 0 16px 36px -4px rgba(0,0,0,0.75), 0 0 20px rgba(37,99,235,0.15);
+  --fw-menu-bg: #171b23;
+  --fw-menu-border: rgba(148, 163, 184, 0.24);
+  --fw-menu-shadow: 0 16px 36px -24px rgba(0,0,0,0.7), 0 0 20px rgba(0,122,255,0.10);
   --fw-menu-item-text: #cbd5e1;
-  --fw-menu-item-hover-bg: rgba(37,99,235,0.18);
-  --fw-menu-item-hover-text: #60a5fa;
-  --fw-menu-item-selected-bg: rgba(37,99,235,0.28);
-  --fw-menu-item-selected-hover-bg: rgba(37,99,235,0.38);
+  --fw-menu-item-hover-bg: rgba(0,122,255,0.14);
+  --fw-menu-item-hover-text: #66b3ff;
+  --fw-menu-item-selected-bg: rgba(0,122,255,0.22);
+  --fw-menu-item-selected-hover-bg: rgba(0,122,255,0.30);
   --fw-menu-item-disabled: #64748b;
+  --fw-menu-max-width: min(420px, calc(100vw - 32px));
   --fw-scrollbar-thumb: rgba(99,131,200,0.4);
   --fw-scrollbar-thumb-hover: rgba(99,131,200,0.7);
 }
 
 :root[data-theme="light"] {
-  --color-brand: #2563eb;
-  --color-primary: #2563eb;
-  --color-background: #f4f7fb;
-  --color-card: rgba(255, 255, 255, 0.86);
-  --color-muted: #eef2f7;
-  --color-border: rgba(15,23,42,0.12);
-  --color-foreground: #111827;
-  --color-muted-foreground: #64748b;
+  --color-brand: #007aff;
+  --color-primary: #007aff;
+  --color-background: #f4f7ff;
+  --color-card: #ffffff;
+  --color-muted: #f3f4f6;
+  --color-border: rgba(25,33,46,0.12);
+  --color-foreground: #20242c;
+  --color-muted-foreground: #566070;
 
   --fw-menu-bg: #ffffff;
-  --fw-menu-border: rgba(15,23,42,0.12);
-  --fw-menu-shadow: 0 18px 40px -14px rgba(15,23,42,0.28), 0 0 18px rgba(37,99,235,0.08);
+  --fw-menu-border: rgba(25,33,46,0.12);
+  --fw-menu-shadow: 0 14px 34px -24px rgba(15,23,42,0.42), 0 8px 22px -20px rgba(0,122,255,0.30);
   --fw-menu-item-text: #334155;
-  --fw-menu-item-hover-bg: rgba(37,99,235,0.08);
-  --fw-menu-item-hover-text: #1d4ed8;
-  --fw-menu-item-selected-bg: rgba(37,99,235,0.15);
-  --fw-menu-item-selected-hover-bg: rgba(37,99,235,0.2);
+  --fw-menu-item-hover-bg: rgba(0,122,255,0.08);
+  --fw-menu-item-hover-text: #007aff;
+  --fw-menu-item-selected-bg: rgba(0,122,255,0.14);
+  --fw-menu-item-selected-hover-bg: rgba(0,122,255,0.20);
   --fw-menu-item-disabled: #94a3b8;
+  --fw-menu-max-width: min(420px, calc(100vw - 32px));
   --fw-scrollbar-thumb: rgba(100,116,139,0.32);
   --fw-scrollbar-thumb-hover: rgba(100,116,139,0.54);
 }
@@ -61,11 +64,22 @@
 body {
   margin: 0;
   padding: 0;
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-family: var(--fw-font-stack);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   background-color: var(--color-background);
   color: var(--color-foreground);
+}
+
+input[type="number"] {
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -91,16 +105,24 @@ body {
   background-color: #0f172a !important;
   color: #ffffff !important;
   font-size: 12px !important;
-  font-weight: 600 !important;
+  font-weight: 500 !important;
   border-radius: 10px !important;
   padding: 7px 14px !important;
   box-shadow: 0 12px 28px -4px rgba(15, 23, 42, 0.35) !important;
   border: 1px solid rgba(255, 255, 255, 0.1) !important;
 }
 
+:root[data-theme="light"] .MuiTooltip-tooltip {
+  background-color: #ffffff !important;
+  color: #334155 !important;
+  border: 1px solid rgba(15, 23, 42, 0.12) !important;
+  box-shadow: 0 18px 42px -24px rgba(15, 23, 42, 0.28), 0 8px 18px -16px rgba(0, 122, 255, 0.36) !important;
+}
+
 :root[data-theme="dark"] .MuiTooltip-tooltip {
-  background-color: #1e293b !important;
-  box-shadow: 0 12px 28px -4px rgba(0, 0, 0, 0.65), 0 0 15px rgba(37, 99, 235, 0.15) !important;
+  background-color: #171b23 !important;
+  color: #f8fafc !important;
+  box-shadow: 0 12px 28px -4px rgba(0, 0, 0, 0.65), 0 0 15px rgba(0, 122, 255, 0.14) !important;
   border: 1px solid rgba(255, 255, 255, 0.15) !important;
 }
 
@@ -108,8 +130,12 @@ body {
   color: #0f172a !important;
 }
 
+:root[data-theme="light"] .MuiTooltip-arrow {
+  color: #ffffff !important;
+}
+
 :root[data-theme="dark"] .MuiTooltip-arrow {
-  color: #1e293b !important;
+  color: #171b23 !important;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -123,8 +149,10 @@ body {
   border-radius: 12px !important;
   box-shadow: var(--fw-menu-shadow) !important;
   margin-top: 6px !important;
+  max-width: var(--fw-menu-max-width) !important;
   max-height: 224px !important;
   overflow-y: auto !important;
+  overflow-x: hidden !important;
 }
 
 .MuiMenu-paper::-webkit-scrollbar,
@@ -145,22 +173,32 @@ body {
 .fw-select-dropdown .MuiList-root { padding: 6px 0 !important; }
 
 .MuiMenu-paper .MuiMenuItem-root {
+  align-items: flex-start !important;
   border-radius: 8px !important;
   color: var(--fw-menu-item-text) !important;
   font-size: 13.5px !important;
-  font-weight: 500 !important;
+  font-weight: 400 !important;
+  line-height: 1.35 !important;
   margin: 2px 6px !important;
   padding: 8px 14px !important;
   transition: all 0.15s ease !important;
+  white-space: normal !important;
+  overflow-wrap: anywhere !important;
+  word-break: normal !important;
 }
 .MuiMenu-paper .MuiMenuItem-root:hover {
+  background-color: var(--fw-menu-item-hover-bg) !important;
+  color: var(--fw-menu-item-hover-text) !important;
+}
+.MuiMenu-paper .MuiMenuItem-root.Mui-focusVisible,
+.MuiMenu-paper .MuiMenuItem-root[data-focus="true"] {
   background-color: var(--fw-menu-item-hover-bg) !important;
   color: var(--fw-menu-item-hover-text) !important;
 }
 .MuiMenu-paper .MuiMenuItem-root.Mui-selected {
   background-color: var(--fw-menu-item-selected-bg) !important;
   color: var(--color-foreground) !important;
-  font-weight: 600 !important;
+  font-weight: 500 !important;
 }
 .MuiMenu-paper .MuiMenuItem-root.Mui-selected:hover {
   background-color: var(--fw-menu-item-selected-hover-bg) !important;
@@ -184,8 +222,8 @@ body {
 
 :root[data-theme="light"] .auth-grid-pattern {
   background-image:
-    linear-gradient(90deg, rgba(37, 99, 235, 0.075) 1px, transparent 0),
-    linear-gradient(180deg, rgba(37, 99, 235, 0.075) 1px, transparent 0);
+    linear-gradient(90deg, rgba(0, 122, 255, 0.065) 1px, transparent 0),
+    linear-gradient(180deg, rgba(0, 122, 255, 0.065) 1px, transparent 0);
 }
 
 .fw-expand-action {
@@ -197,7 +235,7 @@ body {
   display: inline-flex;
   font-family: inherit;
   font-size: 13px;
-  font-weight: 800;
+  font-weight: 500;
   height: 42px;
   justify-content: flex-start;
   min-width: 42px;
@@ -238,19 +276,19 @@ body {
    ═══════════════════════════════════════════════════════════════════════════ */
 .use-btn,
 .gradient-btn {
-  background: linear-gradient(135deg, #2563eb 0%, #0284c7 100%) !important;
+  background: linear-gradient(180deg, #0d80ff 0%, #007aff 100%) !important;
   color: #ffffff !important;
-  font-weight: 700 !important;
+  font-weight: 600 !important;
   border-radius: 10px !important;
   transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1) !important;
-  box-shadow: 0 4px 14px rgba(37, 99, 235, 0.45) !important;
+  box-shadow: 0 4px 14px rgba(0, 122, 255, 0.42) !important;
   border: 1px solid rgba(255, 255, 255, 0.2) !important;
 }
 .use-btn:hover,
 .gradient-btn:hover {
-  background: linear-gradient(135deg, #1d4ed8 0%, #0369a1 100%) !important;
+  background: linear-gradient(180deg, #1687ff 0%, #006ee6 100%) !important;
   transform: translateY(-2px) scale(1.03) !important;
-  box-shadow: 0 8px 25px rgba(37, 99, 235, 0.6) !important;
+  box-shadow: 0 8px 25px rgba(0, 122, 255, 0.54) !important;
 }
 .use-btn:active,
 .gradient-btn:active {

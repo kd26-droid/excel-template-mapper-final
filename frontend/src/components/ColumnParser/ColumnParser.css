@@ -61,7 +61,7 @@
 .parser-header-content h2 {
   margin: 0;
   font-size: 22px;
-  font-weight: 700;
+  font-weight: 600;
   letter-spacing: -0.5px;
 }
 
@@ -233,7 +233,7 @@
   border: 1px solid #e9ecef;
   border-radius: 8px;
   padding: 16px;
-  font-family: 'Monaco', 'Consolas', 'Courier New', monospace;
+  font-family: var(--fw-font-stack);
   font-size: 13px;
   color: #495057;
   word-break: break-all;
@@ -295,7 +295,7 @@
 }
 
 .parser-chip code {
-  font-family: 'Monaco', 'Consolas', monospace;
+  font-family: var(--fw-font-stack);
   background: #f1f3f4;
   padding: 2px 8px;
   border-radius: 4px;
@@ -347,7 +347,7 @@
 }
 
 .parser-groups-badge {
-  font-weight: 700;
+  font-weight: 600;
   color: #155724;
   font-size: 15px;
 }
@@ -381,7 +381,7 @@
   background: #e9ecef;
   padding: 2px 8px;
   border-radius: 4px;
-  font-family: 'Monaco', 'Consolas', monospace;
+  font-family: var(--fw-font-stack);
   font-size: 14px;
   color: #495057;
 }
@@ -404,7 +404,7 @@
 }
 
 .parser-char {
-  font-family: 'Monaco', 'Consolas', 'Courier New', monospace;
+  font-family: var(--fw-font-stack);
   font-size: 18px;
   padding: 4px 2px;
   cursor: default;
@@ -416,7 +416,7 @@
 
 .parser-char.delimiter {
   color: #e83e8c;
-  font-weight: 700;
+  font-weight: 600;
   cursor: pointer;
   background: #fff5f8;
 }
@@ -456,7 +456,7 @@
   color: white;
   padding: 6px 10px;
   border-radius: 6px;
-  font-family: 'Monaco', 'Consolas', monospace;
+  font-family: var(--fw-font-stack);
   font-size: 13px;
   font-weight: 600;
 }
@@ -523,12 +523,12 @@
   align-items: center;
   justify-content: center;
   font-size: 13px;
-  font-weight: 700;
+  font-weight: 600;
   flex-shrink: 0;
 }
 
 .parser-part-value {
-  font-family: 'Monaco', 'Consolas', monospace;
+  font-family: var(--fw-font-stack);
   font-size: 13px;
   color: #495057;
   background: white;
@@ -605,7 +605,7 @@
 .parser-stat-card .parser-stat-value {
   display: block;
   font-size: 32px;
-  font-weight: 800;
+  font-weight: 600;
   background: linear-gradient(135deg, #667eea, #764ba2);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
@@ -825,7 +825,7 @@
 }
 
 .parser-format-example {
-  font-family: 'Monaco', 'Consolas', monospace;
+  font-family: var(--fw-font-stack);
   font-size: 11px;
   color: #6c757d;
   background: #f8f9fa;
@@ -868,7 +868,7 @@
 }
 
 .parser-format-indicator strong {
-  font-weight: 700;
+  font-weight: 600;
 }
 
 .parser-format-count-small {
@@ -940,7 +940,7 @@
   background: rgba(255, 255, 255, 0.6);
   padding: 2px 8px;
   border-radius: 4px;
-  font-family: 'Monaco', 'Consolas', monospace;
+  font-family: var(--fw-font-stack);
 }
 
 .parser-separator-config {
@@ -995,12 +995,12 @@
   align-items: center;
   justify-content: center;
   font-size: 12px;
-  font-weight: 700;
+  font-weight: 600;
   flex-shrink: 0;
 }
 
 .parser-extracted-part .parser-part-value {
-  font-family: 'Monaco', 'Consolas', monospace;
+  font-family: var(--fw-font-stack);
   font-size: 13px;
   color: #333;
   max-width: 200px;
@@ -1015,7 +1015,7 @@
 
 .parser-section-title {
   font-size: 16px;
-  font-weight: 700;
+  font-weight: 600;
   color: #333;
   margin-bottom: 16px;
   padding-bottom: 8px;
@@ -1109,7 +1109,7 @@
   background: rgba(255, 255, 255, 0.7);
   border-radius: 6px;
   padding: 10px 14px;
-  font-family: 'Monaco', 'Consolas', monospace;
+  font-family: var(--fw-font-stack);
   font-size: 12px;
   color: #856404;
   margin-bottom: 12px;

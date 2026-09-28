@@ -77,7 +77,7 @@ export const LoaderCard = ({
         className="mt-4 text-[15px] leading-6 tracking-0"
         style={{
           color: text.heading || text.primary || (isDarkMode ? '#f8fafc' : '#0f172a'),
-          fontWeight: 650,
+          fontWeight: 500,
         }}
       >
         {title}

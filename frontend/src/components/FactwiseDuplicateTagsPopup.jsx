@@ -34,7 +34,7 @@ export default function FactwiseDuplicateTagsPopup({
     >
       <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
         <ContentCopyIcon color="warning" fontSize="small" />
-        <Typography variant="h6" sx={{ fontWeight: 650 }}>
+        <Typography variant="h6" sx={{ fontWeight: 500 }}>
           Duplicate Tags Detected
         </Typography>
       </DialogTitle>

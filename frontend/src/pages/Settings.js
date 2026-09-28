@@ -57,6 +57,13 @@ import {
   readItemDirectoryDefaults,
   writeItemDirectoryDefaults,
 } from '../utils/itemDirectoryDefaults';
+import {
+  buildFactWisePageTokens,
+  factWiseGlowSx,
+  factWiseGridOverlaySx,
+  factWisePageShellSx,
+  factWiseTopShadeSx,
+} from '../utils/factwisePageStyles';
 
 // All three providers are on by default. A part confirmed by any one of them is
 // valid, so querying all three gives the best coverage; a provider without
@@ -159,8 +166,8 @@ const cleanText = (value) => String(value ?? '').trim();
 const serverSettingsToItemDirectoryDefaults = (settings, currentDefaults = {}) => {
   const rule = settings?.item_code_rule || {};
   // The whole panel as it was last saved. This is the authority when present:
-  // the browser copy is a cache, and a new machine — or a deploy on a new
-  // origin — has no cache at all. `base` falls back to the browser copy only
+  // the browser copy is a cache, and a new machine â€” or a deploy on a new
+  // origin â€” has no cache at all. `base` falls back to the browser copy only
   // for rows saved before `ui_defaults` existed.
   const savedUi = settings?.ui_defaults && typeof settings.ui_defaults === 'object'
     ? settings.ui_defaults
@@ -184,7 +191,7 @@ const serverSettingsToItemDirectoryDefaults = (settings, currentDefaults = {}) =
     measurementUnit: preferServer(settings?.measurement_unit, base.measurementUnit),
     itemCodePrefix: preferServer(rule.prefix, base.itemCodePrefix),
     // Only the two modes the typed column can express are inferred from it.
-    // Anything else — copy, join, if / else — comes back from ui_defaults, and
+    // Anything else â€” copy, join, if / else â€” comes back from ui_defaults, and
     // an unknown mode stays unset rather than being guessed into 'serial'.
     itemCodeContentType: hasSavedUi
       ? (savedUi.itemCodeContentType || '')
@@ -213,8 +220,8 @@ const itemDirectoryDefaultsToServerSettings = (defaults) => {
   const fixedValue = cleanText(defaults.itemCodeDefaultValue);
   return {
     // The typed fields below are the ones the server applies to rows on its
-    // own. This carries the rest of the panel — the item code modes the typed
-    // rule cannot express, and the pinned column rules — so a fresh browser
+    // own. This carries the rest of the panel â€” the item code modes the typed
+    // rule cannot express, and the pinned column rules â€” so a fresh browser
     // gets everything back, not the handful of columns the table happens to
     // have.
     ui_defaults: defaults,
@@ -244,7 +251,7 @@ const itemDirectoryDefaultsToServerSettings = (defaults) => {
 
 const normalizeItemDirectoryDefaultsForSave = (defaults) => ({
   ...defaults,
-  // A row added but never filled in is not a rule — it should not survive Save.
+  // A row added but never filled in is not a rule â€” it should not survive Save.
   autoColumnRules: normalizeAutoColumnRules(defaults).filter(isFilledAutoColumnRule),
   // Saved as chosen. Defaulting to 'serial' here is what made an untouched
   // install generate item codes.
@@ -337,11 +344,11 @@ const normalizeItemCodeConditionalBranches = (defaults = {}) => {
 // Global default for BOM duplicate handling. Stored in localStorage so the
 // choice survives across sessions. The editor's BomDuplicatePolicyBanner
 // seeds this into a fresh session's server-side policy on first open when
-// the session has none of its own — that way exports honour the user's
+// the session has none of its own â€” that way exports honour the user's
 // preferred default without a manual click per session.
 //
 // One question, so one switch. It used to be a pair of radios, and the two
-// options were the same policy under two names — whichever you picked, the
+// options were the same policy under two names â€” whichever you picked, the
 // export was identical.
 //
 // Off does NOT mean "silently keep two rows": FactWise refuses a BOM that lists
@@ -361,7 +368,7 @@ const BomDuplicatePolicyDefaultSection = ({ t, panelSx, sectionHeaderSx }) => {
       // stored values from the radio version land on the same behaviour they
       // already had rather than silently flipping to unresolved duplicates.
       return window.localStorage.getItem(GLOBAL_DUP_POLICY_KEY) !== POLICY_KEEP;
-    } catch (_) { /* localStorage disabled — fall through */ }
+    } catch (_) { /* localStorage disabled â€” fall through */ }
     return GLOBAL_DUP_POLICY_DEFAULT === POLICY_AGGREGATE;
   });
   const [savedAt, setSavedAt] = React.useState(0);
@@ -381,7 +388,7 @@ const BomDuplicatePolicyDefaultSection = ({ t, panelSx, sectionHeaderSx }) => {
             <TableChartIcon fontSize="small" />
           </Box>
           <Box>
-            <Typography sx={{ fontSize: 16, fontWeight: 700, color: t.text.heading }}>BOM duplicate handling</Typography>
+            <Typography sx={{ fontSize: 16, fontWeight: 500, color: t.text.heading }}>BOM duplicate handling</Typography>
             <Typography sx={{ fontSize: 12.5, color: t.text.secondary }}>
               Default policy applied when a sheet has the same item on more than one BOM row. Per-session overrides live in the editor.
             </Typography>
@@ -394,19 +401,19 @@ const BomDuplicatePolicyDefaultSection = ({ t, panelSx, sectionHeaderSx }) => {
           sx={{ alignItems: 'flex-start', mr: 0, ml: 0, '.MuiSwitch-root': { mt: 0.25 } }}
           label={
             <Box sx={{ ml: 1 }}>
-              <Typography variant="body2" sx={{ fontWeight: 600, color: t.text.heading }}>
+              <Typography variant="body2" sx={{ fontWeight: 500, color: t.text.heading }}>
                 Aggregate quantity of the same item within a level
               </Typography>
               <Typography variant="caption" sx={{ color: t.text.secondary }}>
                 {aggregate
                   ? 'The same item listed more than once at one level becomes a single row, with the quantities added together.'
-                  : 'Those rows are left as they are. FactWise does not accept a part listed twice in one BOM, so the export will report them and stop — resolve each one in the editor.'}
+                  : 'Those rows are left as they are. FactWise does not accept a part listed twice in one BOM, so the export will report them and stop â€” resolve each one in the editor.'}
               </Typography>
             </Box>
           }
         />
         <Typography variant="caption" sx={{ color: t.text.secondary, display: 'block', mt: 1.5 }}>
-          {savedAt ? 'Saved. Applies to sheets you open from now on.' : 'Change to update immediately — no save button.'}
+          {savedAt ? 'Saved. Applies to sheets you open from now on.' : 'Change to update immediately â€” no save button.'}
           {' '}Whatever this is set to, the banner above the grid in the editor lets you set an exact quantity for any individual group.
         </Typography>
       </Box>
@@ -430,12 +437,12 @@ const EXPORT_VERSION_3 = '3.0';
 const EXPORT_VERSION_4 = '4.0';
 const EXPORT_VERSION_DEFAULT = EXPORT_VERSION_3;
 
-const ExportVersionDefaultSection = ({ t, panelSx, sectionHeaderSx }) => {
+const ExportVersionDefaultSection = ({ t, panelSx, sectionHeaderSx, settingsMenuProps }) => {
   const [version, setVersion] = React.useState(() => {
     try {
       const stored = window.localStorage.getItem(FW_EXPORT_VERSION_KEY);
       return stored === EXPORT_VERSION_4 ? EXPORT_VERSION_4 : EXPORT_VERSION_DEFAULT;
-    } catch (_) { /* localStorage disabled — fall through */ }
+    } catch (_) { /* localStorage disabled â€” fall through */ }
     return EXPORT_VERSION_DEFAULT;
   });
   const [savedAt, setSavedAt] = React.useState(0);
@@ -457,7 +464,7 @@ const ExportVersionDefaultSection = ({ t, panelSx, sectionHeaderSx }) => {
             <TableChartIcon fontSize="small" />
           </Box>
           <Box>
-            <Typography sx={{ fontSize: 16, fontWeight: 700, color: t.text.heading }}>Default export version</Typography>
+            <Typography sx={{ fontSize: 16, fontWeight: 500, color: t.text.heading }}>Default export version</Typography>
             <Typography sx={{ fontSize: 12.5, color: t.text.secondary }}>
               Which shape the BOM export produces. Applies to sheets you export from now on.
             </Typography>
@@ -466,18 +473,18 @@ const ExportVersionDefaultSection = ({ t, panelSx, sectionHeaderSx }) => {
       </Box>
       <Box sx={{ p: 2.5 }}>
         <FormControl size="small" sx={{ minWidth: 220 }}>
-          <Select value={version} onChange={handleChange}>
-            <MenuItem value={EXPORT_VERSION_3}>3.0 — item and BOM as separate sheets</MenuItem>
-            <MenuItem value={EXPORT_VERSION_4}>4.0 — one combined sheet</MenuItem>
+          <Select value={version} onChange={handleChange} MenuProps={settingsMenuProps}>
+            <MenuItem value={EXPORT_VERSION_3}>3.0 â€” item and BOM as separate sheets</MenuItem>
+            <MenuItem value={EXPORT_VERSION_4}>4.0 â€” one combined sheet</MenuItem>
           </Select>
         </FormControl>
         <Typography variant="body2" sx={{ color: t.text.secondary, mt: 1.75 }}>
           {version === EXPORT_VERSION_4
             ? 'One sheet carrying the item columns and the BOM structure columns (Level, Quantity, BOM Qty) together, plus the Finished good code and BOM code FactWise needs to place each line.'
-            : 'Two files: an item directory, and a BOM sheet laid out the way FactWise’s revision import reads it.'}
+            : 'Two files: an item directory, and a BOM sheet laid out the way FactWiseâ€™s revision import reads it.'}
         </Typography>
         <Typography variant="caption" sx={{ color: t.text.secondary, display: 'block', mt: 1.25 }}>
-          {savedAt ? 'Saved.' : 'Change to update immediately — no save button.'}
+          {savedAt ? 'Saved.' : 'Change to update immediately â€” no save button.'}
         </Typography>
       </Box>
     </Paper>
@@ -486,6 +493,7 @@ const ExportVersionDefaultSection = ({ t, panelSx, sectionHeaderSx }) => {
 
 const Settings = () => {
   const { tokens: t, isDarkMode } = useThemeContext();
+  const fwPageTokens = buildFactWisePageTokens(isDarkMode, t);
   const [digikeyClientId, setDigikeyClientId] = useState('');
   const [digikeyClientSecret, setDigikeyClientSecret] = useState('');
   const [digikeyRedirectUri, setDigikeyRedirectUri] = useState('');
@@ -505,7 +513,6 @@ const Settings = () => {
   const [deletingProvider, setDeletingProvider] = useState('');
   const [providerMessages, setProviderMessages] = useState({ digikey: null, mouser: null, element14: null });
   const [toast, setToast] = useState({ open: false, severity: 'success', message: '' });
-  const [mousePos, setMousePos] = useState({ x: 50, y: 36 });
   const itemCodeContentType = itemDirectoryDefaults.itemCodeContentType || 'serial';
   const itemCodeRowsToUpdate = itemDirectoryDefaults.itemCodeRowsToUpdate || 'fill_empty';
   const itemCodeConditionalBranches = useMemo(
@@ -525,7 +532,7 @@ const Settings = () => {
     const seen = new Set();
     // The FactWise template, not the last sheet someone opened. Settings has no
     // session, and sourcing it from one meant this list carried whatever that
-    // sheet had grown — Tag_1…Tag_8, Tag_1__2, and other per-sheet artefacts.
+    // sheet had grown â€” Tag_1â€¦Tag_8, Tag_1__2, and other per-sheet artefacts.
     // Anything already saved in a rule is kept on the end so an existing choice
     // never disappears from its own dropdown.
     return [...FACTWISE_TEMPLATE_COLUMNS, ...savedColumns]
@@ -542,7 +549,7 @@ const Settings = () => {
     [itemDirectoryDefaults]
   );
 
-  // ─── SAVED COLUMN RULES ───────────────────────────────────────────────────
+  // â”€â”€â”€ SAVED COLUMN RULES â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Same builder the editor's Fill / Create Column dialog uses; saving one
   // stores the rule payload so any session can replay it by name.
   const [columnRules, setColumnRules] = useState([]);
@@ -561,7 +568,7 @@ const Settings = () => {
 
   useEffect(() => { loadColumnRules(); }, [loadColumnRules]);
 
-  // Arriving from the dashboard's Edit button — load that rule into the
+  // Arriving from the dashboard's Edit button â€” load that rule into the
   // builder and scroll to it, so Edit lands somewhere useful.
   const settingsLocation = useLocation();
   const requestedRuleId = settingsLocation.state?.editColumnRuleId;
@@ -607,7 +614,7 @@ const Settings = () => {
 
   // When embedded inside Factwise, distributor credentials are managed in
   // Factwise Admin and silently synced into this app's own store. Hide the
-  // "API Providers" panel — the rest of Settings still works as normal.
+  // "API Providers" panel â€” the rest of Settings still works as normal.
   const {
     isEmbedded: isFactwiseEmbedded,
     entityName: factwiseEntityName,
@@ -619,7 +626,7 @@ const Settings = () => {
   } = useFactwise();
 
   // The only screen that needs the entity list, so it is the only one that
-  // asks for it — once, when it opens.
+  // asks for it â€” once, when it opens.
   useEffect(() => { loadEntities?.(); }, [loadEntities]);
 
   const readyCount = useMemo(
@@ -652,7 +659,7 @@ const Settings = () => {
   useEffect(() => {
     const cleanEntityName = String(factwiseEntityName || '').trim();
     const cleanEntityId = String(factwiseEntityId || '').trim();
-    // An id alone is enough now — FactWise does not always send the name, and
+    // An id alone is enough now â€” FactWise does not always send the name, and
     // waiting for one meant the saved panel was never fetched on those launches.
     if (!cleanEntityName && !cleanEntityId) return;
     let cancelled = false;
@@ -675,7 +682,7 @@ const Settings = () => {
         writeItemDirectoryDefaults(next);
 
         // Defaults are stored per entity name. When the resolved entity changes
-        // — which it does the moment a wrong name is corrected — the old row is
+        // â€” which it does the moment a wrong name is corrected â€” the old row is
         // stranded under the old key and the settings look lost. Re-save what
         // is still in the browser under the entity now in force.
         //
@@ -720,17 +727,6 @@ const Settings = () => {
   }, []);
 
   useEffect(() => {
-    const handleMouseMove = (event) => {
-      setMousePos({
-        x: (event.clientX / window.innerWidth) * 100,
-        y: (event.clientY / window.innerHeight) * 100
-      });
-    };
-    window.addEventListener('mousemove', handleMouseMove);
-    return () => window.removeEventListener('mousemove', handleMouseMove);
-  }, []);
-
-  useEffect(() => {
     let cancelled = false;
     const loadCredentials = async () => {
       setLoadingCredentials(true);
@@ -762,18 +758,44 @@ const Settings = () => {
   }, [credentialScopeId]);
 
   const pageSx = {
+    ...factWisePageShellSx(fwPageTokens),
     minHeight: '100vh',
-    px: { xs: 2, md: 3 },
-    py: { xs: 2, md: 2.5 },
-    bgcolor: t.background.app,
+    px: { xs: 1.5, md: 3, lg: 4 },
+    pt: { xs: 2, md: 2.35 },
+    pb: { xs: 2, md: 3 },
     color: t.text.primary,
-    position: 'relative',
-    overflow: 'hidden',
-    '& > *': { position: 'relative', zIndex: 1 }
+    '& > *': { position: 'relative', zIndex: 1 },
+    '& .MuiTypography-root': {
+      letterSpacing: 0,
+    },
+    '& .MuiTypography-body1, & .MuiTypography-body2, & .MuiTypography-caption': {
+      fontWeight: 400,
+    },
+    '& .MuiButton-root': {
+      minHeight: 30,
+      fontSize: '12.25px',
+      fontWeight: 450,
+      textTransform: 'none',
+      lineHeight: 1,
+    },
+    '& .MuiChip-root': {
+      height: 21,
+      fontSize: '11px',
+      fontWeight: 450,
+    },
+    '& .MuiInputBase-input, & .MuiSelect-select': {
+      fontSize: '13px',
+      fontWeight: 400,
+    },
+    '& .MuiFormHelperText-root': {
+      mt: 0.45,
+      fontSize: '11px',
+      lineHeight: 1.3,
+    }
   };
 
   const panelSx = {
-    borderRadius: '16px',
+    borderRadius: '14px',
     border: `1px solid ${t.border.default}`,
     background: t.surface.elevatedGradient,
     boxShadow: t.shadow.card,
@@ -781,8 +803,8 @@ const Settings = () => {
   };
 
   const sectionHeaderSx = {
-    px: 2.5,
-    py: 2,
+    px: 2.25,
+    py: 1.45,
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'space-between',
@@ -793,13 +815,65 @@ const Settings = () => {
 
   const fieldSx = {
     '& .MuiOutlinedInput-root': {
-      borderRadius: '12px',
+      minHeight: 34,
+      height: 34,
+      borderRadius: '10px',
       bgcolor: t.surface.input,
-      fontSize: 14
+      fontSize: 13,
+      fontWeight: 400,
+      '& .MuiOutlinedInput-input': {
+        height: 34,
+        boxSizing: 'border-box',
+        py: 0,
+        px: 1.35,
+        fontSize: '13px',
+        fontWeight: 400,
+      },
+      '& .MuiSelect-select': {
+        minHeight: '0 !important',
+        height: '34px !important',
+        display: 'flex',
+        alignItems: 'center',
+        boxSizing: 'border-box',
+        py: '0 !important',
+        fontSize: '13px',
+        fontWeight: 400,
+      }
     },
     '& .MuiFormHelperText-root': {
       color: t.text.secondary
     }
+  };
+
+  const settingsMenuProps = {
+    PaperProps: {
+      sx: {
+        maxHeight: 216,
+        bgcolor: t.surface.panel,
+        color: t.text.primary,
+        border: `1px solid ${t.border.subtle}`,
+        borderRadius: '10px',
+        boxShadow: t.shadow.card,
+        '& .MuiList-root': {
+          py: 0.5,
+        },
+        '& .MuiMenuItem-root': {
+          minHeight: 30,
+          py: 0.45,
+          px: 1.25,
+          fontSize: '12.25px',
+          fontWeight: 400,
+          lineHeight: 1.25,
+        },
+        '& .MuiListItemText-primary': {
+          fontSize: '12.25px',
+          fontWeight: 400,
+        },
+        '& .MuiListItemText-secondary': {
+          fontSize: '11px',
+        },
+      },
+    },
   };
 
   const secretInputSx = {
@@ -875,7 +949,7 @@ const Settings = () => {
       label={configured ? 'Configured' : 'Not configured'}
       sx={{
         height: 22,
-        fontWeight: 650,
+        fontWeight: 450,
         fontSize: 11.5,
         color: configured ? t.color.successText : t.text.secondary,
         bgcolor: configured ? t.state.successBg : t.surface.controlSoft,
@@ -1143,18 +1217,18 @@ const Settings = () => {
     const meta = providerMeta[provider];
     const ProviderIcon = meta.Icon || VpnKeyIcon;
     const message = providerMessages[provider];
-    const minCardHeight = provider === 'digikey' ? 334 : 168;
+    const minCardHeight = provider === 'digikey' ? 284 : 142;
     return (
-      <Paper elevation={0} sx={{ p: 2.25, minHeight: minCardHeight, height: provider === 'digikey' ? '100%' : 'auto', borderRadius: '14px', border: `1px solid ${t.border.subtle}`, bgcolor: t.surface.panel, display: 'flex', flexDirection: 'column' }}>
-        <Box sx={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 1.5, mb: 1.75 }}>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25, minWidth: 0 }}>
-            <Box sx={{ width: 34, height: 34, borderRadius: '10px', display: 'grid', placeItems: 'center', bgcolor: meta.soft, color: meta.color }}>
+      <Paper elevation={0} sx={{ p: 1.8, minHeight: minCardHeight, height: provider === 'digikey' ? '100%' : 'auto', borderRadius: '12px', border: `1px solid ${t.border.subtle}`, bgcolor: t.surface.panel, display: 'flex', flexDirection: 'column' }}>
+        <Box sx={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 1.25, mb: 1.45 }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, minWidth: 0 }}>
+            <Box sx={{ width: 30, height: 30, borderRadius: '9px', display: 'grid', placeItems: 'center', bgcolor: meta.soft, color: meta.color }}>
               <ProviderIcon fontSize="small" />
             </Box>
             <Box sx={{ minWidth: 0 }}>
-              <Typography sx={{ fontSize: 15, fontWeight: 650, color: t.text.heading, lineHeight: 1.25 }}>{title}</Typography>
+              <Typography sx={{ fontSize: 13.5, fontWeight: 450, color: t.text.heading, lineHeight: 1.25 }}>{title}</Typography>
               {description && (
-                <Typography sx={{ fontSize: 12.5, color: t.text.secondary, mt: 0.25, lineHeight: 1.35 }}>{description}</Typography>
+                <Typography sx={{ fontSize: 12, color: t.text.secondary, mt: 0.25, lineHeight: 1.35 }}>{description}</Typography>
               )}
             </Box>
           </Box>
@@ -1175,7 +1249,7 @@ const Settings = () => {
         <Box sx={{ flex: 1 }}>
           {children}
         </Box>
-        <Stack direction="row" spacing={1} sx={{ flexShrink: 0, justifyContent: 'flex-end', mt: provider === 'digikey' ? 'auto' : 1.75, pt: provider === 'digikey' ? 2 : 0 }}>
+        <Stack direction="row" spacing={0.75} sx={{ flexShrink: 0, justifyContent: 'flex-end', mt: provider === 'digikey' ? 'auto' : 1.35, pt: provider === 'digikey' ? 1.4 : 0 }}>
             <Button
               size="small"
               variant="outlined"
@@ -1202,37 +1276,19 @@ const Settings = () => {
 
   return (
     <Box sx={pageSx}>
-      <Box
-        sx={{
-          pointerEvents: 'none',
-          position: 'absolute',
-          transition: 'all 0.7s cubic-bezier(0.16, 1, 0.3, 1)',
-          borderRadius: '50%',
-          opacity: 0.36,
-          width: '62vw',
-          height: '62vw',
-          left: `${mousePos.x}%`,
-          top: `${mousePos.y}%`,
-          transform: 'translate(-50%, -50%)',
-          filter: 'blur(90px)',
-          background: 'radial-gradient(circle, var(--color-brand, #2383e2) 0%, transparent 70%)',
-          zIndex: 0
-        }}
-      />
-      <Box
-        className="auth-grid-pattern"
-        sx={{ position: 'absolute', inset: 0, pointerEvents: 'none', opacity: 0.45, zIndex: 0 }}
-      />
-      <Box sx={{ maxWidth: 1320, mx: 'auto' }}>
-        <Box sx={{ mb: 2.5, display: 'flex', justifyContent: 'space-between', alignItems: { xs: 'flex-start', md: 'center' }, gap: 2, flexDirection: { xs: 'column', md: 'row' } }}>
+      <Box sx={factWiseTopShadeSx(isDarkMode)} />
+      <Box sx={factWiseGlowSx(fwPageTokens)} />
+      <Box sx={factWiseGridOverlaySx(fwPageTokens)} />
+      <Box sx={{ width: '100%', maxWidth: 1440, mx: 'auto' }}>
+        <Box sx={{ mb: 1.35, display: 'flex', justifyContent: 'space-between', alignItems: { xs: 'flex-start', md: 'center' }, gap: 1.5, flexDirection: { xs: 'column', md: 'row' } }}>
           <Box>
-            <Typography sx={{ fontSize: { xs: 26, md: 30 }, fontWeight: 700, letterSpacing: 0, color: t.text.heading, lineHeight: 1.1 }}>
+            <Typography sx={{ fontSize: { xs: 24, md: 26 }, fontWeight: 500, letterSpacing: 0, color: t.text.heading, lineHeight: 1.12 }}>
               Settings
             </Typography>
           </Box>
-          <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap' }}>
-            <Chip label={`${readyCount}/${columnMappings.length} columns ready`} size="small" sx={{ height: 24, fontWeight: 650, fontSize: 11.5, bgcolor: t.action.primarySoft, color: t.color.primarySoftText }} />
-            <Chip label={hasAnyProvider ? 'Provider available' : 'Setup required'} size="small" sx={{ height: 24, fontWeight: 650, fontSize: 11.5, bgcolor: hasAnyProvider ? t.state.successBg : t.state.warningBg, color: hasAnyProvider ? t.color.successText : t.color.warningText }} />
+          <Stack direction="row" spacing={0.75} sx={{ flexWrap: 'wrap' }}>
+            <Chip label={`${readyCount}/${columnMappings.length} columns ready`} size="small" sx={{ bgcolor: t.action.primarySoft, color: t.color.primarySoftText }} />
+            <Chip label={hasAnyProvider ? 'Provider available' : 'Setup required'} size="small" sx={{ bgcolor: hasAnyProvider ? t.state.successBg : t.state.warningBg, color: hasAnyProvider ? t.color.successText : t.color.warningText }} />
           </Stack>
         </Box>
 
@@ -1256,7 +1312,7 @@ const Settings = () => {
                 <Typography
                   sx={{
                     fontSize: 12.5,
-                    fontWeight: 650,
+                    fontWeight: 450,
                     color: t.text.secondary,
                     mr: 0.5,
                   }}
@@ -1274,7 +1330,7 @@ const Settings = () => {
                       label={`${label}: ${connected ? 'Connected' : 'Not connected'}`}
                       sx={{
                         height: 22,
-                        fontWeight: 650,
+                        fontWeight: 450,
                         fontSize: 11.5,
                         color: connected ? t.color.successText : t.text.secondary,
                         bgcolor: connected ? t.state.successBg : t.surface.controlSoft,
@@ -1298,7 +1354,7 @@ const Settings = () => {
                     <HubIcon fontSize="small" />
                   </Box>
                   <Box>
-                    <Typography sx={{ fontSize: 16, fontWeight: 700, color: t.text.heading }}>API Providers</Typography>
+                    <Typography sx={{ fontSize: 16, fontWeight: 500, color: t.text.heading }}>API Providers</Typography>
                   </Box>
                 </Box>
                 {loadingCredentials && <CircularProgress size={20} />}
@@ -1430,7 +1486,7 @@ const Settings = () => {
                     <TableChartIcon fontSize="small" />
                   </Box>
                   <Box>
-                    <Typography sx={{ fontSize: 16, fontWeight: 700, color: t.text.heading }}>Item Directory Defaults</Typography>
+                    <Typography sx={{ fontSize: 16, fontWeight: 500, color: t.text.heading }}>Item Directory Defaults</Typography>
                     <Typography sx={{ mt: 0.25, fontSize: 12.5, color: t.text.secondary }}>
                       Used to fill recurring required fields before exporting to FactWise.
                     </Typography>
@@ -1442,7 +1498,7 @@ const Settings = () => {
                   color="error"
                   onClick={handleClearItemDirectoryDefaults}
                   disabled={!hasItemDirectoryDefaults}
-                  sx={{ borderRadius: '999px', fontWeight: 700, textTransform: 'none' }}
+                  sx={{ borderRadius: '999px', fontWeight: 500, textTransform: 'none' }}
                 >
                   Clear
                 </Button>
@@ -1470,6 +1526,7 @@ const Settings = () => {
                         }}
                         helperText={`${factwiseEntities.length} entities on this account`}
                         sx={fieldSx}
+                        SelectProps={{ MenuProps: settingsMenuProps }}
                       >
                         {factwiseEntities.map(entity => (
                           <MenuItem key={entity.id || entity.name} value={entity.name}>{entity.name}</MenuItem>
@@ -1501,6 +1558,7 @@ const Settings = () => {
                       value={itemDirectoryDefaults.itemType || ''}
                       onChange={(event) => handleItemDirectoryDefaultChange('itemType', event.target.value)}
                       sx={fieldSx}
+                      SelectProps={{ MenuProps: settingsMenuProps }}
                     >
                       {ITEM_TYPE_OPTIONS.map(option => (
                         <MenuItem key={option} value={option}>{displayHeaderName(option, itemCodeSourceColumnOptions)}</MenuItem>
@@ -1520,6 +1578,7 @@ const Settings = () => {
                         value={itemDirectoryDefaults[item.key] || ''}
                         onChange={(event) => handleItemDirectoryDefaultChange(item.key, event.target.value)}
                         sx={fieldSx}
+                        SelectProps={{ MenuProps: settingsMenuProps }}
                       >
                         <MenuItem value="TRUE">TRUE</MenuItem>
                         <MenuItem value="FALSE">FALSE</MenuItem>
@@ -1554,6 +1613,7 @@ const Settings = () => {
                             value={itemCodeContentType}
                             onChange={(event) => handleItemDirectoryDefaultChange('itemCodeContentType', event.target.value)}
                             sx={fieldSx}
+                            SelectProps={{ MenuProps: settingsMenuProps }}
                           >
                             {ITEM_CODE_CONTENT_TYPE_OPTIONS.map(option => (
                               <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
@@ -1569,6 +1629,7 @@ const Settings = () => {
                             value={itemCodeRowsToUpdate}
                             onChange={(event) => handleItemDirectoryDefaultChange('itemCodeRowsToUpdate', event.target.value)}
                             sx={fieldSx}
+                            SelectProps={{ MenuProps: settingsMenuProps }}
                           >
                             {ITEM_CODE_ROWS_TO_UPDATE_OPTIONS.map(option => (
                               <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
@@ -1597,6 +1658,7 @@ const Settings = () => {
                               value={itemDirectoryDefaults.itemCodeCopyFromColumn || ''}
                               onChange={(event) => handleItemDirectoryDefaultChange('itemCodeCopyFromColumn', event.target.value)}
                               sx={fieldSx}
+                              SelectProps={{ MenuProps: settingsMenuProps }}
                             >
                               <MenuItem value="">Select source column</MenuItem>
                               {itemCodeSourceColumnOptions.map(option => (
@@ -1616,6 +1678,7 @@ const Settings = () => {
                                 value={itemDirectoryDefaults.itemCodeJoinFirstColumn || ''}
                                 onChange={(event) => handleItemDirectoryDefaultChange('itemCodeJoinFirstColumn', event.target.value)}
                                 sx={fieldSx}
+                                SelectProps={{ MenuProps: settingsMenuProps }}
                               >
                                 <MenuItem value="">Select first column</MenuItem>
                                 {itemCodeSourceColumnOptions.map(option => (
@@ -1632,6 +1695,7 @@ const Settings = () => {
                                 value={itemDirectoryDefaults.itemCodeJoinSecondColumn || ''}
                                 onChange={(event) => handleItemDirectoryDefaultChange('itemCodeJoinSecondColumn', event.target.value)}
                                 sx={fieldSx}
+                                SelectProps={{ MenuProps: settingsMenuProps }}
                               >
                                 <MenuItem value="">Select second column</MenuItem>
                                 {itemCodeSourceColumnOptions.map(option => (
@@ -1648,6 +1712,7 @@ const Settings = () => {
                                 value={itemDirectoryDefaults.itemCodeJoinSeparatorMode || 'space'}
                                 onChange={(event) => handleItemDirectoryDefaultChange('itemCodeJoinSeparatorMode', event.target.value)}
                                 sx={fieldSx}
+                                SelectProps={{ MenuProps: settingsMenuProps }}
                               >
                                 {ITEM_CODE_SEPARATOR_OPTIONS.map(option => (
                                   <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
@@ -1681,7 +1746,7 @@ const Settings = () => {
                                   }}
                                 >
                                   <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1.5 }}>
-                                    <Typography sx={{ fontSize: 14, fontWeight: 700, color: t.text.heading }}>
+                                    <Typography sx={{ fontSize: 14, fontWeight: 500, color: t.text.heading }}>
                                       {branchIndex === 0 ? 'If' : 'Else if'} condition {branchIndex + 1}
                                     </Typography>
                                     {itemCodeConditionalBranches.length > 1 && (
@@ -1700,6 +1765,7 @@ const Settings = () => {
                                         value={branch.column || ''}
                                         onChange={(event) => updateItemCodeConditionalBranch(branchIndex, { column: event.target.value })}
                                         sx={fieldSx}
+                                        SelectProps={{ MenuProps: settingsMenuProps }}
                                       >
                                         <MenuItem value="">Source column</MenuItem>
                                         {itemCodeSourceColumnOptions.map(option => (
@@ -1716,6 +1782,7 @@ const Settings = () => {
                                         value={branch.operator || 'contains'}
                                         onChange={(event) => updateItemCodeConditionalBranch(branchIndex, { operator: event.target.value })}
                                         sx={fieldSx}
+                                        SelectProps={{ MenuProps: settingsMenuProps }}
                                       >
                                         {ITEM_CODE_CONDITION_OPTIONS.map(option => (
                                           <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
@@ -1735,7 +1802,7 @@ const Settings = () => {
                                       </Grid>
                                     )}
                                     <Grid item xs={12} sm={2}>
-                                      <Typography sx={{ pt: 1.25, fontSize: 14, fontWeight: 700, color: t.text.heading }}>
+                                      <Typography sx={{ pt: 1.25, fontSize: 14, fontWeight: 500, color: t.text.heading }}>
                                         Then use
                                       </Typography>
                                     </Grid>
@@ -1748,6 +1815,7 @@ const Settings = () => {
                                         value={branch.outputType || 'default'}
                                         onChange={(event) => updateItemCodeConditionalBranch(branchIndex, { outputType: event.target.value })}
                                         sx={fieldSx}
+                                        SelectProps={{ MenuProps: settingsMenuProps }}
                                       >
                                         {ITEM_CODE_VALUE_SOURCE_OPTIONS.map(option => (
                                           <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
@@ -1764,6 +1832,7 @@ const Settings = () => {
                                           value={branch.outputColumn || ''}
                                           onChange={(event) => updateItemCodeConditionalBranch(branchIndex, { outputColumn: event.target.value })}
                                           sx={fieldSx}
+                                          SelectProps={{ MenuProps: settingsMenuProps }}
                                         >
                                           <MenuItem value="">Column to copy from</MenuItem>
                                           {itemCodeSourceColumnOptions.map(option => (
@@ -1782,6 +1851,7 @@ const Settings = () => {
                                             value={branch.outputColumn || ''}
                                             onChange={(event) => updateItemCodeConditionalBranch(branchIndex, { outputColumn: event.target.value })}
                                             sx={fieldSx}
+                                            SelectProps={{ MenuProps: settingsMenuProps }}
                                           >
                                             <MenuItem value="">First column</MenuItem>
                                             {itemCodeSourceColumnOptions.map(option => (
@@ -1798,6 +1868,7 @@ const Settings = () => {
                                             value={branch.outputSecondColumn || ''}
                                             onChange={(event) => updateItemCodeConditionalBranch(branchIndex, { outputSecondColumn: event.target.value })}
                                             sx={fieldSx}
+                                            SelectProps={{ MenuProps: settingsMenuProps }}
                                           >
                                             <MenuItem value="">Second column</MenuItem>
                                             {itemCodeSourceColumnOptions.map(option => (
@@ -1835,13 +1906,13 @@ const Settings = () => {
                                 size="small"
                                 startIcon={<AddIcon />}
                                 onClick={addItemCodeConditionalBranch}
-                                sx={{ mb: 1.75, fontWeight: 700, textTransform: 'none' }}
+                                sx={{ mb: 1.75, fontWeight: 500, textTransform: 'none' }}
                               >
                                 Add another condition
                               </Button>
                               <Grid container spacing={1.5} alignItems="center">
                                 <Grid item xs={12} sm={2}>
-                                  <Typography sx={{ fontSize: 14, fontWeight: 700, color: t.text.heading }}>
+                                  <Typography sx={{ fontSize: 14, fontWeight: 500, color: t.text.heading }}>
                                     Otherwise
                                   </Typography>
                                 </Grid>
@@ -1854,6 +1925,7 @@ const Settings = () => {
                                     value={itemDirectoryDefaults.itemCodeElseValueSource || 'default'}
                                     onChange={(event) => handleItemDirectoryDefaultChange('itemCodeElseValueSource', event.target.value)}
                                     sx={fieldSx}
+                                    SelectProps={{ MenuProps: settingsMenuProps }}
                                   >
                                     {ITEM_CODE_VALUE_SOURCE_OPTIONS.map(option => (
                                       <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
@@ -1870,6 +1942,7 @@ const Settings = () => {
                                       value={itemDirectoryDefaults.itemCodeElseValueColumn || ''}
                                       onChange={(event) => handleItemDirectoryDefaultChange('itemCodeElseValueColumn', event.target.value)}
                                       sx={fieldSx}
+                                      SelectProps={{ MenuProps: settingsMenuProps }}
                                     >
                                       <MenuItem value="">Column to copy from</MenuItem>
                                       {itemCodeSourceColumnOptions.map(option => (
@@ -1888,6 +1961,7 @@ const Settings = () => {
                                         value={itemDirectoryDefaults.itemCodeElseValueColumn || ''}
                                         onChange={(event) => handleItemDirectoryDefaultChange('itemCodeElseValueColumn', event.target.value)}
                                         sx={fieldSx}
+                                        SelectProps={{ MenuProps: settingsMenuProps }}
                                       >
                                         <MenuItem value="">First column</MenuItem>
                                         {itemCodeSourceColumnOptions.map(option => (
@@ -1904,6 +1978,7 @@ const Settings = () => {
                                         value={itemDirectoryDefaults.itemCodeElseSecondColumn || ''}
                                         onChange={(event) => handleItemDirectoryDefaultChange('itemCodeElseSecondColumn', event.target.value)}
                                         sx={fieldSx}
+                                        SelectProps={{ MenuProps: settingsMenuProps }}
                                       >
                                         <MenuItem value="">Second column</MenuItem>
                                         {itemCodeSourceColumnOptions.map(option => (
@@ -1993,7 +2068,7 @@ const Settings = () => {
                                 }}
                               />
                               <Typography variant="caption" sx={{ display: 'block', color: t.text.secondary, mt: -0.5, ml: 3.75 }}>
-                                Always on — Item code must be unique, so every row needs its own number.
+                                Always on â€” Item code must be unique, so every row needs its own number.
                               </Typography>
                             </Grid>
                           </>
@@ -2020,11 +2095,11 @@ const Settings = () => {
                         )}
                         label={(
                           <Box>
-                            <Typography sx={{ fontSize: 13.5, fontWeight: 600, color: t.text.heading }}>
+                            <Typography sx={{ fontSize: 13.5, fontWeight: 500, color: t.text.heading }}>
                               Fill a blank Item name from the MPN sources
                             </Typography>
                             <Typography sx={{ fontSize: 12, color: t.text.secondary }}>
-                              Runs after MPN validation, and only where Item name is empty — a name
+                              Runs after MPN validation, and only where Item name is empty â€” a name
                               your sheet supplied is never replaced. Takes DigiKey first, then Mouser,
                               then Element14.
                             </Typography>
@@ -2041,7 +2116,7 @@ const Settings = () => {
                       </Typography>
                       <Typography sx={{ mt: 0.5, mb: 2, fontSize: 12.5, color: t.text.secondary }}>
                         Which rows are sent to DigiKey, Mouser and Element14. A row left
-                        out is not checked at all — its source columns stay blank and its
+                        out is not checked at all â€” its source columns stay blank and its
                         verdict reads Unknown, which is what blank already means.
                       </Typography>
                       <Grid container spacing={1.5}>
@@ -2054,6 +2129,7 @@ const Settings = () => {
                             value={itemDirectoryDefaults.mpnValidationMode || 'always'}
                             onChange={(event) => handleItemDirectoryDefaultChange('mpnValidationMode', event.target.value)}
                             sx={fieldSx}
+                            SelectProps={{ MenuProps: settingsMenuProps }}
                           >
                             {MPN_VALIDATION_MODE_OPTIONS.map(option => (
                               <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
@@ -2071,6 +2147,7 @@ const Settings = () => {
                                 value={itemDirectoryDefaults.mpnValidationMatch || 'all'}
                                 onChange={(event) => handleItemDirectoryDefaultChange('mpnValidationMatch', event.target.value)}
                                 sx={fieldSx}
+                                SelectProps={{ MenuProps: settingsMenuProps }}
                               >
                                 {MPN_VALIDATION_MATCH_OPTIONS.map(option => (
                                   <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
@@ -2090,6 +2167,7 @@ const Settings = () => {
                                       value={condition.column || ''}
                                       onChange={(event) => updateMpnValidationCondition(conditionIndex, { column: event.target.value })}
                                       sx={fieldSx}
+                                      SelectProps={{ MenuProps: settingsMenuProps }}
                                     >
                                       <MenuItem value="">Source column</MenuItem>
                                       {itemCodeSourceColumnOptions.map(option => (
@@ -2106,6 +2184,7 @@ const Settings = () => {
                                       value={condition.operator || 'contains'}
                                       onChange={(event) => updateMpnValidationCondition(conditionIndex, { operator: event.target.value })}
                                       sx={fieldSx}
+                                      SelectProps={{ MenuProps: settingsMenuProps }}
                                     >
                                       {MPN_VALIDATION_CONDITION_OPTIONS.map(option => (
                                         <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
@@ -2151,15 +2230,15 @@ const Settings = () => {
                         Prefill columns with a saved rule
                       </Typography>
                       <Typography sx={{ mt: 0.5, mb: 2, fontSize: 12.5, color: t.text.secondary }}>
-                        Pin a rule from Column Rules below to a column — Tag (2), Tag (3), anything
-                        — and it runs on every sheet as it opens, instead of being re-applied by hand
+                        Pin a rule from Column Rules below to a column â€” Tag (2), Tag (3), anything
+                        â€” and it runs on every sheet as it opens, instead of being re-applied by hand
                         from Fill / Create Column. A rule is skipped on sheets that do not carry its column.
                       </Typography>
 
                       {autoColumnRules.length === 0 && (
                         <Typography sx={{ fontSize: 12.5, color: t.text.secondary, mb: 1.5 }}>
                           {columnRules.length === 0
-                            ? 'No rules saved yet — create one under Column Rules below, then pin it here.'
+                            ? 'No rules saved yet â€” create one under Column Rules below, then pin it here.'
                             : 'Nothing pinned yet.'}
                         </Typography>
                       )}
@@ -2177,6 +2256,7 @@ const Settings = () => {
                             onChange={(event) => pickAutoColumnRule(index, event.target.value)}
                             helperText={!entry.ruleId && entry.ruleName ? `"${entry.ruleName}" no longer exists` : ''}
                             sx={{ ...fieldSx, minWidth: 240, flex: 1 }}
+                            SelectProps={{ MenuProps: settingsMenuProps }}
                           >
                             {columnRules.map(rule => (
                               <MenuItem key={rule.id} value={rule.id}>{rule.name}</MenuItem>
@@ -2189,6 +2269,7 @@ const Settings = () => {
                             value={itemCodeSourceColumnOptions.includes(entry.targetColumn) ? entry.targetColumn : ''}
                             onChange={(event) => updateAutoColumnRule(index, { targetColumn: event.target.value })}
                             sx={{ ...fieldSx, minWidth: 240, flex: 1 }}
+                            SelectProps={{ MenuProps: settingsMenuProps }}
                           >
                             {itemCodeSourceColumnOptions.map(column => (
                               <MenuItem key={column} value={column}>
@@ -2227,13 +2308,13 @@ const Settings = () => {
                     <TableChartIcon fontSize="small" />
                   </Box>
                   <Box>
-                    <Typography id="column-rules-panel" sx={{ fontSize: 16, fontWeight: 700, color: t.text.heading }}>Column Rules</Typography>
+                    <Typography id="column-rules-panel" sx={{ fontSize: 16, fontWeight: 500, color: t.text.heading }}>Column Rules</Typography>
                     <Typography sx={{ fontSize: 12.5, color: t.text.secondary }}>
                       Save a fill rule once, then apply it to any sheet from the editor's Fill / Create Column dialog.
                     </Typography>
                   </Box>
                 </Box>
-                <Chip label={`${columnRules.length} saved`} size="small" sx={{ height: 23, fontWeight: 650, fontSize: 11.5, bgcolor: t.state.infoBg, color: t.color.infoText }} />
+                <Chip label={`${columnRules.length} saved`} size="small" sx={{ height: 23, fontWeight: 450, fontSize: 11.5, bgcolor: t.state.infoBg, color: t.color.infoText }} />
               </Box>
 
               <Box sx={{ p: 2.5 }}>
@@ -2284,11 +2365,11 @@ const Settings = () => {
                         }}
                       >
                         <Box sx={{ minWidth: 0 }}>
-                          <Typography sx={{ fontSize: 13.5, fontWeight: 650, color: t.text.primary }} noWrap>
+                          <Typography sx={{ fontSize: 13.5, fontWeight: 450, color: t.text.primary }} noWrap>
                             {saved.name}
                           </Typography>
                           <Typography sx={{ fontSize: 11.5, color: t.text.secondary }} noWrap>
-                            {saved.target_column ? `${saved.target_column} · ` : ''}{saved.value_mode} · used {saved.usage_count}x
+                            {saved.target_column ? `${saved.target_column} Â· ` : ''}{saved.value_mode} Â· used {saved.usage_count}x
                           </Typography>
                         </Box>
                         <Box sx={{ display: 'flex', gap: 0.5 }}>
@@ -2324,7 +2405,7 @@ const Settings = () => {
           </Grid>
 
           <Grid item xs={12}>
-            <ExportVersionDefaultSection t={t} panelSx={panelSx} sectionHeaderSx={sectionHeaderSx} />
+            <ExportVersionDefaultSection t={t} panelSx={panelSx} sectionHeaderSx={sectionHeaderSx} settingsMenuProps={settingsMenuProps} />
           </Grid>
 
           <Grid item xs={12}>
@@ -2335,10 +2416,10 @@ const Settings = () => {
                     <TableChartIcon fontSize="small" />
                   </Box>
                   <Box>
-                    <Typography sx={{ fontSize: 16, fontWeight: 700, color: t.text.heading }}>Column Provider Mapping</Typography>
+                    <Typography sx={{ fontSize: 16, fontWeight: 500, color: t.text.heading }}>Column Provider Mapping</Typography>
                   </Box>
                 </Box>
-                <Chip label={`${readyCount} ready`} size="small" sx={{ height: 23, fontWeight: 650, fontSize: 11.5, bgcolor: t.state.successBg, color: t.color.successText }} />
+                <Chip label={`${readyCount} ready`} size="small" sx={{ height: 23, fontWeight: 450, fontSize: 11.5, bgcolor: t.state.successBg, color: t.color.successText }} />
               </Box>
 
               <Box sx={{ p: 2.5 }}>
@@ -2361,7 +2442,7 @@ const Settings = () => {
                     <TableHead>
                       <TableRow>
                         {['Column', 'Purpose', 'Provider', 'Status'].map(label => (
-                          <TableCell key={label} sx={{ bgcolor: t.table.header, color: t.text.heading, fontWeight: 650, fontSize: 12, borderBottom: `1px solid ${t.border.default}` }}>
+                          <TableCell key={label} sx={{ bgcolor: t.table.header, color: t.text.heading, fontWeight: 450, fontSize: 12, borderBottom: `1px solid ${t.border.default}` }}>
                             {label}
                           </TableCell>
                         ))}
@@ -2374,13 +2455,14 @@ const Settings = () => {
                         const ready = selectedProviders.every(provider => Boolean(providerStatus[provider]?.configured));
                         return (
                           <TableRow key={mapping.column} hover sx={{ '&:hover td': { bgcolor: t.table.hover }, '& td': { borderBottom: `1px solid ${t.table.line}` } }}>
-                            <TableCell sx={{ color: t.text.primary, fontWeight: 650, fontSize: 13 }}>{mapping.column}</TableCell>
+                            <TableCell sx={{ color: t.text.primary, fontWeight: 450, fontSize: 13 }}>{mapping.column}</TableCell>
                             <TableCell sx={{ color: t.text.secondary, fontSize: 13 }}>{mapping.description}</TableCell>
                             <TableCell sx={{ width: 330, minWidth: 330 }}>
                               <FormControl size="small" sx={{ width: 300 }}>
                                 <Select
                                   multiple
                                   value={selectedProviders}
+                                  MenuProps={settingsMenuProps}
                                   onChange={(e) => {
                                     const nextProviders = normalizeProviders(e.target.value)
                                       .filter(provider => Boolean(providerStatus[provider]?.configured));
@@ -2391,7 +2473,7 @@ const Settings = () => {
                                     borderRadius: '12px',
                                     bgcolor: meta?.soft || t.surface.controlSoft,
                                     color: t.text.primary,
-                                    fontWeight: 650,
+                                    fontWeight: 450,
                                     fontSize: 12.5,
                                     height: 34,
                                     width: 300,
@@ -2428,7 +2510,7 @@ const Settings = () => {
                                 label={ready ? 'Ready' : 'Needs setup'}
                                 sx={{
                                   height: 22,
-                                  fontWeight: 650,
+                                  fontWeight: 450,
                                   fontSize: 11.5,
                                   bgcolor: ready ? t.state.successBg : t.state.warningBg,
                                   color: ready ? t.color.successText : t.color.warningText,
@@ -2449,7 +2531,7 @@ const Settings = () => {
 
           <Grid item xs={12}>
             <Box sx={{ display: 'flex', justifyContent: 'flex-end', pb: 1 }}>
-              <Button variant="contained" startIcon={<SaveIcon />} onClick={handleSaveSettings} disabled={savingSettings || loadingCredentials} sx={{ px: 3.25, height: 42, fontWeight: 700 }}>
+              <Button variant="contained" startIcon={<SaveIcon />} onClick={handleSaveSettings} disabled={savingSettings || loadingCredentials} sx={{ px: 3.25, height: 42, fontWeight: 500 }}>
                 {savingSettings ? 'Saving...' : 'Save Settings'}
               </Button>
             </Box>
@@ -2468,7 +2550,19 @@ const Settings = () => {
           variant="filled"
           severity={toast.severity}
           onClose={() => setToast(prev => ({ ...prev, open: false }))}
-          sx={{ borderRadius: '14px', boxShadow: t.shadow.card }}
+          sx={{
+            minHeight: 38,
+            borderRadius: '12px',
+            boxShadow: t.shadow.card,
+            '& .MuiAlert-icon': { fontSize: 18, py: 0.25 },
+            '& .MuiAlert-message': {
+              py: 0.35,
+              fontSize: '12.5px',
+              fontWeight: 450,
+              lineHeight: 1.25,
+            },
+            '& .MuiAlert-action': { py: 0 },
+          }}
         >
           {toast.message}
         </Alert>

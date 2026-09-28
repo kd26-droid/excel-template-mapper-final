@@ -46,7 +46,7 @@ export default function FactwiseSessionExpiredBanner() {
           ) : null
         }
       >
-        <AlertTitle sx={{ mb: 0.25, fontWeight: 700 }}>
+        <AlertTitle sx={{ mb: 0.25, fontWeight: 600 }}>
           Factwise session expired
         </AlertTitle>
         <Box sx={{ fontSize: 13, opacity: 0.9 }}>

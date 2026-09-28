@@ -30,12 +30,22 @@ import {
 } from '@mui/icons-material';
 import { Canvas, Rect, Image as FabricImage, Text } from 'fabric';
 import api from '../services/api';
+import { useThemeContext } from '../utils/ThemeContext';
+import {
+  buildFactWisePageTokens,
+  factWiseGlowSx,
+  factWiseGridOverlaySx,
+  factWisePageShellSx,
+  factWiseTopShadeSx,
+} from '../utils/factwisePageStyles';
 
 const ZONE_TYPES = {
   table: { label: 'Table', color: '#2196F3' }
 };
 
 export default function PDFZoneSelection() {
+  const { isDarkMode, tokens: themeTokens } = useThemeContext();
+  const fwPageTokens = buildFactWisePageTokens(isDarkMode, themeTokens);
   const { sessionId } = useParams();
   const navigate = useNavigate();
   const location = useLocation();
@@ -636,7 +646,10 @@ export default function PDFZoneSelection() {
 
   if (loading) {
     return (
-      <Box display="flex" justifyContent="center" alignItems="center" minHeight="400px">
+      <Box sx={{ ...factWisePageShellSx(fwPageTokens), display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
+        <Box sx={factWiseTopShadeSx(isDarkMode)} />
+        <Box sx={factWiseGlowSx(fwPageTokens)} />
+        <Box sx={factWiseGridOverlaySx(fwPageTokens)} />
         <CircularProgress />
       </Box>
     );
@@ -644,14 +657,20 @@ export default function PDFZoneSelection() {
 
   if (error && !zones.length) {
     return (
-      <Box p={3}>
+      <Box sx={{ ...factWisePageShellSx(fwPageTokens), p: 3 }}>
+        <Box sx={factWiseTopShadeSx(isDarkMode)} />
+        <Box sx={factWiseGlowSx(fwPageTokens)} />
+        <Box sx={factWiseGridOverlaySx(fwPageTokens)} />
         <Alert severity="error">{error}</Alert>
       </Box>
     );
   }
 
   return (
-    <Box p={3}>
+    <Box sx={{ ...factWisePageShellSx(fwPageTokens), p: 3 }}>
+      <Box sx={factWiseTopShadeSx(isDarkMode)} />
+      <Box sx={factWiseGlowSx(fwPageTokens)} />
+      <Box sx={factWiseGridOverlaySx(fwPageTokens)} />
       <Typography variant="h4" gutterBottom>
         Mark the columns in your PDF
       </Typography>
@@ -714,7 +733,7 @@ export default function PDFZoneSelection() {
                       variant={isSelected ? 'filled' : 'outlined'}
                       onClick={() => selectZoneFromList(zone)}
                       onDelete={() => deleteSelectedZone(zone)}
-                      sx={isSelected ? { outline: '2px solid #1565c0', fontWeight: 700 } : { cursor: 'pointer' }}
+                      sx={isSelected ? { outline: '2px solid #1565c0', fontWeight: 600 } : { cursor: 'pointer' }}
                     />
                   );
                 })}
@@ -749,7 +768,7 @@ export default function PDFZoneSelection() {
               {/* What the boxes mean. Explicit, because the same drawing can be
                   read two completely different ways. */}
               <Box sx={{ border: '1px solid #e0e0e0', borderRadius: 1, p: 1.5 }}>
-                <Typography variant="caption" sx={{ fontWeight: 700, display: 'block', mb: 1 }}>
+                <Typography variant="caption" sx={{ fontWeight: 600, display: 'block', mb: 1 }}>
                   What are you marking?
                 </Typography>
                 <RadioGroup value={zoneMode} onChange={(e) => setZoneMode(e.target.value)}>
@@ -783,7 +802,7 @@ export default function PDFZoneSelection() {
               {/* Name each column (optional), left to right, for this page. */}
               {zoneMode === 'columns' && zones.filter(z => z.page_number === currentPage).length > 0 && (
                 <Box sx={{ border: '1px solid #e0e0e0', borderRadius: 1, p: 1.5 }}>
-                  <Typography variant="caption" sx={{ fontWeight: 700, display: 'block', mb: 1 }}>
+                  <Typography variant="caption" sx={{ fontWeight: 600, display: 'block', mb: 1 }}>
                     Name your columns (left to right) — optional
                   </Typography>
                   <Stack spacing={1}>

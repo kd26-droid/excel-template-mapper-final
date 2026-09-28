@@ -28,10 +28,10 @@ const buildTokens = (isDark) => {
   return {
     /* ── colour primitives ─────────────────────────────────────────────── */
     color: {
-      primary:        '#2563eb',
-      primaryHover:   '#1d4ed8',
-      primaryLight:   '#60a5fa',
-      primarySoftText: a ? '#bfdbfe' : '#1d4ed8',
+      primary:        '#007aff',
+      primaryHover:   '#006ee6',
+      primaryLight:   '#66b3ff',
+      primarySoftText: a ? '#66b3ff' : '#005ecb',
       secondary:      '#7c3aed',
       cyan:           '#0284c7',
       cyanStrong:     '#0369a1',
@@ -47,24 +47,24 @@ const buildTokens = (isDark) => {
       warningText:    a ? '#fbbf24' : '#b45309',
       danger:         '#ef4444',
       white:          '#ffffff',
-      dark:           '#0f172a',
+      dark:           '#0f131a',
     },
 
     /* ── backgrounds ───────────────────────────────────────────────────── */
     background: {
-      app:  a ? '#0b0f19' : '#f8fafc',
+      app:  a ? '#0f131a' : '#f4f7ff',
       glow: a
-        ? 'radial-gradient(circle, rgba(35, 131, 226, 0.25) 0%, transparent 70%)'
-        : 'radial-gradient(circle, rgba(37, 99, 235, 0.08) 0%, transparent 70%)',
+        ? 'radial-gradient(circle, rgba(0, 122, 255, 0.18) 0%, transparent 70%)'
+        : 'radial-gradient(circle, rgba(0, 122, 255, 0.08) 0%, transparent 70%)',
     },
 
     /* ── text ──────────────────────────────────────────────────────────── */
     text: {
       primary:   a ? '#f8fafc' : '#0f172a',
-      secondary: a ? '#94a3b8' : '#475569',
+      secondary: a ? '#a3a3a8' : '#475569',
       disabled:  a ? '#64748b' : '#94a3b8',
       inverse:   '#ffffff',
-      accent:    a ? '#93c5fd' : '#2563eb',
+      accent:    a ? '#66b3ff' : '#005ecb',
       onAccent:  '#ffffff',
       table:     a ? '#e2e8f0' : '#1e293b',
       heading:   a ? '#f8fafc' : '#0f172a',
@@ -72,56 +72,56 @@ const buildTokens = (isDark) => {
 
     /* ── surfaces ──────────────────────────────────────────────────────── */
     surface: {
-      page:       a ? '#0b0f19' : '#f8fafc',
-      paper:      a ? '#111827' : '#ffffff',
-      card:       a ? 'rgba(19, 24, 35, 0.75)' : '#ffffff',
-      cardSolid:  a ? '#131823' : '#ffffff',
+      page:       a ? '#0f131a' : '#f4f7ff',
+      paper:      a ? '#171b23' : '#ffffff',
+      card:       a ? 'rgba(23, 27, 35, 0.94)' : '#ffffff',
+      cardSolid:  a ? '#171b23' : '#ffffff',
       cardGradient: a
-        ? 'linear-gradient(135deg, rgba(20, 27, 41, 0.72) 0%, rgba(12, 17, 26, 0.82) 100%)'
-        : 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)',
-      elevated:   a ? 'rgba(20, 27, 44, 0.98)' : '#ffffff',
-      elevatedSoft: a ? 'rgba(11, 16, 26, 0.98)' : '#f8fafc',
+        ? 'linear-gradient(135deg, rgba(23, 27, 35, 0.96) 0%, rgba(23, 24, 29, 0.98) 100%)'
+        : 'linear-gradient(135deg, #ffffff 0%, #f7f9fb 100%)',
+      elevated:   a ? 'rgba(23, 27, 35, 0.98)' : '#ffffff',
+      elevatedSoft: a ? 'rgba(27, 29, 35, 0.96)' : '#f3f4f6',
       elevatedGradient: a
-        ? 'linear-gradient(145deg, rgba(20, 27, 44, 0.98) 0%, rgba(11, 16, 26, 0.99) 100%)'
-        : 'linear-gradient(145deg, #ffffff 0%, #f8fafc 100%)',
+        ? 'linear-gradient(145deg, rgba(23, 27, 35, 0.98) 0%, rgba(23, 24, 29, 0.99) 100%)'
+        : 'linear-gradient(145deg, #ffffff 0%, #f7f9fb 100%)',
       elevatedSoftGradient: a
-        ? 'linear-gradient(145deg, rgba(20, 27, 44, 0.96) 0%, rgba(11, 16, 26, 0.98) 100%)'
-        : 'linear-gradient(145deg, #ffffff 0%, #f8fafc 100%)',
-      muted:      a ? '#1e293b' : '#f1f5f9',
-      subtle:     a ? 'rgba(11, 15, 25, 0.45)' : '#f8fafc',
-      input:      a ? 'rgba(15, 23, 42, 0.58)' : '#ffffff',
-      inputStrong: a ? 'rgba(15, 23, 42, 0.65)' : '#ffffff',
-      control:    a ? 'rgba(10, 14, 23, 0.85)' : '#e2e8f0',
+        ? 'linear-gradient(145deg, rgba(27, 29, 35, 0.94) 0%, rgba(23, 24, 29, 0.98) 100%)'
+        : 'linear-gradient(145deg, #ffffff 0%, #f3f4f6 100%)',
+      muted:      a ? '#1b1d23' : '#f3f4f6',
+      subtle:     a ? 'rgba(27, 29, 35, 0.72)' : '#f3f4f6',
+      input:      a ? '#1b1d23' : '#ffffff',
+      inputStrong: a ? '#1b1d23' : '#ffffff',
+      control:    a ? '#1b1d23' : '#f3f4f6',
       controlSoft: a ? 'rgba(255, 255, 255, 0.04)' : '#f1f5f9',
-      menu:       a ? '#0d1527' : '#ffffff',
-      footer:     a ? 'rgba(11, 16, 26, 0.92)' : '#f8fafc',
-      panel:      a ? 'rgba(15, 23, 42, 0.85)' : '#ffffff',
+      menu:       a ? '#171b23' : '#ffffff',
+      footer:     a ? 'rgba(15, 19, 26, 0.96)' : '#f8fafc',
+      panel:      a ? 'rgba(23, 27, 35, 0.92)' : '#ffffff',
     },
 
     /* ── borders ───────────────────────────────────────────────────────── */
     border: {
-      default:     a ? 'rgba(255,255,255,0.14)' : 'rgba(226, 232, 240, 0.8)',
-      subtle:      a ? 'rgba(255,255,255,0.08)' : 'rgba(226, 232, 240, 0.6)',
-      strong:      a ? 'rgba(255,255,255,0.2)'  : 'rgba(203, 213, 225, 0.8)',
-      hover:       a ? 'rgba(255,255,255,0.28)' : '#2563eb',
-      focus:       '#2563eb',
-      input:       a ? 'rgba(255, 255, 255, 0.18)' : '#cbd5e1',
-      panelAccent: a ? 'rgba(59, 130, 246, 0.35)' : 'rgba(37, 99, 235, 0.25)',
-      modal:       a ? 'rgba(255, 255, 255, 0.16)' : '#e2e8f0',
+      default:     a ? '#94a3b82e' : 'rgba(25, 33, 46, 0.12)',
+      subtle:      a ? 'rgba(148, 163, 184, 0.12)' : 'rgba(25, 33, 46, 0.07)',
+      strong:      a ? 'rgba(148, 163, 184, 0.24)'  : 'rgba(25, 33, 46, 0.20)',
+      hover:       '#0d80ff',
+      focus:       '#007aff',
+      input:       a ? '#94a3b82e' : 'rgba(25, 33, 46, 0.12)',
+      panelAccent: a ? 'rgba(0, 122, 255, 0.34)' : 'rgba(0, 122, 255, 0.24)',
+      modal:       a ? 'rgba(148, 163, 184, 0.24)' : 'rgba(25, 33, 46, 0.12)',
     },
 
     /* ── actions ────────────────────────────────────────────────────────── */
     action: {
-      primary:      '#2563eb',
-      primaryHover: '#1d4ed8',
-      primarySoft:  a ? 'rgba(37,99,235,0.18)' : 'rgba(37,99,235,0.1)',
-      primarySofter: a ? 'rgba(37,99,235,0.12)' : 'rgba(37,99,235,0.08)',
-      hover:        a ? 'rgba(255,255,255,0.06)' : 'rgba(37, 99, 235, 0.08)',
-      selected:     a ? 'rgba(37, 99, 235, 0.16)' : 'rgba(37, 99, 235, 0.1)',
+      primary:      '#007aff',
+      primaryHover: '#006ee6',
+      primarySoft:  a ? 'rgba(0,122,255,0.18)' : 'rgba(0,122,255,0.08)',
+      primarySofter: a ? 'rgba(0,122,255,0.12)' : 'rgba(0,122,255,0.06)',
+      hover:        a ? 'rgba(255,255,255,0.06)' : 'rgba(0, 122, 255, 0.045)',
+      selected:     a ? 'rgba(0, 122, 255, 0.16)' : 'rgba(0, 122, 255, 0.08)',
       selectedStrong:
-        'linear-gradient(180deg, rgba(35, 131, 226, 0.95) 0%, rgba(29, 110, 192, 0.95) 100%)',
+        'linear-gradient(180deg, rgba(0, 122, 255, 0.95) 0%, rgba(0, 94, 203, 0.95) 100%)',
       selectedStrongHover:
-        'linear-gradient(180deg, rgba(35, 131, 226, 0.95) 0%, rgba(29, 110, 192, 0.95) 100%)',
+        'linear-gradient(180deg, rgba(13, 128, 255, 0.95) 0%, rgba(0, 94, 203, 0.95) 100%)',
     },
 
     /* ── semantic states ───────────────────────────────────────────────── */
@@ -138,24 +138,24 @@ const buildTokens = (isDark) => {
 
     /* ── table ─────────────────────────────────────────────────────────── */
     table: {
-      background:  a ? 'rgba(6, 12, 24, 0.82)' : '#ffffff',
-      header:      a ? '#111827' : '#f8fafc',
-      hover:       a ? 'rgba(37, 99, 235, 0.08)' : '#eff6ff',
-      selected:    a ? 'rgba(35, 131, 226, 0.12)' : 'rgba(37, 99, 235, 0.08)',
-      rowExpanded: a ? 'rgba(15, 20, 30, 0.9)' : '#f8fafc',
-      line:        a ? 'rgba(255,255,255,0.08)' : 'rgba(226, 232, 240, 0.8)',
-      rowLine:     a ? 'rgba(255,255,255,0.04)' : 'rgba(241, 245, 249, 0.9)',
+      background:  a ? '#171b23' : '#ffffff',
+      header:      a ? '#1b1d23' : '#f3f4f6',
+      hover:       a ? 'rgba(0, 122, 255, 0.10)' : 'rgba(0, 122, 255, 0.045)',
+      selected:    a ? 'rgba(0, 122, 255, 0.12)' : 'rgba(0, 122, 255, 0.08)',
+      rowExpanded: a ? '#1b1d23' : '#f3f4f6',
+      line:        a ? 'rgba(148, 163, 184, 0.16)' : 'rgba(15, 23, 42, 0.105)',
+      rowLine:     a ? 'rgba(148, 163, 184, 0.12)' : 'rgba(15, 23, 42, 0.075)',
     },
 
     /* ── dropzone ──────────────────────────────────────────────────────── */
     dropzone: {
       background: a ? 'rgba(11, 15, 25, 0.65)' : '#ffffff',
       selected:   a
-        ? 'linear-gradient(180deg, rgba(37, 99, 235, 0.12), rgba(15, 23, 42, 0.92))'
-        : 'linear-gradient(180deg, rgba(37, 99, 235, 0.06), #ffffff)',
+        ? 'linear-gradient(180deg, rgba(0, 122, 255, 0.14), rgba(15, 23, 42, 0.92))'
+        : 'linear-gradient(180deg, rgba(0, 122, 255, 0.06), #ffffff)',
       active:     a
-        ? 'linear-gradient(180deg, rgba(37, 99, 235, 0.18), rgba(15, 23, 42, 0.95))'
-        : 'linear-gradient(180deg, rgba(37, 99, 235, 0.1), #ffffff)',
+        ? 'linear-gradient(180deg, rgba(0, 122, 255, 0.20), rgba(15, 23, 42, 0.95))'
+        : 'linear-gradient(180deg, rgba(0, 122, 255, 0.10), #ffffff)',
     },
 
     /* ── header ────────────────────────────────────────────────────────── */
@@ -190,7 +190,7 @@ const buildTokens = (isDark) => {
         ? '0 1px 1px 0 rgba(255,255,255,0.1) inset, 0 12px 32px -4px rgba(0,0,0,0.5)'
         : '0 4px 20px -2px rgba(15, 23, 42, 0.06), 0 2px 6px -1px rgba(15, 23, 42, 0.04)',
       modal:   a
-        ? 'inset 0 1px 0 0 rgba(255,255,255,0.18), 0 32px 90px -12px rgba(0,0,0,0.85), 0 0 45px rgba(37,99,235,0.18)'
+        ? 'inset 0 1px 0 0 rgba(255,255,255,0.18), 0 32px 90px -12px rgba(0,0,0,0.85), 0 0 45px rgba(0,122,255,0.16)'
         : '0 20px 50px -12px rgba(15, 23, 42, 0.12), 0 0 1px 1px rgba(15, 23, 42, 0.05)',
       control: a
         ? 'inset 0 1px 3px rgba(0,0,0,0.6), 0 2px 10px rgba(0,0,0,0.3)'

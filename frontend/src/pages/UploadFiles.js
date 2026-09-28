@@ -28,7 +28,6 @@ import {
   FormGroup,
   Radio,
   RadioGroup,
-  Snackbar,
   Stack,
   Tooltip,
 } from '@mui/material';
@@ -50,11 +49,28 @@ import {
   ChevronLeft as ChevronLeftIcon,
   ChevronRight as ChevronRightIcon,
   Visibility as VisibilityIcon,
-  DeleteOutline as DeleteOutlineIcon
+  DeleteOutline as DeleteOutlineIcon,
+  FileDownloadOutlined as FileDownloadOutlinedIcon,
+  UnfoldMore as UnfoldMoreIcon,
+  ArrowUpward as ArrowUpwardIcon,
+  ArrowDownward as ArrowDownwardIcon
 } from '@mui/icons-material';
 import * as XLSX from 'xlsx';
 import api, { setGlobalLoaderCallback } from '../services/api';
 import { useThemeContext } from '../utils/ThemeContext';
+import {
+  buildFactWisePageTokens,
+  factWiseAlertSx,
+  factWiseCancelButtonSx,
+  factWiseFieldSx,
+  factWiseGlowSx,
+  factWiseGridOverlaySx,
+  factWiseInputLabelSx,
+  factWiseTopShadeSx,
+  factWisePrimaryButtonSx,
+  factWiseSelectFieldSx,
+  factWiseSelectMenuProps,
+} from '../utils/factwisePageStyles';
 
 const SUPPORTED_SOURCE_EXTENSIONS = ['.xlsx', '.xls', '.xlsm', '.csv', '.pdf'];
 const SUPPORTED_WORKBOOK_EXTENSIONS = ['.xlsx', '.xls', '.xlsm'];
@@ -944,12 +960,14 @@ const createExtractedPdfWorkbook = (payload, sourceFileName = 'PDF source') => {
 };
 
 
-const DropzoneFileStackIcon = ({ color = "#3b82f6", glowColor = "#22c55e", selected = false, isHovered = false, isDarkMode = true }) => {
+const DropzoneFileStackIcon = ({ color = "#007aff", glowColor = "#007aff", selected = false, isHovered = false, isDarkMode = true }) => {
   const cardBg = isDarkMode ? "#0f172a" : "#ffffff";
-  const backCardBg = isDarkMode ? "#1e293b" : "#f8fafc";
-  const strokeColor = isDarkMode ? "rgba(255,255,255,0.28)" : "rgba(15,23,42,0.16)";
-  const cornerFill = isDarkMode ? "rgba(255,255,255,0.12)" : "rgba(37,99,235,0.08)";
-  const lineMuted = isDarkMode ? "#94a3b8" : "#64748b";
+  const backCardBg = isDarkMode ? "#1e293b" : "#ffffff";
+  const strokeColor = isDarkMode ? "rgba(255,255,255,0.28)" : "rgba(0, 122, 255, 0.22)";
+  const cornerFill = isDarkMode ? "rgba(255,255,255,0.12)" : "rgba(0, 122, 255, 0.10)";
+  const lineMuted = isDarkMode ? "#94a3b8" : "#475569";
+  const actionWash = isDarkMode ? "rgba(0, 122, 255, 0.22)" : "rgba(0, 122, 255, 0.14)";
+  const arrowColor = isDarkMode ? "#93c5fd" : color;
 
   return (
     <Box sx={{ position: "relative", width: 130, height: 86, mx: "auto", mb: 1.5, display: "flex", justifyContent: "center", alignItems: "center", overflow: "visible" }}>
@@ -1001,8 +1019,8 @@ const DropzoneFileStackIcon = ({ color = "#3b82f6", glowColor = "#22c55e", selec
         }}>
           <rect x="0" y="0" width="40" height="54" rx="7" fill={cardBg} stroke={selected || isHovered ? color : strokeColor} strokeWidth="2" />
           <path d="M28 0V12H40" fill={cornerFill} stroke={strokeColor} strokeWidth="1.5" />
-          <circle cx="20" cy="30" r="11" fill={isDarkMode ? "rgba(37, 99, 235, 0.25)" : "rgba(37, 99, 235, 0.15)"} stroke={color} strokeWidth="1.5" />
-          <path d="M20 35V25M20 25L16 29M20 25L24 29" stroke={isDarkMode ? "#93c5fd" : "#1d4ed8"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+          <circle cx="20" cy="30" r="11" fill={actionWash} stroke={color} strokeWidth="1.5" />
+          <path d="M20 35V25M20 25L16 29M20 25L24 29" stroke={arrowColor} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
         </g>
       </svg>
     </Box>
@@ -1011,53 +1029,44 @@ const DropzoneFileStackIcon = ({ color = "#3b82f6", glowColor = "#22c55e", selec
 
 const UploadFiles = () => {
   const { isDarkMode, tokens: a } = useThemeContext();
-  const [mousePos, setMousePos] = useState({ x: 50, y: 50 });
-
-  useEffect(() => {
-    const handleMouseMove = (e) => {
-      setMousePos({
-        x: (e.clientX / window.innerWidth) * 100,
-        y: (e.clientY / window.innerHeight) * 100
-      });
-    };
-    window.addEventListener('mousemove', handleMouseMove);
-    return () => window.removeEventListener('mousemove', handleMouseMove);
-  }, []);
+  const uploadActionColor = '#007aff';
+  const uploadActionHover = '#006ee6';
+  const fwPageTokens = buildFactWisePageTokens(isDarkMode, a);
 
   const Nn = {
-    pageBg: a.background.app,
-    modalBg: a.surface.elevatedGradient,
-    modalBgSoft: a.surface.elevatedSoftGradient,
-    modalBorder: a.border.modal,
-    modalShadow: a.shadow.modal,
-    text: a.text.primary,
-    muted: a.text.secondary,
-    divider: a.border.subtle,
-    inputBg: a.surface.inputStrong,
-    inputBorder: a.border.input,
-    inputBorderHover: a.border.hover,
-    tableBg: a.table.background,
-    tableHeaderBg: a.table.header,
-    tableText: a.text.table,
-    tableHeaderText: a.text.heading,
-    tableBorder: a.table.line,
+    pageBg: fwPageTokens.pageBackground,
+    modalBg: fwPageTokens.panelGradient,
+    modalBgSoft: fwPageTokens.panelSoftGradient,
+    modalBorder: fwPageTokens.strongBorder,
+    modalShadow: fwPageTokens.cardShadow,
+    text: fwPageTokens.text,
+    muted: fwPageTokens.muted,
+    divider: fwPageTokens.subtleBorder,
+    inputBg: fwPageTokens.inputBg,
+    inputBorder: fwPageTokens.strongBorder,
+    inputBorderHover: fwPageTokens.primaryHover,
+    tableBg: fwPageTokens.table,
+    tableHeaderBg: fwPageTokens.tableHeader,
+    tableText: fwPageTokens.text,
+    tableHeaderText: fwPageTokens.text,
+    tableBorder: fwPageTokens.tableLine,
     footerBg: a.surface.footer,
-    infoBg: a.state.infoBg,
-    infoText: a.color.infoText,
+    infoBg: fwPageTokens.primarySoft,
+    infoText: fwPageTokens.primaryText,
     backdrop: a.overlay.backdrop,
-    cardBg: a.surface.cardGradient,
-    cardBorder: a.border.default,
+    cardBg: fwPageTokens.panelGradient,
+    cardBorder: fwPageTokens.border,
     dropzoneBg: a.dropzone.background,
     dropzoneSelectedBg: a.dropzone.selected,
     dropzoneActiveBg: a.dropzone.active,
-    panelBg: a.surface.panel,
-    panelBorder: a.border.panelAccent,
-    subtlePanelBg: a.surface.subtle,
-    whiteButtonBg: a.surface.paper,
-    whiteButtonHoverBg: a.surface.elevated,
+    panelBg: fwPageTokens.surface,
+    panelBorder: fwPageTokens.border,
+    subtlePanelBg: fwPageTokens.surfaceSoft,
+    whiteButtonBg: fwPageTokens.surface,
+    whiteButtonHoverBg: fwPageTokens.surfaceSoft,
     whiteButtonText: a.color.dark,
-    accent: a.border.focus,
-    accentHover: a.color.primaryLight
+    accent: fwPageTokens.primary,
+    accentHover: fwPageTokens.primaryHover
   };
 
   const dialogPaperSx = {
@@ -1088,59 +1097,59 @@ const UploadFiles = () => {
     bgcolor: isDarkMode ? 'rgba(11, 16, 26, 0.48)' : 'rgba(248, 250, 252, 0.58)',
     borderTop: `1px solid ${Nn.divider}`
   };
-  const fieldSx = {
-    '& .MuiInputBase-root': {
-      bgcolor: isDarkMode ? '#0f172a' : '#f8fafc',
-      color: isDarkMode ? '#f8fafc' : '#0f172a',
-      borderRadius: '12px'
+  const fieldSx = factWiseFieldSx(fwPageTokens);
+  const inputLabelSx = factWiseInputLabelSx(fwPageTokens);
+  const selectFieldSx = factWiseSelectFieldSx(fwPageTokens);
+  const uploadSheetRowSx = {
+    mb: 1.5,
+    alignItems: 'flex-start',
+    '& > .MuiGrid-item': {
+      minWidth: 0,
     },
-    '& .MuiOutlinedInput-notchedOutline': {
-      borderColor: isDarkMode ? 'rgba(148, 163, 184, 0.28)' : '#cbd5e1'
-    },
-    '& .MuiInputBase-root:hover .MuiOutlinedInput-notchedOutline': {
-      borderColor: '#2563eb'
-    },
-    '& .MuiSelect-icon': {
-      color: isDarkMode ? '#94a3b8' : '#64748b'
-    }
   };
-  const selectFieldSx = {
-    bgcolor: isDarkMode ? '#0f172a' : '#f8fafc',
-    color: isDarkMode ? '#f8fafc' : '#0f172a',
-    borderRadius: '12px',
-    '& .MuiOutlinedInput-notchedOutline': {
-      borderColor: isDarkMode ? 'rgba(148, 163, 184, 0.28)' : '#cbd5e1'
-    },
-    '&:hover .MuiOutlinedInput-notchedOutline': {
-      borderColor: '#2563eb'
-    },
-    '& .MuiSelect-icon': {
-      color: isDarkMode ? '#94a3b8' : '#64748b'
-    }
+  const uploadSheetSelectControlSx = {
+    minWidth: 0,
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 0,
   };
+  const compactFieldSx = factWiseFieldSx(fwPageTokens, { height: 32 });
+  const compactSelectFieldSx = factWiseSelectFieldSx(fwPageTokens, { height: 32 });
+  const sheetJoinSelectMenuProps = factWiseSelectMenuProps(fwPageTokens);
+  const sheetJoinPreviewMenuProps = factWiseSelectMenuProps(fwPageTokens, {
+    width: { xs: 'calc(100vw - 48px)', sm: 260 },
+    maxHeight: 238,
+    sx: {
+      '& .MuiMenuItem-root': {
+        minHeight: 32,
+        gap: 0.75,
+        lineHeight: 1.25,
+        py: 0.55,
+        pr: 1,
+      },
+      '& .MuiCheckbox-root': {
+        p: 0.35,
+      },
+    },
+  });
   const pillButtonSx = {
     borderRadius: '999px',
     px: 2.5,
     py: 0.85,
-    fontWeight: 800,
+    fontWeight: 600,
     textTransform: 'none',
     boxShadow: 'none',
     lineHeight: 1.2
   };
   const primaryPillSx = {
     ...pillButtonSx,
-    bgcolor: '#2563eb',
+    ...factWisePrimaryButtonSx,
     color: '#ffffff !important',
-    boxShadow: '0 14px 28px -16px rgba(37, 99, 235, 0.9)',
-    background: 'linear-gradient(135deg, #2563eb 0%, #0284c7 100%)',
-    '&:hover': {
-      background: 'linear-gradient(135deg, #1d4ed8 0%, #0369a1 100%)',
-      boxShadow: '0 18px 34px -18px rgba(37, 99, 235, 0.95)'
-    },
     '&.Mui-disabled': {
-      background: isDarkMode ? 'rgba(30, 41, 59, 0.78)' : '#dbeafe',
-      color: isDarkMode ? 'rgba(226, 232, 240, 0.58) !important' : 'rgba(30, 64, 175, 0.46) !important',
-      boxShadow: 'none'
+      ...factWisePrimaryButtonSx['&.Mui-disabled'],
+      background: isDarkMode ? 'rgba(148, 163, 184, 0.18)' : '#eef2f7',
+      color: `${isDarkMode ? 'rgba(226, 232, 240, 0.58)' : '#94a3b8'} !important`,
+      borderColor: isDarkMode ? 'rgba(148, 163, 184, 0.22)' : '#d5dde8'
     }
   };
   const secondaryPillSx = {
@@ -1150,9 +1159,184 @@ const UploadFiles = () => {
     bgcolor: isDarkMode ? 'rgba(15, 23, 42, 0.7)' : '#ffffff',
     '&:hover': {
       borderColor: Nn.accent,
-      bgcolor: isDarkMode ? 'rgba(37, 99, 235, 0.12)' : '#eff6ff'
+      bgcolor: isDarkMode ? 'rgba(0, 122, 255, 0.12)' : 'rgba(0, 122, 255, 0.07)'
     }
   };
+  const quietDangerButtonSx = {
+    ...factWiseCancelButtonSx(fwPageTokens),
+  };
+  const quietBackButtonSx = {
+    minWidth: 88,
+    height: 36,
+    px: 2.25,
+    borderRadius: '999px',
+    textTransform: 'none',
+    fontSize: 13,
+    fontWeight: 500,
+    lineHeight: 1,
+    color: isDarkMode ? '#93c5fd' : uploadActionColor,
+    bgcolor: isDarkMode ? 'rgba(0, 122, 255, 0.08)' : 'rgba(0, 122, 255, 0.04)',
+    border: isDarkMode ? '1px solid rgba(96, 165, 250, 0.18)' : '1px solid rgba(0, 122, 255, 0.16)',
+    boxShadow: 'none',
+    '&:hover': {
+      bgcolor: isDarkMode ? 'rgba(0, 122, 255, 0.12)' : 'rgba(0, 122, 255, 0.08)',
+      borderColor: isDarkMode ? 'rgba(96, 165, 250, 0.2)' : 'rgba(0, 122, 255, 0.18)'
+    }
+  };
+  const quietDownloadButtonSx = {
+    minWidth: 150,
+    height: 36,
+    px: 1.85,
+    borderRadius: '999px',
+    textTransform: 'none',
+    fontSize: 13,
+    fontWeight: 500,
+    lineHeight: 1,
+    color: isDarkMode ? '#bfdbfe' : uploadActionColor,
+    bgcolor: isDarkMode ? 'rgba(0, 122, 255, 0.08)' : 'rgba(0, 122, 255, 0.04)',
+    border: isDarkMode ? '1px solid rgba(96, 165, 250, 0.18)' : '1px solid rgba(0, 122, 255, 0.16)',
+    boxShadow: 'none',
+    '& .MuiButton-startIcon': {
+      mr: 0.65,
+      '& svg': {
+        fontSize: 17,
+      },
+    },
+    '&:hover': {
+      color: isDarkMode ? '#dbeafe' : '#006ee6',
+      bgcolor: isDarkMode ? 'rgba(0, 122, 255, 0.14)' : 'rgba(0, 122, 255, 0.08)',
+      borderColor: isDarkMode ? 'rgba(96, 165, 250, 0.28)' : 'rgba(0, 122, 255, 0.22)',
+      boxShadow: 'none'
+    }
+  };
+  const uploadMessageAlertSx = (severity) => {
+    return factWiseAlertSx(fwPageTokens, severity, {
+      mb: 1.75,
+      mx: 'auto',
+      width: '100%',
+      py: 0.15,
+      borderRadius: '999px',
+      fontSize: '12px',
+      fontWeight: 400,
+    });
+  };
+  const inlineMessageAlertSx = (severity = 'info', sx = {}) => factWiseAlertSx(fwPageTokens, severity, {
+    borderRadius: '10px',
+    fontSize: '12px',
+    fontWeight: 400,
+    py: 0.5,
+    px: 1.15,
+    sx,
+  });
+  const sheetJoinSectionCardSx = {
+    borderRadius: '16px',
+    border: isDarkMode ? '1px solid rgba(148, 163, 184, 0.16)' : '1px solid #e5eaf2',
+    bgcolor: isDarkMode ? 'rgba(15, 23, 42, 0.48)' : '#ffffff',
+    boxShadow: isDarkMode ? 'none' : '0 14px 32px -28px rgba(15, 23, 42, 0.28)',
+    p: 2,
+  };
+  const sheetJoinStagePanelSx = {
+    animation: 'sheetJoinStepIn 260ms cubic-bezier(0.22, 1, 0.36, 1)',
+    transformOrigin: 'center top',
+    willChange: 'opacity, transform',
+    '@keyframes sheetJoinStepIn': {
+      '0%': {
+        opacity: 0,
+        transform: 'translateX(18px) scale(0.992)',
+      },
+      '100%': {
+        opacity: 1,
+        transform: 'translateX(0) scale(1)',
+      },
+    },
+    '@media (prefers-reduced-motion: reduce)': {
+      animation: 'none',
+    },
+  };
+  const sheetJoinStageIndicatorSx = (state) => ({
+    width: 21,
+    height: 21,
+    borderRadius: '50%',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+    fontSize: 11,
+    fontWeight: 600,
+    color: state === 'pending'
+      ? (isDarkMode ? '#94a3b8' : '#64748b')
+      : '#ffffff',
+    bgcolor: state === 'pending'
+      ? (isDarkMode ? 'rgba(148, 163, 184, 0.12)' : '#f1f5f9')
+      : uploadActionColor,
+    border: state === 'pending'
+      ? (isDarkMode ? '1px solid rgba(148, 163, 184, 0.18)' : '1px solid #dbe3ee')
+      : `1px solid ${uploadActionColor}`,
+    boxShadow: state === 'active' ? '0 8px 18px -12px rgba(0, 122, 255, 0.92)' : 'none',
+    transition: 'background-color 180ms ease, border-color 180ms ease, color 180ms ease, box-shadow 180ms ease',
+  });
+  const sheetJoinOptionCardSx = (active) => ({
+    m: 0,
+    p: 1.35,
+    borderRadius: '14px',
+    border: active
+      ? `1px solid ${isDarkMode ? 'rgba(96, 165, 250, 0.56)' : uploadActionColor}`
+      : isDarkMode ? '1px solid rgba(148, 163, 184, 0.16)' : '1px solid #e5eaf2',
+    bgcolor: active
+      ? isDarkMode ? 'rgba(0, 122, 255, 0.14)' : 'rgba(0, 122, 255, 0.07)'
+      : isDarkMode ? 'rgba(15, 23, 42, 0.34)' : '#f8fafc',
+    color: isDarkMode ? '#e2e8f0' : '#334155',
+    alignItems: 'flex-start',
+    minHeight: 74,
+    transition: 'border-color 160ms ease, background-color 160ms ease, box-shadow 160ms ease',
+    '&:hover': {
+      borderColor: isDarkMode ? 'rgba(96, 165, 250, 0.46)' : 'rgba(0, 122, 255, 0.34)',
+      bgcolor: active
+        ? isDarkMode ? 'rgba(0, 122, 255, 0.18)' : 'rgba(0, 122, 255, 0.09)'
+        : isDarkMode ? 'rgba(0, 122, 255, 0.08)' : '#ffffff',
+    },
+    '& .MuiFormControlLabel-label': {
+      width: '100%',
+    },
+  });
+  const sheetJoinUtilityButtonSx = {
+    minWidth: 0,
+    px: 1.1,
+    height: 28,
+    borderRadius: '999px',
+    textTransform: 'none',
+    fontSize: 12,
+    fontWeight: 500,
+    color: isDarkMode ? '#93c5fd' : uploadActionColor,
+    '&:hover': {
+      bgcolor: isDarkMode ? 'rgba(0, 122, 255, 0.12)' : 'rgba(0, 122, 255, 0.08)',
+    },
+    '&.Mui-disabled': {
+      color: isDarkMode ? 'rgba(148, 163, 184, 0.42)' : '#94a3b8',
+    },
+  };
+  const sheetJoinColumnOptionSx = (checked) => ({
+    minWidth: 0,
+    px: 1.1,
+    py: 0.9,
+    borderRadius: '12px',
+    border: checked
+      ? `1px solid ${isDarkMode ? 'rgba(96, 165, 250, 0.54)' : 'rgba(0, 122, 255, 0.42)'}`
+      : isDarkMode ? '1px solid rgba(148, 163, 184, 0.16)' : '1px solid #e5eaf2',
+    bgcolor: checked
+      ? isDarkMode ? 'rgba(0, 122, 255, 0.16)' : 'rgba(0, 122, 255, 0.08)'
+      : isDarkMode ? 'rgba(15, 23, 42, 0.34)' : '#f8fafc',
+    color: checked
+      ? isDarkMode ? '#bfdbfe' : uploadActionColor
+      : isDarkMode ? '#cbd5e1' : '#475569',
+    transition: 'background-color 160ms ease, border-color 160ms ease, color 160ms ease',
+    '&:hover': {
+      borderColor: isDarkMode ? 'rgba(96, 165, 250, 0.42)' : 'rgba(0, 122, 255, 0.30)',
+      bgcolor: checked
+        ? isDarkMode ? 'rgba(0, 122, 255, 0.20)' : 'rgba(0, 122, 255, 0.11)'
+        : isDarkMode ? 'rgba(0, 122, 255, 0.08)' : '#ffffff',
+    },
+  });
   const dialogChoiceCardSx = {
     borderRadius: '16px',
     border: isDarkMode ? '1px solid rgba(148, 163, 184, 0.18)' : '1px solid #e2e8f0',
@@ -1161,8 +1345,8 @@ const UploadFiles = () => {
     transition: 'all 0.2s ease',
     cursor: 'pointer',
     '&:hover': {
-      borderColor: '#2563eb',
-      bgcolor: isDarkMode ? 'rgba(37, 99, 235, 0.12)' : '#eff6ff',
+      borderColor: uploadActionColor,
+      bgcolor: isDarkMode ? 'rgba(0, 122, 255, 0.12)' : 'rgba(0, 122, 255, 0.07)',
       transform: 'translateY(-1px)'
     }
   };
@@ -1340,6 +1524,7 @@ const UploadFiles = () => {
   const [sheetJoinVisibleColumns, setSheetJoinVisibleColumns] = useState([]);
   const [sheetJoinPreviewFilter, setSheetJoinPreviewFilter] = useState('all');
   const [sheetJoinPreviewSearch, setSheetJoinPreviewSearch] = useState('');
+  const [sheetJoinPreviewSort, setSheetJoinPreviewSort] = useState({ column: '', direction: 'asc' });
   const sheetJoinPreviewRowsPerPage = 50;
   const [sheetJoinLegacyHeaderWarning, setSheetJoinLegacyHeaderWarning] = useState(false);
   const [savedSheetJoinComparisons, setSavedSheetJoinComparisons] = useState([]);
@@ -1574,7 +1759,7 @@ const UploadFiles = () => {
       setSheetJoinSources([]);
       setSheetJoinSourceFileInputKey(key => key + 1);
       setActiveSheetJoinComparisonId(activeComparisonId);
-      setSuccess('Related sheet data is saved as your new BOM/client file. Add the FW template when ready and continue normally.');
+      setSuccess('Related sheet data saved as your BOM/client file. Add the FW template when ready.');
     };
     reader.readAsBinaryString(file);
   }, []);
@@ -3027,6 +3212,15 @@ const UploadFiles = () => {
     XLSX.writeFile(workbook, 'pdf_extraction_preview.xlsx');
   };
 
+  const handleSheetJoinPreviewSort = useCallback((header) => {
+    setSheetJoinPreviewSort(prev => {
+      if (prev.column !== header) return { column: header, direction: 'asc' };
+      if (prev.direction === 'asc') return { column: header, direction: 'desc' };
+      return { column: '', direction: 'asc' };
+    });
+    setSheetJoinPreviewPage(0);
+  }, []);
+
   const handleContinuePdfExtractionReview = () => {
     setPdfExtractionReviewOpen(false);
     setWizardStep(1);
@@ -3966,6 +4160,7 @@ const UploadFiles = () => {
   const sheetJoinDetailSingularLabel = sheetJoinDetailLabel === 'MPNs'
     ? 'MPN'
     : (sheetJoinDetailLabel === 'manufacturers' ? 'manufacturer' : sheetJoinDetailLabel);
+  const sheetJoinSelectableDetailHeaders = sheetJoinDetailHeaders.filter(header => header !== sheetJoinConfig.detailKey);
   const normalizedSheetJoinPreviewSearch = sheetJoinPreviewSearch.trim().toLowerCase();
   const sheetJoinFilteredPreviewRows = sheetJoinPreview
     ? sheetJoinPreview.rows
@@ -3976,12 +4171,39 @@ const UploadFiles = () => {
           return Object.values(row).some(value => cleanSheetJoinValue(value).toLowerCase().includes(normalizedSheetJoinPreviewSearch));
         })
     : [];
-  const sheetJoinPreviewTotalPages = Math.max(1, Math.ceil(sheetJoinFilteredPreviewRows.length / sheetJoinPreviewRowsPerPage));
+  const sheetJoinSortedPreviewRows = sheetJoinPreviewSort.column
+    ? [...sheetJoinFilteredPreviewRows].sort((left, right) => {
+        const column = sheetJoinPreviewSort.column;
+        const leftValue = cleanSheetJoinValue(left.row[column]);
+        const rightValue = cleanSheetJoinValue(right.row[column]);
+        const leftNumber = Number(leftValue.replace(/,/g, ''));
+        const rightNumber = Number(rightValue.replace(/,/g, ''));
+        const bothNumeric = leftValue !== '' && rightValue !== '' && !Number.isNaN(leftNumber) && !Number.isNaN(rightNumber);
+        const result = bothNumeric
+          ? leftNumber - rightNumber
+          : leftValue.localeCompare(rightValue, undefined, { numeric: true, sensitivity: 'base' });
+        if (result === 0) return left.index - right.index;
+        return sheetJoinPreviewSort.direction === 'asc' ? result : -result;
+      })
+    : sheetJoinFilteredPreviewRows;
+  const sheetJoinPreviewTotalPages = Math.max(1, Math.ceil(sheetJoinSortedPreviewRows.length / sheetJoinPreviewRowsPerPage));
   const sheetJoinPreviewStart = sheetJoinPreviewPage * sheetJoinPreviewRowsPerPage;
-  const visibleSheetJoinPreviewRows = sheetJoinFilteredPreviewRows.slice(sheetJoinPreviewStart, sheetJoinPreviewStart + sheetJoinPreviewRowsPerPage);
+  const visibleSheetJoinPreviewRows = sheetJoinSortedPreviewRows.slice(sheetJoinPreviewStart, sheetJoinPreviewStart + sheetJoinPreviewRowsPerPage);
   const visibleSheetJoinPreviewColumns = sheetJoinPreview
     ? sheetJoinPreview.headers.filter(header => sheetJoinVisibleColumns.includes(header))
     : [];
+  const sheetJoinStageSteps = [
+    { key: 'match', label: 'Match' },
+    { key: 'options', label: 'Options' },
+    { key: 'preview', label: 'Preview' },
+  ];
+  const sheetJoinActiveStageIndex = Math.max(0, sheetJoinStageSteps.findIndex(step => step.key === sheetJoinStage));
+  const sheetJoinDialogWidth = sheetJoinStage === 'preview'
+    ? 'min(1000px, calc(100vw - 48px))'
+    : 'min(760px, calc(100vw - 48px))';
+  const sheetJoinContentMaxWidth = sheetJoinStage === 'preview'
+    ? '100%'
+    : (sheetJoinStage === 'options' ? '680px' : '680px');
   const pdfReviewHeaders = pdfExtractionReview?.headers || [];
   const pdfReviewRows = pdfExtractionReview?.rows || [];
   const pdfExtractionReviewTotalPages = Math.max(1, Math.ceil(pdfReviewRows.length / pdfExtractionReviewRowsPerPage));
@@ -3993,11 +4215,11 @@ const UploadFiles = () => {
   const sheetJoinMetricChipSx = (tone, active) => {
     const tones = {
       blue: {
-        bg: '#2563eb',
-        border: '#3b82f6',
+        bg: uploadActionColor,
+        border: '#0d80ff',
         text: '#ffffff',
-        softBg: isDarkMode ? 'rgba(37, 99, 235, 0.12)' : '#dbeafe',
-        softText: isDarkMode ? '#93c5fd' : '#1d4ed8'
+        softBg: isDarkMode ? 'rgba(0, 122, 255, 0.14)' : 'rgba(0, 122, 255, 0.08)',
+        softText: isDarkMode ? '#66b3ff' : '#005ecb'
       },
       green: {
         bg: '#059669',
@@ -4023,44 +4245,109 @@ const UploadFiles = () => {
     };
     const c = tones[tone] || tones.slate;
     return {
-      height: 28,
-      px: 1,
-      fontSize: '11px',
-      fontWeight: 700,
+      height: 19,
+      minHeight: 19,
+      px: 0,
+      fontSize: '9.5px',
+      fontWeight: 500,
       bgcolor: active ? c.bg : c.softBg,
       color: active ? c.text : c.softText,
       border: `1px solid ${c.border}`,
       borderRadius: '999px',
       cursor: 'pointer',
-      boxShadow: active ? `0 10px 22px -16px ${c.border}` : 'none',
+      lineHeight: 1,
+      boxShadow: active ? `0 5px 12px -12px ${c.border}` : 'none',
+      '& .MuiChip-label': {
+        px: 0.7,
+        lineHeight: 1,
+      },
       '&:hover': {
         bgcolor: active ? c.bg : c.softBg
       }
     };
   };
+  const sheetJoinTableShellSx = {
+    height: 'calc(100vh - 380px)',
+    minHeight: 320,
+    overflow: 'auto',
+    border: `1px solid ${fwPageTokens.tableLine}`,
+    borderRadius: '14px',
+    bgcolor: fwPageTokens.table,
+    boxShadow: isDarkMode ? 'inset 0 1px 0 rgba(255, 255, 255, 0.03)' : '0 12px 28px -26px rgba(15, 23, 42, 0.28)',
+    '&::-webkit-scrollbar-corner': { backgroundColor: 'transparent' },
+  };
+  const sheetJoinTableSx = {
+    width: 'max-content',
+    minWidth: '100%',
+    tableLayout: 'fixed',
+    borderCollapse: 'collapse',
+    '& th, & td': {
+      borderBottom: `1px solid ${fwPageTokens.rowLine}`,
+      p: 0,
+    },
+    '& th': {
+      position: 'sticky',
+      top: 0,
+      backgroundColor: fwPageTokens.tableHeader,
+      zIndex: 2,
+      textAlign: 'left',
+      boxShadow: isDarkMode ? '0 8px 18px -18px rgba(0, 0, 0, 0.85)' : '0 8px 18px -20px rgba(15, 23, 42, 0.36)',
+    },
+  };
+  const sheetJoinHeaderCellSx = {
+    position: 'relative',
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    color: isDarkMode ? '#d7dce5' : '#334155',
+    fontWeight: 600,
+    fontSize: '12px',
+    letterSpacing: 0,
+    backgroundColor: fwPageTokens.tableHeader,
+    userSelect: 'none',
+  };
+  const sheetJoinHeaderButtonSx = (active) => ({
+    width: '100%',
+    minWidth: 0,
+    minHeight: 38,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 0.75,
+    pr: 2.25,
+    pl: 1.6,
+    color: active ? fwPageTokens.text : 'inherit',
+    cursor: 'pointer',
+    transition: 'color 150ms ease, background-color 150ms ease',
+    '&:hover': {
+      color: fwPageTokens.text,
+      bgcolor: isDarkMode ? 'rgba(255, 255, 255, 0.025)' : 'rgba(0, 122, 255, 0.035)',
+    },
+  });
+  const sheetJoinSortIconSx = (active) => ({
+    fontSize: active ? 15 : 14,
+    color: active ? uploadActionColor : (isDarkMode ? 'rgba(163, 163, 168, 0.58)' : '#94a3b8'),
+    flexShrink: 0,
+  });
+  const sheetJoinBodyRowSx = {
+    bgcolor: fwPageTokens.table,
+    transition: 'background-color 140ms ease',
+    '&:hover': {
+      bgcolor: fwPageTokens.rowHover,
+    },
+  };
+  const sheetJoinBodyCellSx = (header) => ({
+    width: sheetJoinColumnWidths[header] || 180,
+    minWidth: sheetJoinColumnWidths[header] || 180,
+    maxWidth: sheetJoinColumnWidths[header] || 180,
+    height: 46,
+  });
 
   return (
-    <Box sx={{ position: 'relative', minHeight: 'calc(100vh - 64px)', px: { xs: 1.5, md: 3 }, py: { xs: 2, md: 3 }, bgcolor: Nn.pageBg, color: Nn.text, overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-      {/* Background Glow */}
-      <Box
-        sx={{
-          pointerEvents: 'none',
-          position: 'absolute',
-          transition: 'all 0.7s cubic-bezier(0.16, 1, 0.3, 1)',
-          borderRadius: '50%',
-          opacity: 0.32,
-          width: '62vw',
-          height: '62vw',
-          left: `${mousePos.x}%`,
-          top: `${mousePos.y}%`,
-          transform: 'translate(-50%, -50%)',
-          filter: 'blur(90px)',
-          background: 'radial-gradient(circle, var(--color-brand, #2383e2) 0%, transparent 70%)',
-          zIndex: 0
-        }}
-      />
-      {/* Grid Pattern */}
-      <Box className="auth-grid-pattern" sx={{ position: 'absolute', inset: 0, pointerEvents: 'none', opacity: 0.35, zIndex: 0 }} />
+    <Box sx={{ position: 'relative', minHeight: 'calc(100vh - 64px)', px: { xs: 1.5, md: 3 }, py: { xs: 2, md: 3 }, bgcolor: fwPageTokens.bg, background: Nn.pageBg, color: Nn.text, overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <Box sx={factWiseTopShadeSx(isDarkMode)} />
+      <Box sx={factWiseGlowSx(fwPageTokens)} />
+      <Box sx={factWiseGridOverlaySx(fwPageTokens)} />
 
       {/* Main Glassmorphic Wizard Card */}
       <Box
@@ -4069,7 +4356,7 @@ const UploadFiles = () => {
           zIndex: 1,
           width: wizardStep === 0
             ? 'min(920px, calc(100vw - 32px))'
-            : 'min(900px, calc(100vw - 32px))',
+            : 'min(760px, calc(100vw - 32px))',
           minHeight: wizardStep === 0 ? '580px' : 'auto',
           borderRadius: '22px',
           border: `1px solid ${Nn.cardBorder}`,
@@ -4094,14 +4381,9 @@ const UploadFiles = () => {
         }}>
           <Box>
             <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: wizardStep === 0 ? 'center' : 'flex-start', gap: 1.5, mb: 0.5 }}>
-              <Typography variant="h5" fontWeight="800" sx={{ color: Nn.text, letterSpacing: '-0.02em', fontSize: '1.4rem' }}>
+              <Typography variant="h5" fontWeight="600" sx={{ color: Nn.text, letterSpacing: '-0.02em', fontSize: '1.4rem' }}>
                 {wizardStep === 1 ? 'Select Template' : 'Upload Files'}
               </Typography>
-              <Chip
-                label={wizardStep === 0 ? "Step 1 of 2 • Files" : "Step 2 of 2 • Options"}
-                size="small"
-                sx={{ display: wizardStep === 1 ? 'none' : 'inline-flex', height: 22, fontSize: '11px', fontWeight: 700, bgcolor: isDarkMode ? 'rgba(37, 99, 235, 0.2)' : 'rgba(37, 99, 235, 0.1)', color: isDarkMode ? '#60a5fa' : '#1d4ed8', border: isDarkMode ? '1px solid rgba(37, 99, 235, 0.4)' : '1px solid rgba(37, 99, 235, 0.25)', borderRadius: '999px' }}
-              />
             </Box>
             <Typography variant="caption" sx={{ color: Nn.muted, fontSize: '0.85rem' }}>
               {wizardStep === 1
@@ -4109,28 +4391,32 @@ const UploadFiles = () => {
                 : 'Upload the client source data. Destination: FactWise item default.'}
             </Typography>
           </Box>
-          {/* Progress bar */}
-          <Box sx={{
-            display: 'flex',
-            gap: 0.5,
-            width: 80,
-            mt: 1,
-            position: wizardStep === 0 ? 'absolute' : 'static',
-            right: wizardStep === 0 ? 0 : 'auto',
-            top: wizardStep === 0 ? 0 : 'auto'
-          }}>
-            <Box sx={{ height: 4, flex: 1, borderRadius: 2, bgcolor: '#2563eb' }} />
-            <Box sx={{ height: 4, flex: 1, borderRadius: 2, bgcolor: wizardStep === 1 ? '#2563eb' : (isDarkMode ? 'rgba(255,255,255,0.15)' : 'rgba(15,23,42,0.12)') }} />
-          </Box>
+          <Chip
+            label={wizardStep === 0 ? 'Step 1 of 2' : 'Step 2 of 2'}
+            size="small"
+            sx={{
+              position: 'absolute',
+              top: 0,
+              right: 0,
+              height: 22,
+              borderRadius: '999px',
+              fontSize: '11px',
+              fontWeight: 500,
+              color: isDarkMode ? '#93c5fd' : uploadActionColor,
+              bgcolor: isDarkMode ? 'rgba(0, 122, 255, 0.16)' : 'rgba(0, 122, 255, 0.08)',
+              border: isDarkMode ? '1px solid rgba(96, 165, 250, 0.26)' : '1px solid rgba(0, 122, 255, 0.16)',
+              '& .MuiChip-label': { px: 1 }
+            }}
+          />
         </Box>
 
         {error && (
-          <Alert severity="error" sx={{ mb: 2.5, borderRadius: '12px' }} onClose={() => setError(null)}>
+          <Alert severity="error" sx={uploadMessageAlertSx('error')} onClose={() => setError(null)}>
             {error}
           </Alert>
         )}
         {success && (
-          <Alert severity="success" sx={{ mb: 2.5, borderRadius: '12px' }} onClose={() => setSuccess(null)}>
+          <Alert severity="success" sx={uploadMessageAlertSx('success')} onClose={() => setSuccess(null)}>
             {success}
           </Alert>
         )}
@@ -4145,7 +4431,7 @@ const UploadFiles = () => {
                   mb: 2.5,
                   p: 2,
                   borderRadius: '16px',
-                  border: isDarkMode ? '1px solid rgba(59, 130, 246, 0.3)' : '1px solid rgba(37, 99, 235, 0.2)',
+                  border: isDarkMode ? '1px solid rgba(0, 122, 255, 0.28)' : '1px solid rgba(0, 122, 255, 0.16)',
                   bgcolor: isDarkMode ? 'rgba(15, 23, 42, 0.75)' : '#f0f7ff',
                   backdropFilter: 'blur(12px)',
                   boxShadow: '0 4px 16px rgba(0,0,0,0.1)'
@@ -4153,8 +4439,8 @@ const UploadFiles = () => {
               >
                 <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1.5 }}>
                   <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                    <LibraryBooksIcon sx={{ color: '#3b82f6', fontSize: 20 }} />
-                    <Typography variant="subtitle2" sx={{ fontWeight: 700, color: Nn.text, fontSize: '13.5px' }}>
+                    <LibraryBooksIcon sx={{ color: uploadActionColor, fontSize: 20 }} />
+                    <Typography variant="subtitle2" sx={{ fontWeight: 600, color: Nn.text, fontSize: '13.5px' }}>
                       Saved Merge Books ({savedSheetJoinComparisons.length})
                     </Typography>
                   </Box>
@@ -4199,9 +4485,9 @@ const UploadFiles = () => {
                             p: 1.5,
                             borderRadius: '12px',
                             cursor: 'pointer',
-                            border: isSelected ? '2px solid #2563eb' : (isDarkMode ? '1px solid rgba(255,255,255,0.12)' : '1px solid #cbd5e1'),
+                            border: isSelected ? `2px solid ${uploadActionColor}` : (isDarkMode ? '1px solid rgba(255,255,255,0.12)' : '1px solid #cbd5e1'),
                             bgcolor: isSelected
-                              ? (isDarkMode ? 'rgba(37, 99, 235, 0.25)' : '#dbeafe')
+                              ? (isDarkMode ? 'rgba(0, 122, 255, 0.18)' : 'rgba(0, 122, 255, 0.08)')
                               : (isDarkMode ? '#0f172a' : '#ffffff'),
                             transition: 'all 0.2s ease',
                             display: 'flex',
@@ -4209,9 +4495,9 @@ const UploadFiles = () => {
                             justifyContent: 'space-between',
                             position: 'relative',
                             '&:hover': {
-                              borderColor: '#2563eb',
+                              borderColor: uploadActionColor,
                               transform: 'translateY(-1px)',
-                              boxShadow: '0 4px 12px rgba(37, 99, 235, 0.15)'
+                              boxShadow: '0 4px 12px rgba(0, 122, 255, 0.15)'
                             }
                           }}
                         >
@@ -4220,8 +4506,8 @@ const UploadFiles = () => {
                               <Typography
                                 variant="body2"
                                 sx={{
-                                  fontWeight: 700,
-                                  color: isSelected ? '#2563eb' : Nn.text,
+                                  fontWeight: 600,
+                                  color: isSelected ? uploadActionColor : Nn.text,
                                   fontSize: '12.5px',
                                   whiteSpace: 'nowrap',
                                   overflow: 'hidden',
@@ -4234,7 +4520,7 @@ const UploadFiles = () => {
                                 <Chip
                                   label="Selected"
                                   size="small"
-                                  sx={{ height: 16, fontSize: '9px', fontWeight: 800, bgcolor: '#2563eb', color: '#ffffff', px: 0.5 }}
+                                  sx={{ height: 16, fontSize: '9px', fontWeight: 600, bgcolor: uploadActionColor, color: '#ffffff', px: 0.5 }}
                                 />
                               )}
                             </Box>
@@ -4253,7 +4539,7 @@ const UploadFiles = () => {
                                 sx={{
                                   color: isDarkMode ? '#94a3b8' : '#64748b',
                                   p: 0.5,
-                                  '&:hover': { color: '#3b82f6', bgcolor: 'rgba(59, 130, 246, 0.12)' }
+                                  '&:hover': { color: uploadActionColor, bgcolor: 'rgba(0, 122, 255, 0.12)' }
                                 }}
                               >
                                 <VisibilityIcon fontSize="small" />
@@ -4267,7 +4553,7 @@ const UploadFiles = () => {
                                   size="small"
                                   onClick={(e) => handleUnselectSavedSheetJoinComparison(e)}
                                   sx={{
-                                    color: '#2563eb',
+                                    color: uploadActionColor,
                                     p: 0.5,
                                     '&:hover': { color: '#ef4444', bgcolor: 'rgba(239, 68, 68, 0.12)' }
                                   }}
@@ -4302,7 +4588,7 @@ const UploadFiles = () => {
             <Grid container spacing={2.5} justifyContent="center">
               {/* Client File Dropzone Column */}
               <Grid item xs={12} md={10} lg={9}>
-                <Typography variant="subtitle2" sx={{ color: Nn.text, fontWeight: 700, fontSize: 14, mb: 1.25, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 1 }}>
+                <Typography variant="subtitle2" sx={{ color: Nn.muted, fontWeight: 500, fontSize: 13, mb: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 1 }}>
                   Client File
                 </Typography>
 
@@ -4313,65 +4599,96 @@ const UploadFiles = () => {
                   className="fw-upload-dropzone"
                   sx={{
                     border: userFile
-                      ? `1.5px solid ${Nn.accent}`
+                      ? `1px solid ${Nn.panelBorder}`
                       : (isUserDragActive || isUserHovered)
-                      ? `1.5px dashed ${Nn.accent}`
+                      ? `1.5px dashed ${isDarkMode ? Nn.accent : uploadActionColor}`
                       : `1.5px dashed ${Nn.inputBorder}`,
                     borderRadius: '16px',
-                    py: { xs: 4, md: 5 },
-                    px: { xs: 2.5, md: 4 },
+                    py: userFile ? { xs: 2.25, md: 2.5 } : { xs: 4, md: 5 },
+                    px: userFile ? { xs: 2.25, md: 3 } : { xs: 2.5, md: 4 },
                     textAlign: 'center',
                     cursor: 'pointer',
-                    minHeight: { xs: 220, md: 250 },
+                    minHeight: userFile ? { xs: 142, md: 154 } : { xs: 220, md: 250 },
                     width: '100%',
                     display: 'flex',
-                    flexDirection: 'column',
+                    flexDirection: userFile ? { xs: 'column', sm: 'row' } : 'column',
                     justifyContent: 'center',
                     alignItems: 'center',
+                    gap: userFile ? { xs: 1.25, sm: 2 } : 0,
                     position: 'relative',
                     background: (isUserDragActive || isUserHovered)
-                      ? Nn.dropzoneActiveBg
+                      ? isDarkMode
+                        ? Nn.dropzoneActiveBg
+                        : 'linear-gradient(180deg, rgba(0, 122, 255, 0.16) 0%, rgba(0, 122, 255, 0.06) 52%, #ffffff 100%)'
                       : userFile
-                      ? Nn.dropzoneSelectedBg
+                      ? (isDarkMode ? 'rgba(15, 23, 42, 0.42)' : '#ffffff')
                       : Nn.dropzoneBg,
+                    boxShadow: !isDarkMode && (isUserDragActive || isUserHovered)
+                      ? '0 20px 45px -30px rgba(0, 122, 255, 0.72), inset 0 1px 0 rgba(255, 255, 255, 0.95)'
+                      : 'none',
                     transition: 'all 0.22s cubic-bezier(0.16, 1, 0.3, 1)'
                   }}
                 >
                   <input {...getUserInputProps()} />
-                  <DropzoneFileStackIcon
-                    color="#3b82f6"
-                    glowColor="#22c55e"
-                    selected={!!userFile}
-                    isHovered={isUserDragActive || isUserHovered}
-                    isDarkMode={isDarkMode}
-                  />
-                  <Typography variant="body1" sx={{ color: Nn.text, fontWeight: 800, fontSize: '1rem', mt: 0.5, mb: 0.25 }}>
-                    {userFile ? userFile.name : 'Drag and drop or select files'}
-                  </Typography>
-                  <Typography variant="caption" sx={{ color: Nn.muted, fontSize: '0.8rem', mb: 2 }}>
-                    Supported files: .xlsx, .xls, .xlsm, .csv, .pdf
-                  </Typography>
+                  <Box sx={{ transform: userFile ? 'scale(0.74)' : 'none', transformOrigin: 'center', mb: userFile ? { xs: -1.5, sm: -0.75 } : 0, flexShrink: 0 }}>
+                    <DropzoneFileStackIcon
+                      color={uploadActionColor}
+                      glowColor={isDarkMode ? '#22c55e' : uploadActionColor}
+                      selected={!!userFile}
+                      isHovered={isUserDragActive || isUserHovered}
+                      isDarkMode={isDarkMode}
+                    />
+                  </Box>
+                  <Box sx={{ minWidth: 0, flex: userFile ? 1 : 'initial', textAlign: userFile ? { xs: 'center', sm: 'left' } : 'center' }}>
+                    <Typography variant="body1" sx={{ color: Nn.text, fontWeight: 500, fontSize: userFile ? '0.92rem' : '1rem', mt: userFile ? 0 : 0.5, mb: 0.25, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {userFile ? userFile.name : 'Drag and drop or select files'}
+                    </Typography>
+                    <Typography variant="caption" sx={{ color: Nn.muted, fontSize: '0.78rem', display: 'block', mb: userFile ? 0 : 2 }}>
+                      {userFile ? 'File selected. Use sheet setup below, or change the file.' : 'Supported files: .xlsx, .xls, .xlsm, .csv, .pdf'}
+                    </Typography>
+                  </Box>
                   <Button
                     variant="contained"
                     size="small"
                     sx={{
-                      background: userFile
-                        ? 'linear-gradient(135deg, #16a34a 0%, #059669 100%)'
-                        : 'linear-gradient(135deg, #2563eb 0%, #0284c7 100%)',
-                      color: '#ffffff !important',
-                      fontWeight: 800,
-                      borderRadius: '999px',
+                      ...factWisePrimaryButtonSx,
+                      minHeight: 34,
+                      height: 34,
                       px: 2.5,
                       py: 0.7,
                       fontSize: '0.85rem',
-                      textTransform: 'none',
-                      border: 'none',
-                      boxShadow: userFile ? '0 12px 24px -16px rgba(22, 163, 74, 0.9)' : '0 12px 24px -16px rgba(37, 99, 235, 0.9)',
+                      background: userFile
+                        ? isDarkMode
+                          ? 'linear-gradient(135deg, #16a34a 0%, #059669 100%)'
+                          : 'linear-gradient(180deg, #22c783 0%, #00a86b 100%)'
+                        : isDarkMode
+                        ? factWisePrimaryButtonSx.background
+                        : `linear-gradient(180deg, ${uploadActionColor} 0%, ${uploadActionHover} 100%)`,
+                      color: '#ffffff !important',
+                      borderColor: userFile ? (isDarkMode ? '#059669' : '#00a86b') : (isDarkMode ? '#2b6fed' : uploadActionColor),
+                      boxShadow: userFile
+                        ? isDarkMode
+                          ? '0 12px 24px -16px rgba(22, 163, 74, 0.9)'
+                          : '0 14px 24px -13px rgba(0, 168, 107, 0.72), inset 0 1px 0 rgba(255,255,255,0.28)'
+                        : isDarkMode
+                        ? factWisePrimaryButtonSx.boxShadow
+                        : '0 14px 24px -12px rgba(0, 122, 255, 0.72), inset 0 1px 0 rgba(255, 255, 255, 0.30)',
                       '&:hover': {
                         background: userFile
-                          ? 'linear-gradient(135deg, #15803d 0%, #047857 100%)'
-                          : 'linear-gradient(135deg, #1d4ed8 0%, #0369a1 100%)',
-                        boxShadow: userFile ? '0 16px 30px -18px rgba(22, 163, 74, 0.95)' : '0 16px 30px -18px rgba(37, 99, 235, 0.95)'
+                          ? isDarkMode
+                            ? 'linear-gradient(135deg, #15803d 0%, #047857 100%)'
+                            : 'linear-gradient(180deg, #20d68b 0%, #00a86b 100%)'
+                          : isDarkMode
+                          ? factWisePrimaryButtonSx.background
+                          : `linear-gradient(180deg, ${uploadActionColor} 0%, ${uploadActionHover} 100%)`,
+                        filter: userFile ? undefined : 'brightness(1.05)',
+                        boxShadow: userFile
+                          ? isDarkMode
+                            ? '0 16px 30px -18px rgba(22, 163, 74, 0.95)'
+                            : '0 16px 30px -14px rgba(0, 168, 107, 0.82), inset 0 1px 0 rgba(255,255,255,0.32)'
+                          : isDarkMode
+                          ? factWisePrimaryButtonSx.boxShadow
+                          : '0 16px 28px -12px rgba(0, 122, 255, 0.82), inset 0 1px 0 rgba(255, 255, 255, 0.34)'
                       }
                     }}
                   >
@@ -4381,13 +4698,18 @@ const UploadFiles = () => {
 
                 {/* Client File Sheet & Columns Preview Card */}
                 {userFile && (
-                  <Box sx={{ mt: 1.5, p: 2, borderRadius: '14px', border: `1px solid ${Nn.panelBorder}`, bgcolor: Nn.panelBg, boxShadow: '0 4px 14px rgba(0,0,0,0.2)' }}>
+                  <Box sx={{ mt: 1.25, p: 2, borderRadius: '14px', border: `1px solid ${Nn.panelBorder}`, bgcolor: Nn.panelBg, boxShadow: isDarkMode ? '0 10px 24px -22px rgba(0,0,0,0.9)' : '0 12px 28px -24px rgba(15, 23, 42, 0.28)' }}>
                     <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1.5 }}>
                       <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                         <CheckCircleIcon sx={{ color: '#4ade80', fontSize: 18 }} />
-                        <Typography variant="subtitle2" sx={{ color: Nn.text, fontWeight: 800, fontSize: 14 }}>
-                          {userFile.name}
-                        </Typography>
+                        <Box sx={{ minWidth: 0 }}>
+                          <Typography variant="subtitle2" sx={{ color: Nn.text, fontWeight: 500, fontSize: 13.5, lineHeight: 1.25 }}>
+                            Sheet setup
+                          </Typography>
+                          <Typography variant="caption" sx={{ color: Nn.muted, fontSize: 12, lineHeight: 1.25, display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: { xs: 220, sm: 420 } }}>
+                            {userFile.name}
+                          </Typography>
+                        </Box>
                       </Box>
                       <IconButton size="small" onClick={handleRemoveClientFile} sx={{ color: Nn.muted, '&:hover': { color: Nn.text } }}>
                         <CloseIcon fontSize="small" />
@@ -4396,7 +4718,7 @@ const UploadFiles = () => {
 
                     {clientSheetNames.length > 0 && (
                       <Box sx={{ pt: 1, borderTop: `1px solid ${Nn.divider}` }}>
-                        <Grid container spacing={1.5} sx={{ mb: 1.5 }}>
+                        <Grid container spacing={1.5} sx={uploadSheetRowSx}>
                           <Grid item xs={7}>
                             {userFile.name.toLowerCase().endsWith('.csv') ? (
                               <TextField
@@ -4405,10 +4727,11 @@ const UploadFiles = () => {
                                 label="Sheet Name"
                                 value={getFileStem(userFile.name)}
                                 InputProps={{ readOnly: true }}
+                                sx={fieldSx}
                               />
                             ) : (
-                              <FormControl fullWidth size="small">
-                                <InputLabel sx={{ color: Nn.muted }}>
+                              <FormControl fullWidth size="small" sx={uploadSheetSelectControlSx}>
+                                <InputLabel sx={inputLabelSx}>
                                   {combineSheetsMode ? 'Sheets to combine' : 'Sheet Name'}
                                 </InputLabel>
                                 {/* Combining stacks several sheets into one, so the
@@ -4417,7 +4740,6 @@ const UploadFiles = () => {
                                   <Select
                                     multiple
                                     value={selectedClientSheets}
-                                    label="Sheets to combine"
                                     onChange={(e) => {
                                       const picked = typeof e.target.value === 'string'
                                         ? e.target.value.split(',')
@@ -4425,8 +4747,8 @@ const UploadFiles = () => {
                                       setSelectedClientSheets(picked);
                                     }}
                                     renderValue={(picked) => `${picked.length} of ${clientSheetNames.length} selected`}
-                                    MenuProps={{ PaperProps: { className: 'fw-select-dropdown' } }}
-                                    sx={{ borderRadius: '8px' }}
+                                    MenuProps={sheetJoinSelectMenuProps}
+                                    sx={selectFieldSx}
                                   >
                                     {clientSheetNames.map(s => (
                                       <MenuItem key={s} value={s}>
@@ -4442,10 +4764,9 @@ const UploadFiles = () => {
                                 ) : (
                                   <Select
                                     value={selectedClientSheet}
-                                    label="Sheet Name"
                                     onChange={(e) => handleClientSheetChange(e.target.value)}
-                                    MenuProps={{ PaperProps: { className: 'fw-select-dropdown' } }}
-                                    sx={{ borderRadius: '8px' }}
+                                    MenuProps={sheetJoinSelectMenuProps}
+                                    sx={selectFieldSx}
                                   >
                                     {clientSheetNames.map(s => (
                                       <MenuItem key={s} value={s}>{s}</MenuItem>
@@ -4464,7 +4785,7 @@ const UploadFiles = () => {
                               InputProps={{ inputProps: { min: 1 } }}
                               value={clientHeaderRow}
                               onChange={(e) => handleClientHeaderRowChange(e.target.value)}
-                              sx={{ '& input': { borderRadius: '8px' } }}
+                              sx={fieldSx}
                             />
                           </Grid>
                         </Grid>
@@ -4483,11 +4804,14 @@ const UploadFiles = () => {
                                     setSelectedClientSheets(on ? [...clientSheetNames] : []);
                                   }}
                                   size="small"
-                                  sx={{ color: '#60a5fa', '&.Mui-checked': { color: '#3b82f6' } }}
+                                  sx={{
+                                    color: isDarkMode ? '#60a5fa' : '#94a3b8',
+                                    '&.Mui-checked': { color: uploadActionColor }
+                                  }}
                                 />
                               }
                               label={
-                                <Typography variant="body2" sx={{ color: Nn.tableText, fontSize: 13, fontWeight: 600 }}>
+                                <Typography variant="body2" sx={{ color: Nn.tableText, fontSize: 13, fontWeight: 500 }}>
                                   Combine multiple sheets into one (same layout, e.g. one sheet per BOM)
                                 </Typography>
                               }
@@ -4504,7 +4828,7 @@ const UploadFiles = () => {
 
                         {clientHeaderPreview.length > 0 && (
                           <Box sx={{ mb: 1.5 }}>
-                            <Typography variant="caption" sx={{ color: Nn.muted, fontSize: 12, fontWeight: 600, display: 'block', mb: 0.75 }}>
+                            <Typography variant="caption" sx={{ color: Nn.muted, fontSize: 12, fontWeight: 500, display: 'block', mb: 0.75 }}>
                               {clientHeaderAutoDetected
                                 ? `Header row auto-detected at row ${clientHeaderRow} — ${clientHeaderPreview.length} source columns found.`
                                 : `${clientHeaderPreview.length} source columns found on row ${clientHeaderRow}.`}
@@ -4516,7 +4840,7 @@ const UploadFiles = () => {
                                   size="small"
                                   variant="outlined"
                                   label={h.length > 22 ? `${h.slice(0, 22)}…` : h}
-                                  sx={{ height: 24, fontSize: 11, bgcolor: a.surface.subtle, borderColor: a.border.default, color: Nn.tableText, fontWeight: 600 }}
+                                  sx={{ height: 24, fontSize: 11, bgcolor: a.surface.subtle, borderColor: a.border.default, color: Nn.tableText, fontWeight: 500 }}
                                 />
                               ))}
                               {clientHeaderPreview.length > 12 && (
@@ -4524,7 +4848,20 @@ const UploadFiles = () => {
                                   size="small"
                                   onClick={() => setShowAllSourceColumns(!showAllSourceColumns)}
                                   label={showAllSourceColumns ? 'Show less' : `+${clientHeaderPreview.length - 12} more`}
-                                  sx={{ height: 24, fontSize: 11, bgcolor: 'rgba(37, 99, 235, 0.25)', color: '#60a5fa', fontWeight: 800, cursor: 'pointer' }}
+                                  sx={{
+                                    height: 24,
+                                    fontSize: 11,
+                                    bgcolor: isDarkMode ? 'rgba(0, 122, 255, 0.18)' : 'rgba(0, 122, 255, 0.12)',
+                                    border: isDarkMode ? '1px solid rgba(96, 165, 250, 0.22)' : '1px solid rgba(0, 122, 255, 0.18)',
+                                    color: isDarkMode ? '#60a5fa' : uploadActionColor,
+                                    fontWeight: 500,
+                                    cursor: 'pointer',
+                                    transition: 'background-color 160ms ease, color 160ms ease, border-color 160ms ease',
+                                    '&:hover': {
+                                      bgcolor: isDarkMode ? 'rgba(0, 122, 255, 0.24)' : 'rgba(0, 122, 255, 0.18)',
+                                      borderColor: isDarkMode ? 'rgba(96, 165, 250, 0.34)' : 'rgba(0, 122, 255, 0.30)'
+                                    }
+                                  }}
                                 />
                               )}
                             </Box>
@@ -4544,17 +4881,17 @@ const UploadFiles = () => {
                                   borderRadius: '999px',
                                   px: 2,
                                   fontSize: 12,
-                                  fontWeight: 800,
-                                  borderColor: isDarkMode ? 'rgba(96, 165, 250, 0.45)' : 'rgba(37, 99, 235, 0.28)',
-                                  color: isDarkMode ? '#93c5fd' : '#2563eb',
-                                  bgcolor: isDarkMode ? 'rgba(37, 99, 235, 0.12)' : '#eff6ff',
+                                  fontWeight: 500,
+                                  borderColor: isDarkMode ? 'rgba(0, 122, 255, 0.36)' : 'rgba(0, 122, 255, 0.22)',
+                                  color: isDarkMode ? '#66b3ff' : uploadActionColor,
+                                  bgcolor: isDarkMode ? 'rgba(0, 122, 255, 0.12)' : 'rgba(0, 122, 255, 0.07)',
                                   '&:hover': {
-                                    borderColor: isDarkMode ? 'rgba(96, 165, 250, 0.7)' : 'rgba(37, 99, 235, 0.45)',
-                                    bgcolor: isDarkMode ? 'rgba(37, 99, 235, 0.18)' : '#dbeafe'
+                                    borderColor: isDarkMode ? 'rgba(0, 122, 255, 0.52)' : 'rgba(0, 122, 255, 0.34)',
+                                    bgcolor: isDarkMode ? 'rgba(0, 122, 255, 0.18)' : 'rgba(0, 122, 255, 0.10)'
                                   }
                                 }}
                               >
-                                REVIEW EXTRACTED PDF
+                                Review extracted PDF
                               </Button>
                             )}
                             <Button
@@ -4567,17 +4904,17 @@ const UploadFiles = () => {
                                 borderRadius: '999px',
                                 px: 2,
                                 fontSize: 12,
-                                fontWeight: 800,
-                                borderColor: isDarkMode ? 'rgba(96, 165, 250, 0.45)' : 'rgba(37, 99, 235, 0.28)',
-                                color: isDarkMode ? '#93c5fd' : '#2563eb',
-                                bgcolor: isDarkMode ? 'rgba(37, 99, 235, 0.12)' : '#eff6ff',
+                                fontWeight: 500,
+                                borderColor: isDarkMode ? 'rgba(0, 122, 255, 0.36)' : 'rgba(0, 122, 255, 0.22)',
+                                color: isDarkMode ? '#66b3ff' : uploadActionColor,
+                                bgcolor: isDarkMode ? 'rgba(0, 122, 255, 0.12)' : 'rgba(0, 122, 255, 0.07)',
                                 '&:hover': {
-                                  borderColor: isDarkMode ? 'rgba(96, 165, 250, 0.7)' : 'rgba(37, 99, 235, 0.45)',
-                                  bgcolor: isDarkMode ? 'rgba(37, 99, 235, 0.18)' : '#dbeafe'
+                                  borderColor: isDarkMode ? 'rgba(0, 122, 255, 0.52)' : 'rgba(0, 122, 255, 0.34)',
+                                  bgcolor: isDarkMode ? 'rgba(0, 122, 255, 0.18)' : 'rgba(0, 122, 255, 0.10)'
                                 }
                               }}
                             >
-                              MERGE SHEETS
+                              Merge sheets
                             </Button>
                           </Box>
                         )}
@@ -4590,12 +4927,14 @@ const UploadFiles = () => {
             </Grid>
 
             {/* Step 1 Bottom Action Bar */}
-            <Box sx={{ mt: userFile ? 2.5 : 'auto', pt: 2.5, borderTop: `1px solid ${Nn.divider}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <Typography variant="caption" sx={{ color: userFile ? '#60a5fa' : Nn.muted, fontWeight: 600 }}>
-                {userFile?.name?.toLowerCase?.().endsWith('.pdf') && !clientWorkbook
-                  ? 'Extract this PDF first, then merge or continue.'
-                  : userFile ? 'Client file ready. Destination: FactWise item default' : 'Select client file to proceed'}
-              </Typography>
+            <Box sx={{ mt: userFile ? 2.5 : 'auto', pt: 2.5, borderTop: `1px solid ${Nn.divider}`, display: 'flex', alignItems: 'center', justifyContent: userFile ? 'space-between' : 'flex-end' }}>
+              {userFile && (
+                <Typography variant="caption" sx={{ color: '#60a5fa', fontWeight: 500 }}>
+                  {userFile?.name?.toLowerCase?.().endsWith('.pdf') && !clientWorkbook
+                    ? 'Extract this PDF first, then merge or continue.'
+                    : 'Client file ready. Destination: FactWise item default'}
+                </Typography>
+              )}
               <Button
                 variant="contained"
                 onClick={() => {
@@ -4614,24 +4953,12 @@ const UploadFiles = () => {
                 }}
                 disabled={!userFile}
                 sx={{
-                  borderRadius: '999px',
-                  fontWeight: 800,
+                  ...factWisePrimaryButtonSx,
                   px: 3.5,
                   py: 0.9,
-                  textTransform: 'none',
-                  background: userFile ? 'linear-gradient(135deg, #2563eb 0%, #0284c7 100%)' : (isDarkMode ? 'rgba(255,255,255,0.06)' : '#e2e8f0'),
-                  bgcolor: userFile ? '#2563eb' : (isDarkMode ? 'rgba(255,255,255,0.06)' : '#e2e8f0'),
-                  color: userFile ? '#ffffff !important' : (isDarkMode ? '#64748b' : '#94a3b8'),
-                  border: userFile ? 'none' : (isDarkMode ? '1px solid rgba(255,255,255,0.08)' : '1px solid rgba(15,23,42,0.12)'),
-                  boxShadow: userFile ? '0 14px 28px -16px rgba(37, 99, 235, 0.9)' : 'none',
                   '&.Mui-disabled': {
-                    bgcolor: isDarkMode ? 'rgba(255,255,255,0.06)' : '#e2e8f0',
+                    ...factWisePrimaryButtonSx['&.Mui-disabled'],
                     color: isDarkMode ? '#64748b' : '#94a3b8'
-                  },
-                  '&:hover': {
-                    background: userFile ? 'linear-gradient(135deg, #1d4ed8 0%, #0369a1 100%)' : (isDarkMode ? 'rgba(255,255,255,0.06)' : '#e2e8f0'),
-                    bgcolor: userFile ? '#1d4ed8' : (isDarkMode ? 'rgba(255,255,255,0.06)' : '#e2e8f0'),
-                    boxShadow: userFile ? '0 18px 34px -18px rgba(37, 99, 235, 0.95)' : 'none'
                   }
                 }}
               >
@@ -4643,16 +4970,16 @@ const UploadFiles = () => {
 
         {/* STEP 2: Choose Options (Mapping Template + Tag Template) */}
         {wizardStep === 1 && (
-          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.75, justifyContent: 'flex-start' }}>
-            <Grid container spacing={2.5}>
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5, justifyContent: 'flex-start' }}>
+            <Grid container spacing={2}>
               <Grid item xs={12}>
-                <Box sx={{ p: { xs: 2, md: 2.25 }, borderRadius: '14px', border: `1px solid ${Nn.divider}`, bgcolor: Nn.subtlePanelBg }}>
-                  <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2, flexWrap: 'wrap', mb: 1.5 }}>
-                    <Box>
-                      <Typography variant="subtitle2" sx={{ color: Nn.text, fontWeight: 800, mb: 0.35 }}>
+                <Box sx={{ p: { xs: 1.75, md: 2 }, borderRadius: '14px', border: `1px solid ${Nn.divider}`, bgcolor: Nn.subtlePanelBg }}>
+                  <Box sx={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 1.5, mb: 1.25 }}>
+                    <Box sx={{ minWidth: 0, flex: '1 1 auto' }}>
+                      <Typography variant="subtitle2" sx={{ color: Nn.text, fontWeight: 500, fontSize: 13, lineHeight: 1.25, mb: 0.3 }}>
                         Use Template
                       </Typography>
-                      <Typography variant="caption" sx={{ color: Nn.muted, display: 'block' }}>
+                      <Typography variant="caption" sx={{ color: Nn.muted, display: 'block', fontSize: 12, fontWeight: 400, lineHeight: 1.35 }}>
                         Select an existing template if this file follows a known structure. Otherwise continue normally to create a new one.
                       </Typography>
                     </Box>
@@ -4661,7 +4988,22 @@ const UploadFiles = () => {
                       variant="text"
                       onClick={loadAvailableProcessingTemplates}
                       disabled={processingTemplatesLoading}
-                      sx={{ textTransform: 'none', color: Nn.accent, fontWeight: 700 }}
+                      sx={{
+                        flexShrink: 0,
+                        minWidth: 0,
+                        height: 28,
+                        px: 1,
+                        mt: -0.35,
+                        borderRadius: '999px',
+                        textTransform: 'none',
+                        color: Nn.accent,
+                        fontSize: 12,
+                        fontWeight: 500,
+                        lineHeight: 1,
+                        '&:hover': {
+                          bgcolor: isDarkMode ? 'rgba(0, 122, 255, 0.12)' : 'rgba(0, 122, 255, 0.08)',
+                        },
+                      }}
                     >
                       Refresh
                     </Button>
@@ -4687,7 +5029,7 @@ const UploadFiles = () => {
                               height: '100%',
                               borderRadius: '12px',
                               border: selected ? `1.5px solid ${Nn.accent}` : `1px solid ${Nn.divider}`,
-                              bgcolor: selected ? 'rgba(37, 99, 235, 0.14)' : Nn.inputBg,
+                              bgcolor: selected ? 'rgba(0, 122, 255, 0.12)' : Nn.inputBg,
                               opacity: option.disabled ? 0.55 : 1,
                               cursor: option.disabled ? 'not-allowed' : 'pointer',
                               transition: 'all 0.18s ease',
@@ -4695,7 +5037,7 @@ const UploadFiles = () => {
                             }}
                           >
                             <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1 }}>
-                              <Typography variant="body2" sx={{ color: Nn.text, fontWeight: 800 }}>
+                              <Typography variant="body2" sx={{ color: Nn.text, fontWeight: 600 }}>
                                 {option.label}
                               </Typography>
                               {selected && <CheckCircleIcon sx={{ color: '#4ade80', fontSize: 18 }} />}
@@ -4709,16 +5051,16 @@ const UploadFiles = () => {
                     })}
                   </Grid>
 
-                  <FormControl fullWidth sx={{ mt: 1.75 }} disabled={processingTemplatesLoading}>
+                  <FormControl fullWidth sx={{ mt: 1.25 }} disabled={processingTemplatesLoading}>
                       <Select
                         value={selectedProcessingTemplateId}
                         displayEmpty
                         renderValue={(selected) => {
                           if (!selected) {
-                            return <Typography sx={{ color: Nn.muted, fontSize: 16 }}>Use Template</Typography>;
+                            return <Typography sx={{ color: Nn.muted, fontSize: 12, fontWeight: 400 }}>Use Template</Typography>;
                           }
                           const template = processingTemplates.find((item) => String(item.id) === String(selected));
-                          return <Typography sx={{ color: Nn.text, fontSize: 16, fontWeight: 700 }}>{template?.name || 'Use Template'}</Typography>;
+                          return <Typography sx={{ color: Nn.text, fontSize: 12, fontWeight: 400 }}>{template?.name || 'Use Template'}</Typography>;
                         }}
                         onChange={(event) => {
                           const nextValue = event.target.value;
@@ -4732,23 +5074,20 @@ const UploadFiles = () => {
                             setProcessingPath('map');
                           }
                         }}
-                        MenuProps={{ PaperProps: { className: 'fw-select-dropdown' } }}
+                        MenuProps={sheetJoinSelectMenuProps}
                         size="small"
                         sx={{
-                          borderRadius: '8px',
-                          minHeight: 40,
+                          ...selectFieldSx,
                           '& .MuiSelect-select': {
-                            minHeight: '40px !important',
+                            ...selectFieldSx['& .MuiSelect-select'],
                             display: 'flex',
                             alignItems: 'center',
-                            py: '0 !important',
-                            fontSize: 16,
                           },
                         }}
                       >
                         {processingTemplates.length > 0 && (
                           <MenuItem value="">
-                            <Typography sx={{ fontSize: 13, color: Nn.muted, fontWeight: 700 }}>
+                            <Typography sx={{ fontSize: 12, color: Nn.muted, fontWeight: 400 }}>
                               None
                             </Typography>
                           </MenuItem>
@@ -4756,7 +5095,7 @@ const UploadFiles = () => {
                         {processingTemplates.map(template => (
                           <MenuItem key={template.id} value={String(template.id)} sx={{ pr: 1 }}>
                             <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1, width: '100%' }}>
-                              <Typography sx={{ fontSize: 13, color: Nn.text, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              <Typography sx={{ fontSize: 12, color: Nn.text, fontWeight: 400, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                                 {template.name}
                               </Typography>
                               <Tooltip title="Delete template" arrow placement="left">
@@ -4788,7 +5127,7 @@ const UploadFiles = () => {
 
               <Grid item xs={12} sx={{ display: 'none' }}>
                 <Box sx={{ p: 2, borderRadius: '14px', border: `1px solid ${Nn.divider}`, bgcolor: Nn.subtlePanelBg }}>
-                  <Typography variant="subtitle2" sx={{ color: Nn.text, fontWeight: 800, mb: 0.35 }}>
+                  <Typography variant="subtitle2" sx={{ color: Nn.text, fontWeight: 600, mb: 0.35 }}>
                     Processing path
                   </Typography>
                   <Typography variant="caption" sx={{ color: Nn.muted, display: 'block', mb: 1.5 }}>
@@ -4812,7 +5151,7 @@ const UploadFiles = () => {
                               p: 1.5,
                               borderRadius: '12px',
                               border: selected ? `1.5px solid ${Nn.accent}` : `1px solid ${Nn.divider}`,
-                              bgcolor: selected ? 'rgba(37, 99, 235, 0.14)' : Nn.inputBg,
+                              bgcolor: selected ? 'rgba(0, 122, 255, 0.12)' : Nn.inputBg,
                               opacity: option.disabled ? 0.55 : 1,
                               cursor: option.disabled ? 'not-allowed' : 'pointer',
                               transition: 'all 0.18s ease',
@@ -4820,7 +5159,7 @@ const UploadFiles = () => {
                             }}
                           >
                             <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1 }}>
-                              <Typography variant="body2" sx={{ color: Nn.text, fontWeight: 800 }}>
+                              <Typography variant="body2" sx={{ color: Nn.text, fontWeight: 600 }}>
                                 {option.label}
                               </Typography>
                               {selected && <CheckCircleIcon sx={{ color: '#4ade80', fontSize: 18 }} />}
@@ -4839,7 +5178,7 @@ const UploadFiles = () => {
               {/* Mapping Template Panel */}
               <Grid item xs={12} md={6} sx={{ display: 'none' }}>
                 <Box sx={{ p: 2, borderRadius: '14px', border: `1px solid ${Nn.divider}`, bgcolor: Nn.subtlePanelBg, height: '100%' }}>
-                  <Typography variant="subtitle2" sx={{ color: Nn.text, fontWeight: 700, mb: 0.5 }}>
+                  <Typography variant="subtitle2" sx={{ color: Nn.text, fontWeight: 600, mb: 0.5 }}>
                     Mapping Template <Typography component="span" variant="caption" sx={{ color: Nn.muted, fontWeight: 400 }}>(Optional)</Typography>
                   </Typography>
                   <Typography variant="caption" sx={{ color: Nn.muted, display: 'block', mb: 1.5 }}>
@@ -4852,12 +5191,12 @@ const UploadFiles = () => {
                     value={templateSearchTerm}
                     onChange={(e) => setTemplateSearchTerm(e.target.value)}
                     InputProps={{ startAdornment: <SearchIcon sx={{ color: Nn.muted, mr: 1, fontSize: 16 }} /> }}
-                    sx={{ mb: 1.5, '& .MuiOutlinedInput-root': { borderRadius: '8px', fontSize: '13px' } }}
+                    sx={{ ...fieldSx, mb: 1.5 }}
                   />
                   {selectedTemplate && (
-                    <Alert severity="success" sx={{ mb: 1.5, borderRadius: '10px', py: 0.5 }}
+                    <Alert severity="success" sx={inlineMessageAlertSx('success', { mb: 1.5 })}
                       action={<Button color="inherit" size="small" onClick={() => setSelectedTemplate(null)}><CloseIcon fontSize="small" /></Button>}>
-                      <Typography variant="caption" fontWeight="700">{selectedTemplate.name}</Typography>
+                      <Typography variant="caption" sx={{ fontWeight: 500, fontSize: 12 }}>{selectedTemplate.name}</Typography>
                     </Alert>
                   )}
                   {availableTemplates.length > 0 ? (
@@ -4872,13 +5211,13 @@ const UploadFiles = () => {
                               p: 1.25,
                               borderRadius: '9px',
                               border: selectedTemplate?.id === tmpl.id ? `1.5px solid ${Nn.accent}` : `1px solid ${Nn.divider}`,
-                              bgcolor: selectedTemplate?.id === tmpl.id ? 'rgba(37, 99, 235, 0.15)' : Nn.inputBg,
+                              bgcolor: selectedTemplate?.id === tmpl.id ? 'rgba(0, 122, 255, 0.12)' : Nn.inputBg,
                               cursor: 'pointer',
                               transition: 'all 0.18s ease',
                               '&:hover': { borderColor: Nn.accent }
                             }}
                           >
-                            <Typography variant="body2" fontWeight="700" sx={{ color: Nn.text, fontSize: '12px' }}>{tmpl.name}</Typography>
+                            <Typography variant="body2" fontWeight="600" sx={{ color: Nn.text, fontSize: '12px' }}>{tmpl.name}</Typography>
                             <Typography variant="caption" sx={{ color: Nn.muted }}>{tmpl.total_mappings || 0} mappings</Typography>
                           </Box>
                         ))}
@@ -4892,7 +5231,7 @@ const UploadFiles = () => {
               {/* Tag Template Panel */}
               <Grid item xs={12} md={6} sx={{ display: 'none' }}>
                 <Box sx={{ p: 2, borderRadius: '14px', border: `1px solid ${Nn.divider}`, bgcolor: Nn.subtlePanelBg, height: '100%' }}>
-                  <Typography variant="subtitle2" sx={{ color: Nn.text, fontWeight: 700, mb: 0.5 }}>
+                  <Typography variant="subtitle2" sx={{ color: Nn.text, fontWeight: 600, mb: 0.5 }}>
                     Tag Template <Typography component="span" variant="caption" sx={{ color: Nn.muted, fontWeight: 400 }}>(Optional)</Typography>
                   </Typography>
                   <Typography variant="caption" sx={{ color: Nn.muted, display: 'block', mb: 1.5 }}>
@@ -4905,12 +5244,12 @@ const UploadFiles = () => {
                     value={tagTemplateSearchTerm}
                     onChange={(e) => setTagTemplateSearchTerm(e.target.value)}
                     InputProps={{ startAdornment: <SearchIcon sx={{ color: Nn.muted, mr: 1, fontSize: 16 }} /> }}
-                    sx={{ mb: 1.5, '& .MuiOutlinedInput-root': { borderRadius: '8px', fontSize: '13px' } }}
+                    sx={{ ...fieldSx, mb: 1.5 }}
                   />
                   {selectedTagTemplate && (
-                    <Alert severity="success" sx={{ mb: 1.5, borderRadius: '10px', py: 0.5 }}
+                    <Alert severity="success" sx={inlineMessageAlertSx('success', { mb: 1.5 })}
                       action={<Button color="inherit" size="small" onClick={() => { setSelectedTagTemplate(null); setFormulaRules([]); }}><CloseIcon fontSize="small" /></Button>}>
-                      <Typography variant="caption" fontWeight="700">{selectedTagTemplate.name}</Typography>
+                      <Typography variant="caption" sx={{ fontWeight: 500, fontSize: 12 }}>{selectedTagTemplate.name}</Typography>
                     </Alert>
                   )}
                   {availableTagTemplates.length > 0 ? (
@@ -4931,7 +5270,7 @@ const UploadFiles = () => {
                               '&:hover': { borderColor: 'rgba(168, 85, 247, 0.5)' }
                             }}
                           >
-                            <Typography variant="body2" fontWeight="700" sx={{ color: Nn.text, fontSize: '12px' }}>{tmpl.name}</Typography>
+                            <Typography variant="body2" fontWeight="600" sx={{ color: Nn.text, fontSize: '12px' }}>{tmpl.name}</Typography>
                             <Typography variant="caption" sx={{ color: Nn.muted }}>{tmpl.rules?.length || tmpl.formula_rules?.length || 0} rules</Typography>
                           </Box>
                         ))}
@@ -4944,23 +5283,52 @@ const UploadFiles = () => {
             </Grid>
 
             {/* Step 2 Bottom Action Bar */}
-            <Box sx={{ mt: 'auto', pt: 2.25, borderTop: `1px solid ${Nn.divider}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <Button variant="outlined" onClick={() => setWizardStep(0)} sx={secondaryPillSx}>
+            <Box sx={{
+              mt: 'auto',
+              pt: 2,
+              borderTop: `1px solid ${Nn.divider}`,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: 1,
+              flexWrap: 'wrap'
+            }}>
+              <Button
+                variant="outlined"
+                onClick={() => setWizardStep(0)}
+                sx={{
+                  ...secondaryPillSx,
+                  minWidth: 86,
+                  height: 34,
+                  px: 1.6,
+                  fontSize: 12.5,
+                  fontWeight: 500,
+                  flex: { xs: '1 1 100%', sm: '0 0 auto' },
+                }}
+              >
                 ← Back
               </Button>
-              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+              <Box sx={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 1,
+                flexWrap: 'wrap',
+                justifyContent: { xs: 'stretch', sm: 'flex-end' },
+                flex: { xs: '1 1 100%', sm: '1 1 360px' },
+              }}>
                 <Button
                   variant="contained"
                   onClick={handleOpenBomNormalizer}
-                  disabled={loading || Boolean(selectedProcessingTemplateId)}
+                  disabled={loading || !userFile || Boolean(selectedProcessingTemplateId)}
                   sx={{
                     ...primaryPillSx,
-                    px: 3.5,
-                    py: 0.9,
-                    background: selectedProcessingTemplateId
-                      ? (isDarkMode ? 'rgba(30, 41, 59, 0.78)' : '#dbeafe')
-                      : 'linear-gradient(135deg, #2563eb 0%, #0284c7 100%)',
-                    bgcolor: selectedProcessingTemplateId ? (isDarkMode ? 'rgba(30, 41, 59, 0.78)' : '#dbeafe') : '#2563eb',
+                    minWidth: 142,
+                    height: 36,
+                    px: 2.3,
+                    py: 0.75,
+                    fontSize: 12.5,
+                    fontWeight: 500,
+                    flex: { xs: '1 1 auto', sm: '0 0 auto' },
                   }}
                 >
                   BOM Normalizer
@@ -4968,9 +5336,19 @@ const UploadFiles = () => {
                 <Button
                   variant="contained"
                   onClick={handleUpload}
-                  disabled={loading}
+                  disabled={loading || !userFile}
                   startIcon={loading ? <CircularProgress size={16} color="inherit" /> : null}
-                  sx={{ ...primaryPillSx, px: 4, py: 0.9 }}
+                  sx={{
+                    ...primaryPillSx,
+                    minWidth: 154,
+                    height: 36,
+                    px: 2.4,
+                    py: 0.75,
+                    fontSize: 12.5,
+                    fontWeight: 500,
+                    flex: { xs: '1 1 auto', sm: '0 0 auto' },
+                    whiteSpace: 'nowrap',
+                  }}
                 >
                   {loading ? 'Processing...' : 'Process Upload ->'}
                 </Button>
@@ -4988,7 +5366,7 @@ const UploadFiles = () => {
         PaperProps={{ sx: dialogPaperSx }}
       >
         <DialogTitle sx={dialogHeaderSx}>
-          <Typography variant="h6" fontWeight="800" sx={{ color: isDarkMode ? '#f8fafc' : '#0f172a' }}>
+          <Typography variant="h6" fontWeight="600" sx={{ color: isDarkMode ? '#f8fafc' : '#0f172a' }}>
             Grouped rows detected
           </Typography>
           <Typography variant="caption" sx={{ color: isDarkMode ? '#94a3b8' : '#64748b' }}>
@@ -5014,9 +5392,8 @@ const UploadFiles = () => {
           <Grid container spacing={2}>
             <Grid item xs={12} md={6}>
               <FormControl fullWidth size="small">
-                <InputLabel>Detail column</InputLabel>
+                <InputLabel sx={inputLabelSx}>Detail column</InputLabel>
                 <Select
-                  label="Detail column"
                   value={sheetJoinConfig.groupedDetail?.detailColumn || ''}
                   onChange={(event) => setSheetJoinConfig(prev => ({
                     ...prev,
@@ -5025,6 +5402,8 @@ const UploadFiles = () => {
                       detailColumn: event.target.value,
                     },
                   }))}
+                  sx={selectFieldSx}
+                  MenuProps={sheetJoinSelectMenuProps}
                 >
                   {sheetJoinDetailHeaders
                     .filter(header => header !== sheetJoinConfig.detailKey)
@@ -5036,9 +5415,8 @@ const UploadFiles = () => {
             </Grid>
             <Grid item xs={12} md={6}>
               <FormControl fullWidth size="small">
-                <InputLabel>First detail line</InputLabel>
+                <InputLabel sx={inputLabelSx}>First detail line</InputLabel>
                 <Select
-                  label="First detail line"
                   value={sheetJoinConfig.groupedDetail?.firstLineMode || 'auto'}
                   onChange={(event) => setSheetJoinConfig(prev => ({
                     ...prev,
@@ -5047,6 +5425,8 @@ const UploadFiles = () => {
                       firstLineMode: event.target.value,
                     },
                   }))}
+                  sx={selectFieldSx}
+                  MenuProps={sheetJoinSelectMenuProps}
                 >
                   <MenuItem value="auto">Auto-detect description vs product</MenuItem>
                   <MenuItem value="description">Treat first line as description</MenuItem>
@@ -5056,9 +5436,8 @@ const UploadFiles = () => {
             </Grid>
             <Grid item xs={12} md={6}>
               <FormControl fullWidth size="small">
-                <InputLabel>MPN/MFR delimiter</InputLabel>
+                <InputLabel sx={inputLabelSx}>MPN/MFR delimiter</InputLabel>
                 <Select
-                  label="MPN/MFR delimiter"
                   value={sheetJoinConfig.groupedDetail?.delimiterMode || 'auto'}
                   onChange={(event) => setSheetJoinConfig(prev => ({
                     ...prev,
@@ -5067,6 +5446,8 @@ const UploadFiles = () => {
                       delimiterMode: event.target.value,
                     },
                   }))}
+                  sx={selectFieldSx}
+                  MenuProps={sheetJoinSelectMenuProps}
                 >
                   <MenuItem value="auto">Auto-detect</MenuItem>
                   <MenuItem value="slash">Slash: MPN / Manufacturer</MenuItem>
@@ -5091,6 +5472,7 @@ const UploadFiles = () => {
                       customDelimiter: event.target.value,
                     },
                   }))}
+                  sx={fieldSx}
                 />
               </Grid>
             )}
@@ -5110,11 +5492,12 @@ const UploadFiles = () => {
                   },
                 }))}
                 helperText="One regex per line. These are generic note/spec filters and can be changed before preview."
+                sx={factWiseFieldSx(fwPageTokens, { height: 'auto' })}
               />
             </Grid>
             {!!sheetJoinGroupedSuggestion?.sampleValues?.length && (
               <Grid item xs={12}>
-                <Typography variant="caption" sx={{ color: isDarkMode ? '#94a3b8' : '#64748b', fontWeight: 700 }}>
+                <Typography variant="caption" sx={{ color: isDarkMode ? '#94a3b8' : '#64748b', fontWeight: 600 }}>
                   Sample child lines
                 </Typography>
                 <Box sx={{ mt: 0.75, display: 'flex', flexWrap: 'wrap', gap: 0.75 }}>
@@ -5156,7 +5539,7 @@ const UploadFiles = () => {
       >
         <DialogTitle sx={{ ...dialogHeaderSx, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
           <Box>
-            <Typography variant="h5" fontWeight="800" sx={{ color: isDarkMode ? '#f8fafc' : '#0f172a', letterSpacing: '-0.01em', fontSize: '1.25rem' }}>
+            <Typography variant="h5" fontWeight="600" sx={{ color: isDarkMode ? '#f8fafc' : '#0f172a', letterSpacing: '-0.01em', fontSize: '1.25rem' }}>
               Review Extracted PDF
             </Typography>
             <Typography variant="caption" sx={{ color: isDarkMode ? '#94a3b8' : '#64748b', fontSize: '0.82rem' }}>
@@ -5215,15 +5598,19 @@ const UploadFiles = () => {
                         setPdfExtractionVisibleColumns(selected);
                       }}
                       renderValue={(selected) => `${selected.length} columns shown`}
+                      MenuProps={sheetJoinPreviewMenuProps}
                       sx={{
+                        ...compactSelectFieldSx,
                         height: 34,
-                        fontSize: '12px',
-                        fontWeight: 600,
-                        bgcolor: isDarkMode ? '#1e293b' : '#f8fafc',
-                        color: isDarkMode ? '#ffffff' : '#0f172a',
-                        borderRadius: '10px',
-                        border: isDarkMode ? '1px solid rgba(255, 255, 255, 0.18)' : '1px solid #cbd5e1',
-                        '& .MuiSelect-icon': { color: isDarkMode ? '#94a3b8' : '#64748b' }
+                        '& .MuiInputBase-root': {
+                          ...compactSelectFieldSx['& .MuiInputBase-root'],
+                          height: 34,
+                          minHeight: 34,
+                        },
+                        '& .MuiSelect-select': {
+                          ...compactSelectFieldSx['& .MuiSelect-select'],
+                          py: 0.65,
+                        },
                       }}
                     >
                       <MenuItem
@@ -5256,7 +5643,7 @@ const UploadFiles = () => {
                       border: isDarkMode ? '1px solid rgba(255, 255, 255, 0.2)' : '1px solid #cbd5e1',
                       color: isDarkMode ? '#ffffff' : '#0f172a',
                       bgcolor: isDarkMode ? '#1e293b' : '#ffffff',
-                      '&:hover:not(.Mui-disabled)': { bgcolor: '#2563eb', borderColor: '#2563eb', color: '#ffffff' },
+                      '&:hover:not(.Mui-disabled)': { bgcolor: uploadActionColor, borderColor: uploadActionColor, color: '#ffffff' },
                       '&.Mui-disabled': { opacity: 0.4 }
                     }}
                   >
@@ -5278,7 +5665,7 @@ const UploadFiles = () => {
                       border: isDarkMode ? '1px solid rgba(255, 255, 255, 0.2)' : '1px solid #cbd5e1',
                       color: isDarkMode ? '#ffffff' : '#0f172a',
                       bgcolor: isDarkMode ? '#1e293b' : '#ffffff',
-                      '&:hover:not(.Mui-disabled)': { bgcolor: '#2563eb', borderColor: '#2563eb', color: '#ffffff' },
+                      '&:hover:not(.Mui-disabled)': { bgcolor: uploadActionColor, borderColor: uploadActionColor, color: '#ffffff' },
                       '&.Mui-disabled': { opacity: 0.4 }
                     }}
                   >
@@ -5293,7 +5680,7 @@ const UploadFiles = () => {
                     <Box component="tr">
                       {visiblePdfReviewColumns.map(header => (
                         <Box component="th" key={header} sx={{ width: 180, minWidth: 180, maxWidth: 180 }}>
-                          <Typography variant="caption" sx={{ color: isDarkMode ? '#f8fafc' : '#0f172a', fontSize: '11px', fontWeight: 800, display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          <Typography variant="caption" sx={{ color: isDarkMode ? '#f8fafc' : '#0f172a', fontSize: '11px', fontWeight: 500, display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                             {header}
                           </Typography>
                         </Box>
@@ -5302,10 +5689,10 @@ const UploadFiles = () => {
                   </Box>
                   <Box component="tbody">
                     {visiblePdfReviewRows.map((row, rowIndex) => (
-                      <Box component="tr" key={`pdf-preview-row-${pdfExtractionReviewStart + rowIndex}`} sx={{ '&:hover': { bgcolor: isDarkMode ? 'rgba(37, 99, 235, 0.12)' : '#eff6ff' } }}>
+                      <Box component="tr" key={`pdf-preview-row-${pdfExtractionReviewStart + rowIndex}`} sx={{ '&:hover': { bgcolor: isDarkMode ? 'rgba(0, 122, 255, 0.12)' : 'rgba(0, 122, 255, 0.06)' } }}>
                         {visiblePdfReviewColumns.map(header => (
                           <Box component="td" key={`${pdfExtractionReviewStart + rowIndex}-${header}`} sx={{ width: 180, minWidth: 180, maxWidth: 180 }}>
-                            <Typography title={String(row?.[header] ?? '')} sx={{ color: isDarkMode ? '#ffffff' : '#0f172a', fontSize: '12px', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            <Typography title={String(row?.[header] ?? '')} sx={{ color: isDarkMode ? '#ffffff' : '#0f172a', fontSize: '12px', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                               {String(row?.[header] ?? '')}
                             </Typography>
                           </Box>
@@ -5321,13 +5708,13 @@ const UploadFiles = () => {
 
         <DialogActions sx={{ ...dialogFooterSx, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <Box sx={{ display: 'flex', gap: 1 }}>
-            <Button onClick={() => setPdfExtractionReviewOpen(false)} sx={{ ...pillButtonSx, color: isDarkMode ? '#cbd5e1' : '#475569', '&:hover': { bgcolor: isDarkMode ? '#1e293b' : '#e2e8f0' } }}>
+            <Button onClick={() => setPdfExtractionReviewOpen(false)} sx={quietDangerButtonSx}>
               Cancel
             </Button>
-            <Button onClick={() => setPdfExtractionReviewOpen(false)} sx={{ ...pillButtonSx, color: '#2563eb', '&:hover': { bgcolor: isDarkMode ? 'rgba(37, 99, 235, 0.12)' : '#eff6ff' } }}>
+            <Button onClick={() => setPdfExtractionReviewOpen(false)} sx={quietBackButtonSx}>
               Back
             </Button>
-            <Button onClick={handleDownloadPdfExtractionPreview} sx={{ ...pillButtonSx, color: '#2563eb', '&:hover': { bgcolor: isDarkMode ? 'rgba(37, 99, 235, 0.12)' : '#eff6ff' } }}>
+            <Button onClick={handleDownloadPdfExtractionPreview} sx={{ ...pillButtonSx, color: isDarkMode ? '#66b3ff' : uploadActionColor, '&:hover': { bgcolor: isDarkMode ? 'rgba(0, 122, 255, 0.12)' : 'rgba(0, 122, 255, 0.08)' } }}>
               Download Preview
             </Button>
           </Box>
@@ -5350,31 +5737,87 @@ const UploadFiles = () => {
         PaperProps={{
           sx: {
             ...dialogPaperSx,
-            width: 'min(1240px, calc(100vw - 32px))',
+            width: sheetJoinDialogWidth,
           }
         }}
       >
-        <DialogTitle sx={{ ...dialogHeaderSx, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+        <DialogTitle sx={{ ...dialogHeaderSx, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 2 }}>
           <Box>
-            <Typography variant="h5" fontWeight="800" sx={{ color: isDarkMode ? '#f8fafc' : '#0f172a', letterSpacing: '-0.01em', fontSize: '1.25rem' }}>
+            <Typography variant="h5" fontWeight="600" sx={{ color: isDarkMode ? '#f8fafc' : '#0f172a', letterSpacing: 0, fontSize: '1.08rem', lineHeight: 1.25 }}>
               Merge Sheets
             </Typography>
-            <Typography variant="caption" sx={{ color: isDarkMode ? '#94a3b8' : '#64748b', fontSize: '0.82rem' }}>
+            <Typography variant="caption" sx={{ color: isDarkMode ? '#94a3b8' : '#64748b', fontSize: '0.78rem', fontWeight: 400 }}>
               Merge related sheet data before template mapping
             </Typography>
           </Box>
-          <IconButton onClick={handleCloseSheetJoinSetup} sx={{ color: isDarkMode ? '#94a3b8' : '#64748b', '&:hover': { color: isDarkMode ? '#ffffff' : '#0f172a', bgcolor: isDarkMode ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.05)' } }}>
-            <CloseIcon />
-          </IconButton>
+          <Box sx={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'flex-end', gap: 1.25 }}>
+            <Box
+              sx={{
+                display: { xs: 'none', md: 'flex' },
+                alignItems: 'center',
+                gap: 0.8,
+                pt: 0.15,
+              }}
+            >
+              {sheetJoinStageSteps.map((step, index) => {
+                const state = index < sheetJoinActiveStageIndex
+                  ? 'done'
+                  : (index === sheetJoinActiveStageIndex ? 'active' : 'pending');
+                return (
+                  <React.Fragment key={step.key}>
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.65 }}>
+                      <Box sx={sheetJoinStageIndicatorSx(state)}>
+                        {state === 'done' ? <CheckCircleIcon sx={{ fontSize: 14 }} /> : index + 1}
+                      </Box>
+                      <Typography
+                        sx={{
+                          color: state === 'active'
+                            ? (isDarkMode ? '#e0f2fe' : uploadActionColor)
+                            : (isDarkMode ? '#94a3b8' : '#64748b'),
+                          fontSize: 12,
+                          fontWeight: state === 'active' ? 600 : 500,
+                          lineHeight: 1,
+                        }}
+                      >
+                        {step.label}
+                      </Typography>
+                    </Box>
+                    {index < sheetJoinStageSteps.length - 1 && (
+                      <Box
+                        sx={{
+                          width: 24,
+                          height: 1,
+                          bgcolor: index < sheetJoinActiveStageIndex
+                            ? uploadActionColor
+                            : (isDarkMode ? 'rgba(148, 163, 184, 0.2)' : '#dbe3ee'),
+                        }}
+                      />
+                    )}
+                  </React.Fragment>
+                );
+              })}
+            </Box>
+            <IconButton onClick={handleCloseSheetJoinSetup} sx={{ color: isDarkMode ? '#94a3b8' : '#64748b', '&:hover': { color: isDarkMode ? '#ffffff' : '#0f172a', bgcolor: isDarkMode ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.05)' } }}>
+              <CloseIcon />
+            </IconButton>
+          </Box>
         </DialogTitle>
-        <DialogContent sx={dialogBodySx}>
+        <DialogContent sx={{ ...dialogBodySx, overflowX: 'hidden' }}>
+          <Box
+            key={sheetJoinStage}
+            sx={{
+              ...sheetJoinStagePanelSx,
+              width: '100%',
+              maxWidth: { xs: '100%', md: sheetJoinContentMaxWidth },
+              mx: 'auto',
+            }}
+          >
           {sheetJoinStage === 'match' && (
             <Grid container spacing={2.5} sx={{ py: 1 }}>
               <Grid item xs={12} md={6}>
                 <FormControl fullWidth size="small" sx={{ mt: 1 }}>
-                  <InputLabel sx={{ color: isDarkMode ? '#94a3b8' : '#475569' }}>Primary source</InputLabel>
+                  <InputLabel sx={inputLabelSx}>Primary source</InputLabel>
                   <Select
-                    label="Primary source"
                     value={sheetJoinConfig.baseSourceId || 'primary'}
                     onChange={(event) => {
                       const baseSourceId = event.target.value;
@@ -5395,6 +5838,7 @@ const UploadFiles = () => {
                       }));
                     }}
                     sx={selectFieldSx}
+                    MenuProps={sheetJoinSelectMenuProps}
                   >
                     {sheetJoinSourceOptions.map(source => (
                       <MenuItem key={source.id} value={source.id}>{source.label}</MenuItem>
@@ -5403,11 +5847,10 @@ const UploadFiles = () => {
                 </FormControl>
               </Grid>
               <Grid item xs={12} md={6}>
-                <Stack direction={{ xs: 'column', sm: 'row' }} gap={1} alignItems={{ xs: 'stretch', sm: 'center' }} sx={{ mt: 1 }}>
+                <Stack direction={{ xs: 'column', sm: 'row' }} gap={1} alignItems={{ xs: 'stretch', sm: 'flex-end' }} sx={{ mt: 1 }}>
                   <FormControl fullWidth size="small">
-                    <InputLabel sx={{ color: isDarkMode ? '#94a3b8' : '#475569' }}>Secondary source</InputLabel>
+                    <InputLabel sx={inputLabelSx}>Secondary source</InputLabel>
                     <Select
-                      label="Secondary source"
                       value={sheetJoinConfig.detailSourceId || 'primary'}
                       onChange={(event) => {
                         const detailSourceId = event.target.value;
@@ -5429,13 +5872,37 @@ const UploadFiles = () => {
                         }));
                       }}
                       sx={selectFieldSx}
+                      MenuProps={sheetJoinSelectMenuProps}
                     >
                       {sheetJoinSourceOptions.map(source => (
                         <MenuItem key={source.id} value={source.id}>{source.label}</MenuItem>
                       ))}
                     </Select>
                   </FormControl>
-                  <Button component="label" variant="outlined" startIcon={<AddIcon />} sx={{ ...pillButtonSx, minWidth: 170, color: '#2563eb' }}>
+                  <Button
+                    component="label"
+                    variant="outlined"
+                    startIcon={<AddIcon />}
+                    sx={{
+                      ...pillButtonSx,
+                      minWidth: 96,
+                      height: 36,
+                      px: 1.6,
+                      py: 0.65,
+                      fontSize: 12,
+                      color: isDarkMode ? '#93c5fd' : uploadActionColor,
+                      borderColor: isDarkMode ? 'rgba(96, 165, 250, 0.42)' : 'rgba(0, 122, 255, 0.28)',
+                      bgcolor: isDarkMode ? 'rgba(0, 122, 255, 0.08)' : 'rgba(0, 122, 255, 0.04)',
+                      '& .MuiButton-startIcon': {
+                        mr: 0.65,
+                        '& svg': { fontSize: 17 },
+                      },
+                      '&:hover': {
+                        borderColor: isDarkMode ? 'rgba(96, 165, 250, 0.62)' : 'rgba(0, 122, 255, 0.42)',
+                        bgcolor: isDarkMode ? 'rgba(0, 122, 255, 0.14)' : 'rgba(0, 122, 255, 0.08)'
+                      }
+                    }}
+                  >
                     Add file
                     <input
                       key={sheetJoinSourceFileInputKey}
@@ -5449,9 +5916,8 @@ const UploadFiles = () => {
               </Grid>
               <Grid item xs={12} md={6}>
                 <FormControl fullWidth size="small" sx={{ mt: 1 }}>
-                  <InputLabel sx={{ color: isDarkMode ? '#94a3b8' : '#475569' }}>Primary sheet</InputLabel>
+                  <InputLabel sx={inputLabelSx}>Primary sheet</InputLabel>
                   <Select
-                    label="Primary sheet"
                     value={sheetJoinConfig.baseSheet}
                     onChange={(event) => {
                       const baseSheet = event.target.value;
@@ -5469,6 +5935,7 @@ const UploadFiles = () => {
                       }));
                     }}
                     sx={selectFieldSx}
+                    MenuProps={sheetJoinSelectMenuProps}
                   >
                     {getSheetJoinSourceSheets(sheetJoinConfig.baseSourceId).map(sheet => (
                       <MenuItem key={sheet} value={sheet}>{sheet}</MenuItem>
@@ -5478,9 +5945,8 @@ const UploadFiles = () => {
               </Grid>
               <Grid item xs={12} md={6}>
                 <FormControl fullWidth size="small" sx={{ mt: 1 }}>
-                  <InputLabel sx={{ color: isDarkMode ? '#94a3b8' : '#475569' }}>Secondary sheet</InputLabel>
+                  <InputLabel sx={inputLabelSx}>Secondary sheet</InputLabel>
                   <Select
-                    label="Secondary sheet"
                     value={sheetJoinConfig.detailSheet}
                     onChange={(event) => {
                       const detailSheet = event.target.value;
@@ -5499,6 +5965,7 @@ const UploadFiles = () => {
                       }));
                     }}
                     sx={selectFieldSx}
+                    MenuProps={sheetJoinSelectMenuProps}
                   >
                     {getSheetJoinSourceSheets(sheetJoinConfig.detailSourceId).map(sheet => (
                       <MenuItem key={sheet} value={sheet}>{sheet}</MenuItem>
@@ -5525,7 +5992,7 @@ const UploadFiles = () => {
                       copiedBaseColumns: defaultCopiedBaseColumns(headers)
                     }));
                   }}
-                  InputLabelProps={{ style: { color: isDarkMode ? '#94a3b8' : '#475569' } }}
+                  InputLabelProps={{ sx: inputLabelSx }}
                   sx={fieldSx}
                 />
               </Grid>
@@ -5549,15 +6016,14 @@ const UploadFiles = () => {
                       uniqueIdDetailColumn: detailColumns[0] || detailKey
                     }));
                   }}
-                  InputLabelProps={{ style: { color: isDarkMode ? '#94a3b8' : '#475569' } }}
+                  InputLabelProps={{ sx: inputLabelSx }}
                   sx={fieldSx}
                 />
               </Grid>
               <Grid item xs={12} md={6}>
                 <FormControl fullWidth size="small">
-                  <InputLabel sx={{ color: isDarkMode ? '#94a3b8' : '#475569' }}>Common column to match on</InputLabel>
+                  <InputLabel sx={inputLabelSx}>Common column to match on</InputLabel>
                   <Select
-                    label="Common column to match on"
                     value={sheetJoinConfig.baseKey}
                     onChange={(event) => setSheetJoinConfig(prev => ({
                       ...prev,
@@ -5565,6 +6031,7 @@ const UploadFiles = () => {
                       uniqueIdBaseColumn: event.target.value
                     }))}
                     sx={selectFieldSx}
+                    MenuProps={sheetJoinSelectMenuProps}
                   >
                     {sheetJoinBaseHeaders.map(header => (
                       <MenuItem key={header} value={header}>{header}</MenuItem>
@@ -5574,9 +6041,8 @@ const UploadFiles = () => {
               </Grid>
               <Grid item xs={12} md={6}>
                 <FormControl fullWidth size="small">
-                  <InputLabel sx={{ color: isDarkMode ? '#94a3b8' : '#475569' }}>Matching column in secondary sheet</InputLabel>
+                  <InputLabel sx={inputLabelSx}>Matching column in secondary sheet</InputLabel>
                   <Select
-                    label="Matching column in secondary sheet"
                     value={sheetJoinConfig.detailKey}
                     onChange={(event) => {
                       const detailKey = event.target.value;
@@ -5588,6 +6054,7 @@ const UploadFiles = () => {
                       }));
                     }}
                     sx={selectFieldSx}
+                    MenuProps={sheetJoinSelectMenuProps}
                   >
                     {sheetJoinDetailHeaders.map(header => (
                       <MenuItem key={header} value={header}>{header}</MenuItem>
@@ -5599,7 +6066,7 @@ const UploadFiles = () => {
                 {/* Asked, not assumed: whether a space or a hyphen is part of a
                     part number differs per customer, and getting it wrong either
                     misses real matches or merges two genuinely different parts. */}
-                <Typography variant="body2" sx={{ fontWeight: 600, mb: 0.5, color: isDarkMode ? '#e2e8f0' : '#0f172a' }}>
+                <Typography variant="body2" sx={{ fontWeight: 500, mb: 0.5, color: isDarkMode ? '#e2e8f0' : '#0f172a' }}>
                   Ignore these when matching
                 </Typography>
                 <Typography variant="caption" sx={{ display: 'block', mb: 0.75, color: isDarkMode ? '#94a3b8' : '#64748b' }}>
@@ -5613,8 +6080,6 @@ const UploadFiles = () => {
                         key={option.key}
                         size="small"
                         label={`${option.label}  ${option.sample}`}
-                        color={selected ? 'primary' : 'default'}
-                        variant={selected ? 'filled' : 'outlined'}
                         onClick={() => setSheetJoinConfig(prev => {
                           const current = prev.ignoreChars || [];
                           return {
@@ -5624,7 +6089,35 @@ const UploadFiles = () => {
                               : [...current, option.key],
                           };
                         })}
-                        sx={{ fontFamily: 'monospace' }}
+                        sx={{
+                          height: 26,
+                          borderRadius: '999px',
+                          fontFamily: 'var(--fw-font-stack)',
+                          fontSize: '12px',
+                          fontWeight: 500,
+                          color: selected
+                            ? '#ffffff'
+                            : isDarkMode ? '#facc15' : '#6f5200',
+                          bgcolor: selected
+                            ? uploadActionColor
+                            : isDarkMode ? 'rgba(250, 204, 21, 0.12)' : '#fff7d6',
+                          border: `1px solid ${selected
+                            ? uploadActionColor
+                            : isDarkMode ? 'rgba(250, 204, 21, 0.28)' : '#fde68a'}`,
+                          boxShadow: selected ? '0 8px 18px -12px rgba(0, 122, 255, 0.78)' : 'none',
+                          transition: 'background-color 160ms ease, border-color 160ms ease, color 160ms ease, box-shadow 160ms ease',
+                          '&:hover': {
+                            bgcolor: selected
+                              ? '#006ee6'
+                              : isDarkMode ? 'rgba(250, 204, 21, 0.18)' : '#ffefb0',
+                            borderColor: selected
+                              ? '#006ee6'
+                              : isDarkMode ? 'rgba(250, 204, 21, 0.38)' : '#facc15'
+                          },
+                          '& .MuiChip-label': {
+                            px: 1.1
+                          }
+                        }}
                       />
                     );
                   })}
@@ -5634,137 +6127,249 @@ const UploadFiles = () => {
           )}
 
           {sheetJoinStage === 'options' && (
-            <Grid container spacing={2.5} sx={{ py: 1 }}>
+            <Grid container spacing={1.75} sx={{ py: 0.5 }}>
               <Grid item xs={12}>
-                <Typography variant="subtitle1" fontWeight="600" sx={{ color: isDarkMode ? '#ffffff' : '#0f172a' }} gutterBottom>
-                  Output format
-                </Typography>
-                <RadioGroup
-                  row
-                  value={sheetJoinConfig.outputMode}
-                  onChange={(event) => setSheetJoinConfig(prev => ({ ...prev, outputMode: event.target.value }))}
-                >
-                  <FormControlLabel value="grouped" control={<Radio size="small" sx={{ color: isDarkMode ? '#94a3b8' : '#64748b', '&.Mui-checked': { color: '#2563eb' } }} />} label={`Add all related ${sheetJoinDetailLabel} in the same cell`} sx={{ color: isDarkMode ? '#cbd5e1' : '#334155' }} />
-                  <FormControlLabel value="expanded" control={<Radio size="small" sx={{ color: isDarkMode ? '#94a3b8' : '#64748b', '&.Mui-checked': { color: '#2563eb' } }} />} label={`Create a separate row for each ${sheetJoinDetailSingularLabel}`} sx={{ color: isDarkMode ? '#cbd5e1' : '#334155' }} />
-                </RadioGroup>
+                <Box sx={sheetJoinSectionCardSx}>
+                  <Typography variant="subtitle2" sx={{ color: isDarkMode ? '#ffffff' : '#0f172a', fontSize: 13, fontWeight: 600, mb: 1.25 }}>
+                    Output format
+                  </Typography>
+                  <RadioGroup
+                    value={sheetJoinConfig.outputMode}
+                    onChange={(event) => setSheetJoinConfig(prev => ({ ...prev, outputMode: event.target.value }))}
+                    sx={{
+                      display: 'grid',
+                      gridTemplateColumns: { xs: '1fr', md: '1fr 1fr' },
+                      gap: 1.25,
+                    }}
+                  >
+                    {[
+                      {
+                        value: 'grouped',
+                        title: 'Keep related values together',
+                        body: `Add all related ${sheetJoinDetailLabel} in one cell.`,
+                      },
+                      {
+                        value: 'expanded',
+                        title: 'Create separate rows',
+                        body: `Create a separate row for each secondary ${sheetJoinDetailSingularLabel}.`,
+                      },
+                    ].map(option => {
+                      const active = sheetJoinConfig.outputMode === option.value;
+                      return (
+                        <FormControlLabel
+                          key={option.value}
+                          value={option.value}
+                          control={<Radio size="small" sx={{ color: isDarkMode ? '#94a3b8' : '#64748b', mt: -0.35, '&.Mui-checked': { color: isDarkMode ? '#60a5fa' : uploadActionColor } }} />}
+                          label={
+                            <Box>
+                              <Typography sx={{ fontSize: 13, fontWeight: 600, color: isDarkMode ? '#f8fafc' : '#172033', mb: 0.25 }}>
+                                {option.title}
+                              </Typography>
+                              <Typography sx={{ fontSize: 12, fontWeight: 400, color: isDarkMode ? '#94a3b8' : '#64748b', lineHeight: 1.35 }}>
+                                {option.body}
+                              </Typography>
+                            </Box>
+                          }
+                          sx={sheetJoinOptionCardSx(active)}
+                        />
+                      );
+                    })}
+                  </RadioGroup>
+                </Box>
               </Grid>
 
               <Grid item xs={12}>
-                <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1 }}>
-                  <Typography variant="subtitle1" fontWeight="600" sx={{ color: isDarkMode ? '#ffffff' : '#0f172a' }}>
-                    Columns to bring from secondary sheet
-                  </Typography>
-                  <Box>
-                    <Button size="small" onClick={() => setSheetJoinConfig(prev => ({
-                      ...prev,
-                      detailColumns: sheetJoinDetailHeaders.filter(header => header !== prev.detailKey)
-                    }))} sx={{ color: '#2563eb' }}>
-                      Select all
-                    </Button>
-                    <Button size="small" onClick={() => setSheetJoinConfig(prev => ({ ...prev, detailColumns: [] }))} sx={{ color: isDarkMode ? '#94a3b8' : '#64748b' }}>
-                      Clear
-                    </Button>
+                <Box sx={sheetJoinSectionCardSx}>
+                  <Box sx={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 1.5, mb: 1.25 }}>
+                    <Box>
+                      <Typography variant="subtitle2" sx={{ color: isDarkMode ? '#ffffff' : '#0f172a', fontSize: 13, fontWeight: 600 }}>
+                        Columns to bring from secondary sheet
+                      </Typography>
+                      <Typography sx={{ color: isDarkMode ? '#94a3b8' : '#64748b', fontSize: 12, mt: 0.2 }}>
+                        {sheetJoinSelectableDetailHeaders.length
+                          ? `${sheetJoinConfig.detailColumns.length} of ${sheetJoinSelectableDetailHeaders.length} columns selected`
+                          : 'No extra secondary columns are available for this match.'}
+                      </Typography>
+                    </Box>
+                    <Box sx={{ display: 'flex', gap: 0.5 }}>
+                      <Button
+                        size="small"
+                        disabled={!sheetJoinSelectableDetailHeaders.length}
+                        onClick={() => setSheetJoinConfig(prev => ({
+                          ...prev,
+                          detailColumns: sheetJoinSelectableDetailHeaders
+                        }))}
+                        sx={sheetJoinUtilityButtonSx}
+                      >
+                        Select all
+                      </Button>
+                      <Button
+                        size="small"
+                        disabled={!sheetJoinConfig.detailColumns.length}
+                        onClick={() => setSheetJoinConfig(prev => ({ ...prev, detailColumns: [] }))}
+                        sx={{
+                          ...sheetJoinUtilityButtonSx,
+                          color: isDarkMode ? '#cbd5e1' : '#64748b',
+                          '&:hover': {
+                            bgcolor: isDarkMode ? 'rgba(148, 163, 184, 0.10)' : '#eef2f7',
+                          },
+                        }}
+                      >
+                        Clear
+                      </Button>
+                    </Box>
                   </Box>
-                </Box>
-                {sheetJoinLegacyHeaderWarning && (
-                  <Alert severity="warning" sx={{ mb: 1 }}>
-                    This older saved merge book only contains the secondary columns that were saved in its preview. Reopen or re-upload the original workbook to choose every secondary-sheet column.
-                  </Alert>
-                )}
-                <FormGroup row sx={{ gap: 0.5 }}>
-                  {sheetJoinDetailHeaders
-                    .filter(header => header !== sheetJoinConfig.detailKey)
-                    .map(header => (
-                      <FormControlLabel
-                        key={header}
-                        control={
-                          <Checkbox
-                            size="small"
-                            checked={sheetJoinConfig.detailColumns.includes(header)}
-                            onChange={(event) => {
-                              setSheetJoinConfig(prev => ({
-                                ...prev,
-                                detailColumns: event.target.checked
-                                  ? [...prev.detailColumns, header]
-                                  : prev.detailColumns.filter(column => column !== header)
-                              }));
+                  {sheetJoinLegacyHeaderWarning && (
+                    <Alert severity="warning" sx={inlineMessageAlertSx('warning', { mb: 1.25 })}>
+                      This older saved merge book only contains the secondary columns that were saved in its preview. Reopen or re-upload the original workbook to choose every secondary-sheet column.
+                    </Alert>
+                  )}
+                  {sheetJoinSelectableDetailHeaders.length ? (
+                    <Box
+                      sx={{
+                        display: 'grid',
+                        gridTemplateColumns: { xs: '1fr', md: 'repeat(2, minmax(0, 1fr))' },
+                        gap: 0.8,
+                        maxHeight: 188,
+                        overflowY: 'auto',
+                        pr: 0.5,
+                      }}
+                    >
+                      {sheetJoinSelectableDetailHeaders.map(header => {
+                        const checked = sheetJoinConfig.detailColumns.includes(header);
+                        return (
+                          <Box
+                            component="label"
+                            key={header}
+                            sx={{
+                              ...sheetJoinColumnOptionSx(checked),
+                              display: 'grid',
+                              gridTemplateColumns: '24px minmax(0, 1fr)',
+                              alignItems: 'start',
+                              columnGap: 0.75,
+                              cursor: 'pointer',
                             }}
-                            sx={{ color: isDarkMode ? '#94a3b8' : '#64748b', '&.Mui-checked': { color: '#2563eb' } }}
-                          />
-                        }
-                        label={header}
-                        sx={{ color: isDarkMode ? '#cbd5e1' : '#334155' }}
-                      />
-                    ))}
-                </FormGroup>
+                          >
+                            <Checkbox
+                              size="small"
+                              checked={checked}
+                              onChange={(event) => {
+                                setSheetJoinConfig(prev => ({
+                                  ...prev,
+                                  detailColumns: event.target.checked
+                                    ? [...prev.detailColumns, header]
+                                    : prev.detailColumns.filter(column => column !== header)
+                                }));
+                              }}
+                              sx={{ p: 0.15, color: isDarkMode ? '#94a3b8' : '#94a3b8', '&.Mui-checked': { color: isDarkMode ? '#60a5fa' : uploadActionColor } }}
+                            />
+                            <Tooltip title={header} arrow placement="top">
+                              <Typography
+                                component="span"
+                                sx={{
+                                  minWidth: 0,
+                                  color: 'inherit',
+                                  fontSize: 12.5,
+                                  fontWeight: 500,
+                                  lineHeight: 1.35,
+                                  display: '-webkit-box',
+                                  WebkitLineClamp: 2,
+                                  WebkitBoxOrient: 'vertical',
+                                  overflow: 'hidden',
+                                  wordBreak: 'break-word',
+                                }}
+                              >
+                                {header}
+                              </Typography>
+                            </Tooltip>
+                          </Box>
+                        );
+                      })}
+                    </Box>
+                  ) : (
+                    <Box sx={{
+                      borderRadius: '14px',
+                      border: isDarkMode ? '1px dashed rgba(148, 163, 184, 0.22)' : '1px dashed #d8e0eb',
+                      bgcolor: isDarkMode ? 'rgba(15, 23, 42, 0.28)' : '#f8fafc',
+                      px: 2,
+                      py: 2.25,
+                      textAlign: 'center',
+                    }}>
+                      <Typography sx={{ color: isDarkMode ? '#e2e8f0' : '#334155', fontSize: 13, fontWeight: 500 }}>
+                        No secondary columns to add
+                      </Typography>
+                      <Typography sx={{ color: isDarkMode ? '#94a3b8' : '#64748b', fontSize: 12, mt: 0.4 }}>
+                        Pick a different matching column or secondary sheet to continue.
+                      </Typography>
+                    </Box>
+                  )}
+                </Box>
               </Grid>
             </Grid>
           )}
 
           {sheetJoinStage === 'preview' && sheetJoinPreview && (
             <Box>
-              {/* Metrics Summary Chips */}
-              <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1.5, mb: 2, alignItems: 'center' }}>
-                <Chip
-                  label={`${sheetJoinPreview.summary.outputRows} output rows`}
-                  sx={sheetJoinMetricChipSx('blue', sheetJoinPreviewFilter === 'all')}
-                  onClick={() => {
-                    setSheetJoinPreviewFilter('all');
-                    setSheetJoinPreviewPage(0);
-                  }}
-                />
-                <Chip
-                  label={`${sheetJoinPreview.summary.matchedBaseRows} matched`}
-                  sx={sheetJoinMetricChipSx('green', sheetJoinPreviewFilter === 'matched')}
-                  onClick={() => {
-                    setSheetJoinPreviewFilter('matched');
-                    setSheetJoinPreviewPage(0);
-                  }}
-                />
-                <Chip
-                  label={`${sheetJoinPreview.summary.unmatchedBaseRows} unmatched`}
-                  sx={sheetJoinMetricChipSx('yellow', sheetJoinPreviewFilter === 'unmatched')}
-                  onClick={() => {
-                    setSheetJoinPreviewFilter('unmatched');
-                    setSheetJoinPreviewPage(0);
-                  }}
-                />
-                <Chip
-                  label={`${sheetJoinPreview.summary.orphanDetailKeys} secondary-only keys`}
-                  sx={sheetJoinMetricChipSx('slate', sheetJoinPreviewFilter === 'secondary-only')}
-                  onClick={() => {
-                    setSheetJoinPreviewFilter('secondary-only');
-                    setSheetJoinPreviewPage(0);
-                  }}
-                />
-              </Box>
+              <Alert
+                severity="info"
+                sx={{
+                  py: 0.3,
+                  px: 2,
+                  mb: 1.25,
+                  borderRadius: '999px',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  bgcolor: isDarkMode ? 'rgba(14, 165, 233, 0.12)' : '#e0f2fe',
+                  color: isDarkMode ? '#bae6fd' : '#0369a1',
+                  border: isDarkMode ? '1px solid rgba(56, 189, 248, 0.25)' : '1px solid #7dd3fc',
+                  fontSize: '11.5px',
+                  fontWeight: 500,
+                  lineHeight: 1.2,
+                  maxWidth: 'fit-content',
+                  '& .MuiAlert-icon': { py: 0, mr: 1, fontSize: '16px' },
+                  '& .MuiAlert-message': { p: 0 }
+                }}
+              >
+                Preview keeps the full merged data. Showing {visibleSheetJoinPreviewRows.length ? sheetJoinPreviewStart + 1 : 0}-{Math.min(sheetJoinPreviewStart + visibleSheetJoinPreviewRows.length, sheetJoinFilteredPreviewRows.length)} of {sheetJoinFilteredPreviewRows.length} rows.
+              </Alert>
 
-              {/* Info Alert & Right-Aligned Controls Row */}
-              <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 1.5, mb: 1.5 }}>
-                {/* Compact Rounded Pill Info Box */}
-                <Alert
-                  severity="info"
-                  sx={{
-                    py: 0.3,
-                    px: 2,
-                    borderRadius: '999px',
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    bgcolor: isDarkMode ? 'rgba(14, 165, 233, 0.12)' : '#e0f2fe',
-                    color: isDarkMode ? '#bae6fd' : '#0369a1',
-                    border: isDarkMode ? '1px solid rgba(56, 189, 248, 0.25)' : '1px solid #7dd3fc',
-                    fontSize: '11.5px',
-                    lineHeight: 1.2,
-                    maxWidth: 'fit-content',
-                    '& .MuiAlert-icon': { py: 0, mr: 1, fontSize: '16px' },
-                    '& .MuiAlert-message': { p: 0 }
-                  }}
-                >
-                  Preview keeps the full merged data. Showing {visibleSheetJoinPreviewRows.length ? sheetJoinPreviewStart + 1 : 0}-{Math.min(sheetJoinPreviewStart + visibleSheetJoinPreviewRows.length, sheetJoinFilteredPreviewRows.length)} of {sheetJoinFilteredPreviewRows.length} rows to keep the page responsive.
-                </Alert>
+              <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: { xs: 'wrap', lg: 'nowrap' }, gap: 1, mb: 1.35 }}>
+                <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5, alignItems: 'center', minWidth: 0 }}>
+                  <Chip
+                    label={`${sheetJoinPreview.summary.outputRows} output`}
+                    sx={sheetJoinMetricChipSx('blue', sheetJoinPreviewFilter === 'all')}
+                    onClick={() => {
+                      setSheetJoinPreviewFilter('all');
+                      setSheetJoinPreviewPage(0);
+                    }}
+                  />
+                  <Chip
+                    label={`${sheetJoinPreview.summary.matchedBaseRows} matched`}
+                    sx={sheetJoinMetricChipSx('green', sheetJoinPreviewFilter === 'matched')}
+                    onClick={() => {
+                      setSheetJoinPreviewFilter('matched');
+                      setSheetJoinPreviewPage(0);
+                    }}
+                  />
+                  <Chip
+                    label={`${sheetJoinPreview.summary.unmatchedBaseRows} unmatched`}
+                    sx={sheetJoinMetricChipSx('yellow', sheetJoinPreviewFilter === 'unmatched')}
+                    onClick={() => {
+                      setSheetJoinPreviewFilter('unmatched');
+                      setSheetJoinPreviewPage(0);
+                    }}
+                  />
+                  <Chip
+                    label={`${sheetJoinPreview.summary.orphanDetailKeys} secondary-only`}
+                    sx={sheetJoinMetricChipSx('slate', sheetJoinPreviewFilter === 'secondary-only')}
+                    onClick={() => {
+                      setSheetJoinPreviewFilter('secondary-only');
+                      setSheetJoinPreviewPage(0);
+                    }}
+                  />
+                </Box>
 
-                {/* Right-Aligned Control Group: Select + Left Icon + Page X of Y + Right Icon */}
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.2, ml: 'auto', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, ml: { lg: 'auto' }, flexWrap: 'nowrap', minWidth: 0 }}>
                   <TextField
                     size="small"
                     value={sheetJoinPreviewSearch}
@@ -5774,29 +6379,20 @@ const UploadFiles = () => {
                     }}
                     placeholder="Search merged rows..."
                     InputProps={{
-                      startAdornment: <SearchIcon sx={{ mr: 0.75, fontSize: 18, color: isDarkMode ? '#94a3b8' : '#64748b' }} />,
+                      startAdornment: <SearchIcon sx={{ mr: 0.75, fontSize: 17, color: isDarkMode ? '#94a3b8' : '#64748b' }} />,
                     }}
                     sx={{
-                      minWidth: 260,
+                      ...compactFieldSx,
+                      width: { xs: 210, md: 236 },
+                      flexShrink: 0,
                       '& .MuiInputBase-root': {
-                        height: 34,
-                        fontSize: '12px',
-                        fontWeight: 600,
-                        bgcolor: isDarkMode ? '#1e293b' : '#f8fafc',
-                        color: isDarkMode ? '#ffffff' : '#0f172a',
-                        borderRadius: '10px',
-                      },
-                      '& .MuiOutlinedInput-notchedOutline': {
-                        borderColor: isDarkMode ? 'rgba(255, 255, 255, 0.18)' : '#cbd5e1',
-                      },
-                      '& input::placeholder': {
-                        color: isDarkMode ? '#94a3b8' : '#64748b',
-                        opacity: 1,
+                        ...compactFieldSx['& .MuiInputBase-root'],
+                        height: 32,
+                        minHeight: 32,
                       },
                     }}
                   />
-                  {/* 1. Visible Columns Dropdown */}
-                  <FormControl size="small" sx={{ minWidth: 190 }}>
+                  <FormControl size="small" sx={{ width: 166, flexShrink: 0 }}>
                     <Select
                       multiple
                       value={sheetJoinVisibleColumns}
@@ -5805,16 +6401,20 @@ const UploadFiles = () => {
                         const selected = (typeof value === 'string' ? value.split(',') : value).filter(column => column !== '__all__');
                         setSheetJoinVisibleColumns(selected);
                       }}
-                      renderValue={(selected) => `${selected.length} columns shown`}
+                      renderValue={(selected) => `${selected.length} columns`}
+                      MenuProps={sheetJoinPreviewMenuProps}
                       sx={{
-                        height: 34,
-                        fontSize: '12px',
-                        fontWeight: 600,
-                        bgcolor: isDarkMode ? '#1e293b' : '#f8fafc',
-                        color: isDarkMode ? '#ffffff' : '#0f172a',
-                        borderRadius: '10px',
-                        border: isDarkMode ? '1px solid rgba(255, 255, 255, 0.18)' : '1px solid #cbd5e1',
-                        '& .MuiSelect-icon': { color: isDarkMode ? '#94a3b8' : '#64748b' }
+                        ...compactSelectFieldSx,
+                        height: 32,
+                        '& .MuiInputBase-root': {
+                          ...compactSelectFieldSx['& .MuiInputBase-root'],
+                          height: 32,
+                          minHeight: 32,
+                        },
+                        '& .MuiSelect-select': {
+                          ...compactSelectFieldSx['& .MuiSelect-select'],
+                          py: 0.65,
+                        },
                       }}
                     >
                       <MenuItem
@@ -5825,7 +6425,7 @@ const UploadFiles = () => {
                         }}
                       >
                         <Checkbox checked={sheetJoinVisibleColumns.length === sheetJoinPreview.headers.length} size="small" />
-                        Show all columns
+                        Show all
                       </MenuItem>
                       {sheetJoinPreview.headers.map(header => (
                         <MenuItem key={header} value={header}>
@@ -5836,121 +6436,126 @@ const UploadFiles = () => {
                     </Select>
                   </FormControl>
 
-                  {/* 2. Left Button Icon Rounded */}
-                  <IconButton
-                    size="small"
-                    disabled={sheetJoinPreviewPage === 0}
-                    onClick={() => setSheetJoinPreviewPage(page => Math.max(0, page - 1))}
-                    sx={{
-                      width: 34,
-                      height: 34,
-                      borderRadius: '50%',
-                      border: isDarkMode ? '1px solid rgba(255, 255, 255, 0.2)' : '1px solid #cbd5e1',
-                      color: isDarkMode ? '#ffffff' : '#0f172a',
-                      bgcolor: isDarkMode ? '#1e293b' : '#ffffff',
-                      boxShadow: '0 1px 3px rgba(0,0,0,0.05)',
-                      transition: 'all 0.2s ease',
-                      '&:hover:not(.Mui-disabled)': {
-                        bgcolor: '#2563eb',
-                        borderColor: '#2563eb',
-                        color: '#ffffff',
-                        transform: 'scale(1.05)'
-                      },
-                      '&.Mui-disabled': { opacity: 0.4 }
-                    }}
-                  >
-                    <ChevronLeftIcon fontSize="small" />
-                  </IconButton>
-
-                  {/* 3. Page X of Y */}
-                  <Typography variant="body2" sx={{ color: isDarkMode ? '#94a3b8' : '#475569', fontSize: '12px', fontWeight: 600, px: 0.5, whiteSpace: 'nowrap' }}>
-                    Page {sheetJoinPreviewPage + 1} of {sheetJoinPreviewTotalPages}
-                  </Typography>
-
-                  {/* 4. Right Button Icon Rounded */}
-                  <IconButton
-                    size="small"
-                    disabled={sheetJoinPreviewPage >= sheetJoinPreviewTotalPages - 1}
-                    onClick={() => setSheetJoinPreviewPage(page => Math.min(sheetJoinPreviewTotalPages - 1, page + 1))}
-                    sx={{
-                      width: 34,
-                      height: 34,
-                      borderRadius: '50%',
-                      border: isDarkMode ? '1px solid rgba(255, 255, 255, 0.2)' : '1px solid #cbd5e1',
-                      color: isDarkMode ? '#ffffff' : '#0f172a',
-                      bgcolor: isDarkMode ? '#1e293b' : '#ffffff',
-                      boxShadow: '0 1px 3px rgba(0,0,0,0.05)',
-                      transition: 'all 0.2s ease',
-                      '&:hover:not(.Mui-disabled)': {
-                        bgcolor: '#2563eb',
-                        borderColor: '#2563eb',
-                        color: '#ffffff',
-                        transform: 'scale(1.05)'
-                      },
-                      '&.Mui-disabled': { opacity: 0.4 }
-                    }}
-                  >
-                    <ChevronRightIcon fontSize="small" />
-                  </IconButton>
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.55, flexShrink: 0 }}>
+                    <IconButton
+                      size="small"
+                      disabled={sheetJoinPreviewPage === 0}
+                      onClick={() => setSheetJoinPreviewPage(page => Math.max(0, page - 1))}
+                      sx={{
+                        width: 30,
+                        height: 30,
+                        borderRadius: '50%',
+                        border: isDarkMode ? '1px solid rgba(255, 255, 255, 0.16)' : '1px solid #cbd5e1',
+                        color: isDarkMode ? '#e2e8f0' : '#334155',
+                        bgcolor: isDarkMode ? '#111827' : '#ffffff',
+                        boxShadow: 'none',
+                        transition: 'background-color 160ms ease, border-color 160ms ease, color 160ms ease',
+                        '&:hover:not(.Mui-disabled)': {
+                          bgcolor: uploadActionColor,
+                          borderColor: uploadActionColor,
+                          color: '#ffffff',
+                        },
+                        '&.Mui-disabled': { opacity: 0.36 }
+                      }}
+                    >
+                      <ChevronLeftIcon sx={{ fontSize: 18 }} />
+                    </IconButton>
+                    <Typography variant="body2" sx={{ color: isDarkMode ? '#94a3b8' : '#475569', fontSize: '12px', fontWeight: 500, minWidth: 34, textAlign: 'center', whiteSpace: 'nowrap' }}>
+                      {sheetJoinPreviewPage + 1}/{sheetJoinPreviewTotalPages}
+                    </Typography>
+                    <IconButton
+                      size="small"
+                      disabled={sheetJoinPreviewPage >= sheetJoinPreviewTotalPages - 1}
+                      onClick={() => setSheetJoinPreviewPage(page => Math.min(sheetJoinPreviewTotalPages - 1, page + 1))}
+                      sx={{
+                        width: 30,
+                        height: 30,
+                        borderRadius: '50%',
+                        border: isDarkMode ? '1px solid rgba(255, 255, 255, 0.16)' : '1px solid #cbd5e1',
+                        color: isDarkMode ? '#e2e8f0' : '#334155',
+                        bgcolor: isDarkMode ? '#111827' : '#ffffff',
+                        boxShadow: 'none',
+                        transition: 'background-color 160ms ease, border-color 160ms ease, color 160ms ease',
+                        '&:hover:not(.Mui-disabled)': {
+                          bgcolor: uploadActionColor,
+                          borderColor: uploadActionColor,
+                          color: '#ffffff',
+                        },
+                        '&.Mui-disabled': { opacity: 0.36 }
+                      }}
+                    >
+                      <ChevronRightIcon sx={{ fontSize: 18 }} />
+                    </IconButton>
+                  </Box>
                 </Box>
               </Box>
 
               {/* Data Table */}
-              <Box sx={{ height: 'calc(100vh - 380px)', minHeight: 320, overflow: 'auto', border: isDarkMode ? '1px solid rgba(255, 255, 255, 0.12)' : '1px solid #cbd5e1', borderRadius: '12px', bgcolor: isDarkMode ? '#0b1120' : '#ffffff', '&::-webkit-scrollbar-corner': { backgroundColor: 'transparent' } }}>
-                <Box component="table" sx={{ width: 'max-content', minWidth: '100%', tableLayout: 'fixed', borderCollapse: 'collapse', '& th, & td': { borderBottom: isDarkMode ? '1px solid rgba(255, 255, 255, 0.08)' : '1px solid #e2e8f0', p: 0.85 }, '& th': { position: 'sticky', top: 0, backgroundColor: isDarkMode ? '#0f172a' : '#f1f5f9', zIndex: 2, textAlign: 'left' } }}>
+              <Box sx={sheetJoinTableShellSx}>
+                <Box component="table" sx={sheetJoinTableSx}>
                   <Box component="thead">
                     <Box component="tr">
-                      {visibleSheetJoinPreviewColumns.map(header => (
-                        <Box
-                          component="th"
-                          key={header}
-                          sx={{
-                            width: sheetJoinColumnWidths[header] || 180,
-                            minWidth: sheetJoinColumnWidths[header] || 180,
-                            maxWidth: sheetJoinColumnWidths[header] || 180,
-                            position: 'relative',
-                            whiteSpace: 'nowrap',
-                            overflow: 'hidden',
-                            textOverflow: 'ellipsis',
-                            pr: 2,
-                            color: isDarkMode ? '#ffffff' : '#0f172a',
-                            fontWeight: 800,
-                            fontSize: '11px',
-                            letterSpacing: '0.04em',
-                            textTransform: 'uppercase',
-                            backgroundColor: isDarkMode ? '#0f172a' : '#f1f5f9'
-                          }}
-                        >
-                          {header}
+                      {visibleSheetJoinPreviewColumns.map(header => {
+                        const activeSort = sheetJoinPreviewSort.column === header;
+                        const SortIcon = activeSort
+                          ? (sheetJoinPreviewSort.direction === 'asc' ? ArrowUpwardIcon : ArrowDownwardIcon)
+                          : UnfoldMoreIcon;
+                        return (
                           <Box
-                            onMouseDown={(event) => handleSheetJoinColumnResize(header, event)}
+                            component="th"
+                            key={header}
                             sx={{
-                              position: 'absolute',
-                              top: 0,
-                              right: 0,
-                              width: 8,
-                              height: '100%',
-                              cursor: 'col-resize',
-                              borderRight: '2px solid transparent',
-                              '&:hover': { borderRightColor: 'primary.main' }
+                              ...sheetJoinHeaderCellSx,
+                              width: sheetJoinColumnWidths[header] || 180,
+                              minWidth: sheetJoinColumnWidths[header] || 180,
+                              maxWidth: sheetJoinColumnWidths[header] || 180,
                             }}
-                          />
-                        </Box>
-                      ))}
+                          >
+                            <Box
+                              role="button"
+                              tabIndex={0}
+                              onClick={() => handleSheetJoinPreviewSort(header)}
+                              onKeyDown={(event) => {
+                                if (event.key === 'Enter' || event.key === ' ') {
+                                  event.preventDefault();
+                                  handleSheetJoinPreviewSort(header);
+                                }
+                              }}
+                              sx={sheetJoinHeaderButtonSx(activeSort)}
+                            >
+                              <Box component="span" sx={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                {header}
+                              </Box>
+                              <SortIcon sx={sheetJoinSortIconSx(activeSort)} />
+                            </Box>
+                            <Box
+                              onMouseDown={(event) => handleSheetJoinColumnResize(header, event)}
+                              onClick={(event) => event.stopPropagation()}
+                              sx={{
+                                position: 'absolute',
+                                top: '22%',
+                                right: 0,
+                                width: 8,
+                                height: '56%',
+                                cursor: 'col-resize',
+                                borderRight: `2px solid ${isDarkMode ? 'rgba(148, 163, 184, 0.14)' : 'rgba(148, 163, 184, 0.34)'}`,
+                                transition: 'border-color 150ms ease',
+                                '&:hover': { borderRightColor: uploadActionColor }
+                              }}
+                            />
+                          </Box>
+                        );
+                      })}
                     </Box>
                   </Box>
                   <Box component="tbody">
                     {visibleSheetJoinPreviewRows.map(({ row, index: rowIndex }) => (
-                      <Box component="tr" key={`preview-row-${rowIndex}`} sx={{ '&:hover': { bgcolor: isDarkMode ? 'rgba(37, 99, 235, 0.12)' : '#eff6ff' } }}>
+                      <Box component="tr" key={`preview-row-${rowIndex}`} sx={sheetJoinBodyRowSx}>
                         {visibleSheetJoinPreviewColumns.map(header => (
                           <Box
                             component="td"
                             key={`${rowIndex}-${header}`}
-                            sx={{
-                              width: sheetJoinColumnWidths[header] || 180,
-                              minWidth: sheetJoinColumnWidths[header] || 180,
-                              maxWidth: sheetJoinColumnWidths[header] || 180
-                            }}
+                            sx={sheetJoinBodyCellSx(header)}
                           >
                             <Box
                               component="input"
@@ -5961,10 +6566,13 @@ const UploadFiles = () => {
                                 border: 'none',
                                 outline: 'none',
                                 backgroundColor: 'transparent',
-                                color: isDarkMode ? '#ffffff' : '#0f172a',
+                                color: isDarkMode ? '#e5e7eb' : '#0f172a',
                                 font: 'inherit',
-                                fontSize: '12px',
-                                p: 0,
+                                fontSize: '12.5px',
+                                fontWeight: 500,
+                                px: 1.6,
+                                py: 0,
+                                height: '100%',
                                 minWidth: 0,
                                 overflow: 'hidden',
                                 textOverflow: 'ellipsis'
@@ -5979,20 +6587,40 @@ const UploadFiles = () => {
               </Box>
             </Box>
           )}
+          </Box>
         </DialogContent>
 
-        <DialogActions sx={{ ...dialogFooterSx, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <DialogActions
+          sx={{
+            ...dialogFooterSx,
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            gap: 1.5,
+            flexWrap: 'wrap'
+          }}
+        >
           <Box sx={{ display: 'flex', gap: 1 }}>
-            <Button onClick={handleCloseSheetJoinSetup} sx={{ ...pillButtonSx, color: isDarkMode ? '#cbd5e1' : '#475569', '&:hover': { bgcolor: isDarkMode ? '#1e293b' : '#e2e8f0' } }}>
+            <Button
+              onClick={handleCloseSheetJoinSetup}
+              sx={quietDangerButtonSx}
+            >
               Cancel
             </Button>
             {sheetJoinStage !== 'match' && (
-              <Button onClick={() => setSheetJoinStage(sheetJoinStage === 'preview' ? 'options' : 'match')} sx={{ ...pillButtonSx, color: '#2563eb', '&:hover': { bgcolor: isDarkMode ? 'rgba(37, 99, 235, 0.12)' : '#eff6ff' } }}>
+              <Button
+                onClick={() => setSheetJoinStage(sheetJoinStage === 'preview' ? 'options' : 'match')}
+                sx={quietBackButtonSx}
+              >
                 Back
               </Button>
             )}
             {sheetJoinStage === 'preview' && (
-              <Button onClick={handleDownloadSheetJoinPreview} sx={{ ...pillButtonSx, color: '#2563eb', '&:hover': { bgcolor: isDarkMode ? 'rgba(37, 99, 235, 0.12)' : '#eff6ff' } }}>
+              <Button
+                onClick={handleDownloadSheetJoinPreview}
+                startIcon={<FileDownloadOutlinedIcon />}
+                sx={quietDownloadButtonSx}
+              >
                 Download Preview
               </Button>
             )}
@@ -6007,9 +6635,9 @@ const UploadFiles = () => {
                   !sheetJoinConfig.detailKey ||
                   ((sheetJoinConfig.baseSourceId || 'primary') === (sheetJoinConfig.detailSourceId || 'primary') && sheetJoinConfig.baseSheet === sheetJoinConfig.detailSheet)
                 }
-                sx={{ ...primaryPillSx, height: 40, px: 3 }}
+                sx={{ ...primaryPillSx, height: 36, minWidth: 112, px: 2.5 }}
               >
-                Proceed →
+                Proceed
               </Button>
             )}
             {sheetJoinStage === 'options' && (
@@ -6017,9 +6645,9 @@ const UploadFiles = () => {
                 variant="contained"
                 onClick={handlePreviewSheetJoin}
                 disabled={sheetJoinConfig.detailColumns.length === 0}
-                sx={{ ...primaryPillSx, height: 40, px: 3 }}
+                sx={{ ...primaryPillSx, height: 36, minWidth: 112, px: 2.5 }}
               >
-                Preview →
+                Preview
               </Button>
             )}
             {sheetJoinStage === 'preview' && (
@@ -6029,11 +6657,12 @@ const UploadFiles = () => {
                   onClick={handleSaveSheetJoinSetup}
                   sx={{
                     height: 40,
+                    minWidth: 112,
                     px: 2.5,
                     ...primaryPillSx
                   }}
                 >
-                  Next →
+                  Next
                 </Button>
               </>
             )}
@@ -6058,7 +6687,7 @@ const UploadFiles = () => {
         }}>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
             <WarningIcon sx={{ color: '#f59e0b' }} fontSize="large" />
-            <Typography variant="h6" fontWeight="700" sx={{ color: isDarkMode ? '#f8fafc' : '#0f172a' }}>
+            <Typography variant="h6" fontWeight="600" sx={{ color: isDarkMode ? '#f8fafc' : '#0f172a' }}>
               Template Compatibility Issue
             </Typography>
           </Box>
@@ -6068,14 +6697,8 @@ const UploadFiles = () => {
         </DialogTitle>
         
         <DialogContent sx={{ ...dialogBodySx, pt: 2 }}>
-          <Alert severity="warning" sx={{
-            mb: 3,
-            borderRadius: '14px',
-            bgcolor: isDarkMode ? 'rgba(245, 158, 11, 0.12)' : '#fffbeb',
-            color: isDarkMode ? '#fde68a' : '#92400e',
-            border: isDarkMode ? '1px solid rgba(245, 158, 11, 0.24)' : '1px solid #fde68a'
-          }}>
-            <Typography variant="subtitle1" fontWeight="600" gutterBottom>
+          <Alert severity="warning" sx={inlineMessageAlertSx('warning', { mb: 2 })}>
+            <Typography variant="subtitle1" fontWeight="500" gutterBottom>
               Template "{compatibilityErrorData?.templateName}" is not fully compatible with your uploaded files.
             </Typography>
             <Typography variant="body2">
@@ -6085,7 +6708,7 @@ const UploadFiles = () => {
 
           {compatibilityErrorData?.compatibilityDetails && (
             <Card variant="outlined" sx={{ p: 2, mb: 3, borderRadius: '16px', bgcolor: isDarkMode ? '#0f172a' : '#f8fafc', borderColor: isDarkMode ? 'rgba(148, 163, 184, 0.18)' : '#e2e8f0' }}>
-              <Typography variant="subtitle2" fontWeight="600" sx={{ mb: 1, color: isDarkMode ? '#f8fafc' : '#0f172a' }}>
+              <Typography variant="subtitle2" fontWeight="500" sx={{ mb: 1, color: isDarkMode ? '#f8fafc' : '#0f172a' }}>
                 Compatibility Details:
               </Typography>
               <Typography variant="body2" sx={{ color: isDarkMode ? '#94a3b8' : '#64748b' }}>
@@ -6100,7 +6723,7 @@ const UploadFiles = () => {
             </Card>
           )}
 
-          <Typography variant="body1" sx={{ mb: 2, color: isDarkMode ? '#e2e8f0' : '#334155', fontWeight: 600 }}>
+          <Typography variant="body1" sx={{ mb: 2, color: isDarkMode ? '#e2e8f0' : '#334155', fontWeight: 500 }}>
             What would you like to do?
           </Typography>
 
@@ -6113,7 +6736,7 @@ const UploadFiles = () => {
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
                 <PlayArrowIcon color="warning" />
                 <Box>
-                  <Typography variant="h6" fontWeight="600">
+                  <Typography variant="h6" fontWeight="500">
                     Continue Anyway
                   </Typography>
                   <Typography variant="body2" sx={{ color: isDarkMode ? '#94a3b8' : '#64748b' }}>
@@ -6131,7 +6754,7 @@ const UploadFiles = () => {
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
                 <LibraryBooksIcon color="primary" />
                 <Box>
-                  <Typography variant="h6" fontWeight="600">
+                  <Typography variant="h6" fontWeight="500">
                     Try Different Template
                   </Typography>
                   <Typography variant="body2" sx={{ color: isDarkMode ? '#94a3b8' : '#64748b' }}>
@@ -6149,7 +6772,7 @@ const UploadFiles = () => {
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
                 <CloudUploadIcon color="success" />
                 <Box>
-                  <Typography variant="h6" fontWeight="600">
+                  <Typography variant="h6" fontWeight="500">
                     Upload Without Template
                   </Typography>
                   <Typography variant="body2" sx={{ color: isDarkMode ? '#94a3b8' : '#64748b' }}>
@@ -6162,7 +6785,7 @@ const UploadFiles = () => {
         </DialogContent>
         
         <DialogActions sx={{ ...dialogFooterSx, px: 2.75, py: 1.5, gap: 1 }}>
-          <Button onClick={handleCloseCompatibilityError} sx={{ ...pillButtonSx, color: isDarkMode ? '#cbd5e1' : '#475569' }}>
+          <Button onClick={handleCloseCompatibilityError} sx={quietDangerButtonSx}>
             Cancel
           </Button>
         </DialogActions>
@@ -6189,7 +6812,7 @@ const UploadFiles = () => {
         <DialogTitle sx={{ ...dialogHeaderSx, px: 3.25, pt: 2.5, pb: 1.25 }}>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25 }}>
             <ScienceIcon color="primary" sx={{ fontSize: 20 }} />
-            <Typography variant="h6" fontWeight="700" sx={{ color: isDarkMode ? '#f8fafc' : '#0f172a', fontSize: '1.05rem', lineHeight: 1.25 }}>
+            <Typography variant="h6" fontWeight="600" sx={{ color: isDarkMode ? '#f8fafc' : '#0f172a', fontSize: '1.05rem', lineHeight: 1.25 }}>
               Choose PDF Processing Method
             </Typography>
           </Box>
@@ -6245,21 +6868,21 @@ const UploadFiles = () => {
                       >
                         {option.icon}
                       </Box>
-                      <Typography variant="subtitle1" fontWeight={750} sx={{ lineHeight: 1.2, color: isDarkMode ? '#f8fafc' : '#0f172a' }}>
+                      <Typography variant="subtitle1" fontWeight={600} sx={{ lineHeight: 1.2, color: isDarkMode ? '#f8fafc' : '#0f172a' }}>
                         {option.title}
                       </Typography>
                     </Box>
                     <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
                       <Box>
-                        <Typography variant="caption" sx={{ display: 'block', color: isDarkMode ? '#60a5fa' : '#2563eb', fontSize: '0.68rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.04em', mb: 0.25 }}>
+                        <Typography variant="caption" sx={{ display: 'block', color: isDarkMode ? '#66b3ff' : uploadActionColor, fontSize: '0.68rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em', mb: 0.25 }}>
                           Use when
                         </Typography>
-                        <Typography variant="body2" sx={{ color: isDarkMode ? '#dbe4f0' : '#334155', fontSize: '0.8rem', lineHeight: 1.35, fontWeight: 650 }}>
+                        <Typography variant="body2" sx={{ color: isDarkMode ? '#dbe4f0' : '#334155', fontSize: '0.8rem', lineHeight: 1.35, fontWeight: 500 }}>
                           {option.shortBody || option.body}
                         </Typography>
                       </Box>
                       <Box>
-                        <Typography variant="caption" sx={{ display: 'block', color: isDarkMode ? '#60a5fa' : '#2563eb', fontSize: '0.68rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.04em', mb: 0.25 }}>
+                        <Typography variant="caption" sx={{ display: 'block', color: isDarkMode ? '#66b3ff' : uploadActionColor, fontSize: '0.68rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em', mb: 0.25 }}>
                           Extracts
                         </Typography>
                         <Typography variant="body2" sx={{ color: isDarkMode ? '#9ca8ba' : '#64748b', fontSize: '0.76rem', lineHeight: 1.35 }}>
@@ -6280,7 +6903,7 @@ const UploadFiles = () => {
               setPendingPdfSessionId(null);
               setPendingPdfContext(null);
             }}
-            sx={{ ...pillButtonSx, color: isDarkMode ? '#cbd5e1' : '#475569' }}
+            sx={quietDangerButtonSx}
           >
             Cancel
           </Button>
@@ -6295,11 +6918,11 @@ const UploadFiles = () => {
         PaperProps={{ sx: { ...dialogPaperSx, maxWidth: 680, borderRadius: '16px' } }}
       >
         <DialogTitle sx={{ ...dialogHeaderSx, display: 'flex', alignItems: 'center', gap: 1.25, px: 3, py: 2 }}>
-          <Box sx={{ width: 36, height: 36, borderRadius: '12px', display: 'grid', placeItems: 'center', bgcolor: isDarkMode ? 'rgba(96, 165, 250, 0.16)' : '#eff6ff', color: isDarkMode ? '#93c5fd' : '#2563eb' }}>
+          <Box sx={{ width: 36, height: 36, borderRadius: '12px', display: 'grid', placeItems: 'center', bgcolor: isDarkMode ? 'rgba(0, 122, 255, 0.16)' : 'rgba(0, 122, 255, 0.08)', color: isDarkMode ? '#66b3ff' : uploadActionColor }}>
             <ScienceIcon sx={{ fontSize: 20 }} />
           </Box>
           <Box>
-            <Typography sx={{ color: isDarkMode ? '#f8fafc' : '#0f172a', fontSize: 18, lineHeight: 1.25, fontWeight: 650 }}>
+            <Typography sx={{ color: isDarkMode ? '#f8fafc' : '#0f172a', fontSize: 18, lineHeight: 1.25, fontWeight: 500 }}>
               Select primary column
             </Typography>
             <Typography sx={{ color: isDarkMode ? '#94a3b8' : '#64748b', fontSize: 12.5, lineHeight: 1.4, mt: 0.25 }}>
@@ -6313,12 +6936,12 @@ const UploadFiles = () => {
             notes, and extra rows before mapping.
           </Typography>
           <FormControl fullWidth sx={{ mt: 1 }}>
-            <InputLabel sx={{ color: isDarkMode ? '#94a3b8' : '#475569' }}>Primary Column</InputLabel>
+            <InputLabel sx={inputLabelSx}>Primary Column</InputLabel>
             <Select
               value={selectedPrimaryColumn}
-              label="Primary Column"
               onChange={(e) => setSelectedPrimaryColumn(e.target.value)}
               sx={selectFieldSx}
+              MenuProps={sheetJoinSelectMenuProps}
             >
               {primaryColumnHeaders.map(h => (
                 <MenuItem key={h} value={h}>{h}</MenuItem>
@@ -6326,13 +6949,7 @@ const UploadFiles = () => {
             </Select>
           </FormControl>
           {cleanupResult && (
-            <Alert severity="success" sx={{
-              mt: 2,
-              borderRadius: '14px',
-              bgcolor: isDarkMode ? 'rgba(16, 185, 129, 0.12)' : '#ecfdf5',
-              color: isDarkMode ? '#a7f3d0' : '#166534',
-              border: isDarkMode ? '1px solid rgba(16, 185, 129, 0.24)' : '1px solid #bbf7d0'
-            }}>
+            <Alert severity="success" sx={inlineMessageAlertSx('success', { mt: 2 })}>
               Removed {cleanupResult.rows_deleted} empty rows ({cleanupResult.total_rows_before} → {cleanupResult.total_rows_after} rows)
             </Alert>
           )}

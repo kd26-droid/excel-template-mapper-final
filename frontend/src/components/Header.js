@@ -100,12 +100,12 @@ const Header = () => {
             />
             <Typography
               variant="h6"
-              fontWeight="700"
+              fontWeight="600"
               sx={{
                 color: r.text.primary,
-                letterSpacing: '-0.02em',
-                fontSize: '21px',
-                lineHeight: 1,
+                letterSpacing: 0,
+                fontSize: '18px',
+                lineHeight: 1.05,
               }}
             >
               FactWise
@@ -119,7 +119,7 @@ const Header = () => {
                 size="small"
                 sx={{
                   height: 18,
-                  fontSize: '10px',
+                  fontSize: '9.5px',
                   fontWeight: 600,
                   letterSpacing: '0.02em',
                   color: r.text.secondary,
@@ -168,7 +168,7 @@ const Header = () => {
                   px: 2.5,
                   py: 0.75,
                   borderRadius: '999px',
-                  fontSize: '13.5px',
+                  fontSize: '12.5px',
                   fontWeight: 600,
                   textDecoration: 'none',
                   position: 'relative',
@@ -181,13 +181,13 @@ const Header = () => {
                     ? 'rgba(255, 255, 255, 0.75)'
                     : '#475569',
                   background: isActive
-                    ? 'linear-gradient(135deg, #2563eb 0%, #0284c7 100%)'
+                    ? 'linear-gradient(180deg, #0d80ff 0%, #007aff 100%)'
                     : 'transparent',
                   border: isActive
                     ? '1px solid rgba(255, 255, 255, 0.25)'
                     : '1px solid transparent',
                   boxShadow: isActive
-                    ? '0 4px 14px 0 rgba(37, 99, 235, 0.38), inset 0 1px 0 0 rgba(255, 255, 255, 0.35)'
+                    ? '0 4px 14px 0 rgba(0, 122, 255, 0.34), inset 0 1px 0 0 rgba(255, 255, 255, 0.35)'
                     : 'none',
                   backdropFilter: isActive ? 'blur(8px)' : 'none',
                   WebkitBackdropFilter: isActive ? 'blur(8px)' : 'none',
@@ -199,7 +199,7 @@ const Header = () => {
                       ? '#ffffff'
                       : '#0f172a',
                     background: isActive
-                      ? 'linear-gradient(135deg, #1d4ed8 0%, #0369a1 100%)'
+                      ? 'linear-gradient(180deg, #1687ff 0%, #006ee6 100%)'
                       : isDarkMode
                       ? 'rgba(255, 255, 255, 0.09)'
                       : 'rgba(15, 23, 42, 0.05)',
@@ -208,7 +208,7 @@ const Header = () => {
                       : 'transparent',
                     transform: 'translateY(-1px)',
                     boxShadow: isActive
-                      ? '0 6px 18px 0 rgba(37, 99, 235, 0.48), inset 0 1px 0 0 rgba(255, 255, 255, 0.45)'
+                      ? '0 6px 18px 0 rgba(0, 122, 255, 0.44), inset 0 1px 0 0 rgba(255, 255, 255, 0.45)'
                       : isDarkMode
                       ? '0 4px 12px rgba(0, 0, 0, 0.25)'
                       : '0 4px 12px rgba(15, 23, 42, 0.04)',
@@ -218,7 +218,7 @@ const Header = () => {
                   },
                 }}
               >
-                <Icon sx={{ fontSize: 16 }} />
+                <Icon sx={{ fontSize: 15 }} />
                 {item.label}
               </Box>
             );
@@ -229,130 +229,34 @@ const Header = () => {
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 2.25 }}>
 
           {/* ── Light / Dark Toggle ───────────────────────────────────── */}
-          <Box
-            component="button"
-            type="button"
-            role="switch"
-            aria-checked={isDarkMode}
-            aria-label="Toggle light and dark theme"
-            onClick={toggleThemeMode}
-            sx={{
-              display: { xs: 'none', md: 'grid' },
-              gridTemplateColumns: 'auto auto auto',
-              alignItems: 'center',
-              gap: 0.8,
-              p: 0,
-              border: 'none',
-              bgcolor: 'transparent',
-              cursor: 'pointer',
-              fontFamily: 'inherit',
-              color: 'inherit',
-              '&:focus-visible': {
-                outline: `2px solid ${r.color.primaryLight}`,
-                outlineOffset: 4,
-                borderRadius: '18px',
-              },
-            }}
-          >
-            {/* "Dark" label */}
-            <Typography
-              component="span"
+          <Tooltip title={isDarkMode ? 'Switch to light mode' : 'Switch to dark mode'}>
+            <IconButton
+              size="small"
+              role="switch"
+              aria-checked={isDarkMode}
+              aria-label={isDarkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+              onClick={toggleThemeMode}
               sx={{
-                fontSize: '13.5px',
-                fontWeight: 600,
-                color: isDarkMode ? r.text.primary : r.text.disabled,
-                transition: 'color 180ms ease',
-              }}
-            >
-              Dark
-            </Typography>
-
-            {/* Toggle track */}
-            <Box
-              sx={{
-                position: 'relative',
-                width: 76,
+                width: 32,
                 height: 32,
                 borderRadius: '999px',
-                p: '3px',
-                overflow: 'hidden',
-                background: isDarkMode
-                  ? 'linear-gradient(180deg, #1f2937 0%, #111827 100%)'
-                  : 'linear-gradient(180deg, #f8fafc 0%, #e5e7eb 100%)',
-                border: isDarkMode ? '1px solid rgba(148, 163, 184, 0.24)' : '1px solid rgba(148, 163, 184, 0.45)',
+                color: isDarkMode ? r.color.primaryLight : r.color.primary,
+                bgcolor: isDarkMode ? r.action.primarySofter : '#ffffff',
+                border: isDarkMode ? '1px solid rgba(0, 122, 255, 0.24)' : '1px solid rgba(15, 23, 42, 0.08)',
                 boxShadow: isDarkMode
-                  ? 'inset 0 2px 7px rgba(0,0,0,0.52), 0 5px 14px rgba(2,6,23,0.22)'
-                  : '0 10px 24px rgba(15,23,42,0.12), inset 0 1px 2px rgba(255,255,255,0.8)',
-                transition: 'background 220ms ease, box-shadow 220ms ease',
+                  ? '0 8px 18px -14px rgba(0, 122, 255, 0.78), inset 0 1px 0 rgba(255,255,255,0.05)'
+                  : '0 10px 22px -18px rgba(15, 23, 42, 0.32), inset 0 1px 0 rgba(255,255,255,0.9)',
+                transition: 'background 160ms ease, border-color 160ms ease, color 160ms ease, transform 160ms ease',
+                '&:hover': {
+                  bgcolor: isDarkMode ? r.action.primarySoft : 'rgba(0, 122, 255, 0.08)',
+                  borderColor: isDarkMode ? 'rgba(0, 122, 255, 0.42)' : 'rgba(0, 122, 255, 0.18)',
+                  transform: 'translateY(-1px)',
+                },
               }}
             >
-              <Box
-                sx={{
-                  position: 'absolute',
-                  top: 3,
-                  left: isDarkMode ? 3 : 40,
-                  width: 33,
-                  height: 26,
-                  borderRadius: '999px',
-                  bgcolor: r.action.primary,
-                  boxShadow: isDarkMode
-                    ? '0 5px 14px rgba(37,99,235,0.34)'
-                    : '0 5px 14px rgba(37,99,235,0.28)',
-                  transition: 'left 240ms cubic-bezier(0.16, 1, 0.3, 1), box-shadow 220ms ease',
-                }}
-              />
-
-              <Box
-                sx={{
-                  position: 'absolute',
-                  top: 3,
-                  left: 3,
-                  width: 33,
-                  height: 26,
-                  borderRadius: '999px',
-                  display: 'grid',
-                  placeItems: 'center',
-                  color: isDarkMode ? '#ffffff' : '#9ca3af',
-                  zIndex: 2,
-                  transition: 'color 180ms ease',
-                }}
-              >
-                <MoonIcon sx={{ width: 18, height: 18 }} />
-              </Box>
-              <Box
-                sx={{
-                  position: 'absolute',
-                  top: 3,
-                  right: 3,
-                  width: 33,
-                  height: 26,
-                  borderRadius: '999px',
-                  display: 'grid',
-                  placeItems: 'center',
-                  color: isDarkMode ? '#ffffff' : '#ffffff',
-                  zIndex: 2,
-                  opacity: isDarkMode ? 0.82 : 1,
-                  transition: 'opacity 180ms ease, color 180ms ease',
-                }}
-              >
-                <WbSunnyIcon sx={{ fontSize: 18 }} />
-              </Box>
-            </Box>
-
-            {/* "Light" label */}
-            <Typography
-              component="span"
-              sx={{
-                fontSize: '13.5px',
-                fontWeight: 600,
-                color: isDarkMode ? r.text.disabled : r.text.primary,
-                letterSpacing: 0,
-                transition: 'color 180ms ease',
-              }}
-            >
-              Light
-            </Typography>
-          </Box>
+              {isDarkMode ? <MoonIcon sx={{ width: 17, height: 17 }} /> : <WbSunnyIcon sx={{ fontSize: 17 }} />}
+            </IconButton>
+          </Tooltip>
 
           {/* Notification bell */}
           <Tooltip title="Notifications">
@@ -375,8 +279,8 @@ const Header = () => {
                 height: 30,
                 bgcolor: r.action.primarySoft,
                 color: r.color.primaryLight,
-                fontSize: '12px',
-                fontWeight: 700,
+                fontSize: '11.5px',
+                fontWeight: 600,
                 border: `1px solid ${r.border.panelAccent}`,
                 cursor: 'pointer',
                 transition: 'all 0.2s ease',

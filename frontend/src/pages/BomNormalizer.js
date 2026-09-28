@@ -1,4 +1,4 @@
-﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import * as XLSX from 'xlsx';
 import {
@@ -23,6 +23,7 @@ import {
   FormControlLabel,
   FormGroup,
   Grid,
+  GlobalStyles,
   IconButton,
   InputAdornment,
   InputLabel,
@@ -60,6 +61,7 @@ import AddIcon from '@mui/icons-material/Add';
 import SearchIcon from '@mui/icons-material/Search';
 import TuneIcon from '@mui/icons-material/Tune';
 import VisibilityIcon from '@mui/icons-material/Visibility';
+import InsertDriveFileOutlinedIcon from '@mui/icons-material/InsertDriveFileOutlined';
 import ChevronLeftIcon from '@mui/icons-material/ChevronLeft';
 import ChevronRightIcon from '@mui/icons-material/ChevronRight';
 import ExpandLessIcon from '@mui/icons-material/ExpandLess';
@@ -68,6 +70,26 @@ import api from '../services/api';
 import BomStructureDialog, { reconcileSavedBomStructure } from '../components/BomStructureDialog';
 import ColumnParser from '../components/ColumnParser/ColumnParser';
 import { Button as ShadcnButton } from '../components/ui/button';
+import {
+  buildFactWiseTableTone,
+  buildFactWisePageTokens,
+  factWiseAlertSx,
+  factWiseToastAlertSx,
+  factWiseCancelButtonSx,
+  factWiseGlowSx,
+  factWiseGridOverlaySx,
+  factWiseFieldSx,
+  factWiseInputLabelSx,
+  factWisePageShellSx,
+  factWisePrimaryButtonSx,
+  factWiseSelectFieldSx,
+  factWiseTableBodyCellSx,
+  factWiseTableContainerSx,
+  factWiseTableHeaderCellSx,
+  factWiseTableRowSx,
+  factWiseTableSx,
+  factWiseTopShadeSx,
+} from '../utils/factwisePageStyles';
 import {
   createFactwiseIds,
   createTagColumn,
@@ -402,18 +424,26 @@ const WorksheetSamplePreview = ({
   const sampleLineCount = Math.max(1, ...cells.map((cell) => textLines(cell.value).length));
   const sampleRowHeight = clampNumber(sampleLineCount * 17 + 18, 38, 420);
   const minWidth = rowHeaderWidth + cells.reduce((sum, cell) => sum + cell.width, 0);
-  const borderColor = '#d9e2ef';
-
+  const isPreviewDark = ['#09090b', '#090b10', '#0f131a'].includes(theme?.page || theme?.pageTokens?.bg);
+  const borderColor = isPreviewDark ? 'rgba(148, 163, 184, 0.22)' : '#d9e2ef';
+  const previewBg = isPreviewDark ? '#171b23' : '#ffffff';
+  const previewHeaderBg = isPreviewDark ? '#1b1d23' : '#f3f4f6';
+  const previewRowHeaderBg = isPreviewDark ? '#17181d' : '#f8fafc';
+  const previewCellBg = isPreviewDark ? '#171b23' : '#ffffff';
+  const previewMutedText = isPreviewDark ? '#a8b3c3' : '#64748b';
+  const previewHeaderText = isPreviewDark ? '#d7dee9' : '#475569';
 
   return (
     <Box
       sx={{
         border: `1px solid ${borderColor}`,
-        bgcolor: '#fff',
+        bgcolor: previewBg,
         height: height || 'auto',
         maxWidth: '100%',
         overflow: 'auto',
-        boxShadow: 'inset 0 0 0 1px rgba(15, 23, 42, 0.02)',
+        boxShadow: isPreviewDark
+          ? 'inset 0 0 0 1px rgba(255,255,255,0.02)'
+          : 'inset 0 0 0 1px rgba(15, 23, 42, 0.02)',
       }}
     >
       <Box
@@ -421,7 +451,7 @@ const WorksheetSamplePreview = ({
           minWidth,
           display: 'grid',
           gridTemplateColumns,
-          fontFamily: '"Aptos", "Calibri", "Arial", sans-serif',
+          fontFamily: 'var(--fw-font-stack)',
           fontSize: 13,
           color: theme.text,
         }}
@@ -431,7 +461,7 @@ const WorksheetSamplePreview = ({
             height: 22,
             borderRight: `1px solid ${borderColor}`,
             borderBottom: `1px solid ${borderColor}`,
-            bgcolor: '#f3f6fb',
+            bgcolor: previewHeaderBg,
           }}
         />
         {cells.map((cell) => (
@@ -446,9 +476,9 @@ const WorksheetSamplePreview = ({
               justifyContent: 'center',
               borderRight: `1px solid ${borderColor}`,
               borderBottom: `1px solid ${borderColor}`,
-              bgcolor: '#f3f6fb',
-              fontWeight: 700,
-              color: '#475569',
+              bgcolor: previewHeaderBg,
+              fontWeight: 500,
+              color: previewHeaderText,
             }}
           >
             {cell.columnLabel}
@@ -464,9 +494,9 @@ const WorksheetSamplePreview = ({
             justifyContent: 'center',
             borderRight: `1px solid ${borderColor}`,
             borderBottom: `1px solid ${borderColor}`,
-            bgcolor: '#f8fafc',
-            fontWeight: 700,
-            color: '#64748b',
+            bgcolor: previewRowHeaderBg,
+            fontWeight: 500,
+            color: previewMutedText,
           }}
         >
           {Number(headerRowIndex) + 1}
@@ -483,8 +513,9 @@ const WorksheetSamplePreview = ({
               alignItems: 'center',
               borderRight: `1px solid ${borderColor}`,
               borderBottom: `1px solid ${borderColor}`,
-              bgcolor: '#fff',
-              fontWeight: 700,
+              bgcolor: previewCellBg,
+              color: isPreviewDark ? '#eef2f7' : theme.text,
+              fontWeight: 500,
               whiteSpace: 'pre-wrap',
               overflow: 'hidden',
               lineHeight: '16px',
@@ -503,9 +534,9 @@ const WorksheetSamplePreview = ({
             justifyContent: 'center',
             pt: 0.7,
             borderRight: `1px solid ${borderColor}`,
-            bgcolor: '#f8fafc',
-            fontWeight: 700,
-            color: '#64748b',
+            bgcolor: previewRowHeaderBg,
+            fontWeight: 500,
+            color: previewMutedText,
           }}
         >
           {sample.sourceRow || ''}
@@ -519,8 +550,10 @@ const WorksheetSamplePreview = ({
               px: 0.8,
               py: 0.7,
               borderRight: `1px solid ${borderColor}`,
-              bgcolor: cell.styleInfo?.red ? '#fff1f2' : '#fff',
-              color: cell.styleInfo?.red ? '#b91c1c' : theme.text,
+              bgcolor: cell.styleInfo?.red
+                ? (isPreviewDark ? 'rgba(127, 29, 29, 0.24)' : '#fff1f2')
+                : previewCellBg,
+              color: cell.styleInfo?.red ? (isPreviewDark ? '#fecaca' : '#b91c1c') : theme.text,
               textDecoration: cell.styleInfo?.strike ? 'line-through' : 'none',
               whiteSpace: 'pre-wrap',
               overflowWrap: 'anywhere',
@@ -7915,49 +7948,51 @@ const excelColumnName = (index) => {
 
 const SourcePreview = ({ headers, rows, getHeaderLabel = (header) => header, assemblyMatrix = null }) => {
   const { isDarkMode, tokens: themeTokens } = useThemeContext();
-  const tableTone = {
-    bg: themeTokens.table?.background || (isDarkMode ? 'rgba(6, 12, 24, 0.82)' : '#ffffff'),
-    header: themeTokens.table?.header || (isDarkMode ? '#111827' : '#f8fafc'),
-    text: themeTokens.text?.primary || (isDarkMode ? '#f8fafc' : '#0f172a'),
-    border: themeTokens.table?.line || (isDarkMode ? 'rgba(255,255,255,0.08)' : '#e1e6ec'),
-  };
+  const tableTone = buildFactWiseTableTone(buildFactWisePageTokens(isDarkMode, themeTokens));
   const previewHeaders = (headers || []).filter((header) => !fmt(header).startsWith('__'));
   return (
     <TableContainer
-      sx={{
-        mt: 1,
-        maxHeight: 320,
-        overflowX: 'auto',
-        overflowY: 'auto',
-        border: `1px solid ${tableTone.border}`,
-        bgcolor: tableTone.bg,
-        '&::-webkit-scrollbar': { height: 10, width: 10 },
-        '&::-webkit-scrollbar-thumb': {
-          borderRadius: 8,
-          bgcolor: isDarkMode ? 'rgba(148, 163, 184, 0.42)' : 'rgba(100, 116, 139, 0.38)',
-        },
-        '&::-webkit-scrollbar-track': {
-          bgcolor: isDarkMode ? 'rgba(15, 23, 42, 0.42)' : 'rgba(241, 245, 249, 0.8)',
-        },
-      }}
+      sx={factWiseTableContainerSx(tableTone, {
+        mt: 1.15,
+        maxHeight: 390,
+        borderRadius: '12px',
+        boxShadow: isDarkMode
+          ? '0 18px 42px -30px rgba(0,0,0,0.86)'
+          : '0 18px 40px -32px rgba(15,23,42,0.16)',
+      })}
     >
-      <Table stickyHeader size="small" sx={{ width: 'max-content', minWidth: '100%', tableLayout: 'fixed' }}>
+      <Table
+        stickyHeader
+        size="small"
+        sx={factWiseTableSx(tableTone, {
+          width: 'max-content',
+          minWidth: '100%',
+          tableLayout: 'fixed',
+          '& .MuiTableHead-root .MuiTableCell-root': {
+            bgcolor: isDarkMode ? '#24272f' : '#e5e9ef',
+            color: isDarkMode ? '#e5e7eb' : '#111827',
+            borderBottom: `1px solid ${isDarkMode ? 'rgba(148, 163, 184, 0.20)' : '#cfd6df'}`,
+            fontWeight: 550,
+            py: 1.35,
+          },
+          '& .MuiTableBody-root .MuiTableCell-root': {
+            py: 1.25,
+            lineHeight: 1.45,
+          },
+          '& .MuiTableBody-root .MuiTableRow-root': {
+            bgcolor: tableTone.row,
+          },
+        })}
+      >
         <TableHead>
           <TableRow>
             {previewHeaders.map((header) => (
               <TableCell
                 key={header}
-                sx={{
+                sx={factWiseTableHeaderCellSx(tableTone, {
                   minWidth: 170,
                   maxWidth: 260,
-                  fontWeight: 800,
-                  whiteSpace: 'nowrap',
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  bgcolor: tableTone.header,
-                  color: tableTone.text,
-                  borderColor: tableTone.border,
-                }}
+                })}
               >
                 {getHeaderLabel(header)}
               </TableCell>
@@ -7966,9 +8001,19 @@ const SourcePreview = ({ headers, rows, getHeaderLabel = (header) => header, ass
         </TableHead>
         <TableBody>
           {rows.map((row, index) => (
-            <TableRow key={`source-${index}`}>
+            <TableRow key={`source-${index}`} sx={factWiseTableRowSx(tableTone)}>
               {previewHeaders.map((header) => (
-                <TableCell key={header} sx={{ minWidth: 170, maxWidth: 260, whiteSpace: 'pre-line', overflow: 'hidden', textOverflow: 'ellipsis', color: tableTone.text, borderColor: tableTone.border, ...sourceCellStyleSx(row, header) }}>
+                <TableCell
+                  key={header}
+                  sx={factWiseTableBodyCellSx(tableTone, {
+                    minWidth: 170,
+                    maxWidth: 260,
+                    whiteSpace: 'pre-line',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    ...sourceCellStyleSx(row, header),
+                  })}
+                >
                   {displaySourceCellValue(row[header], header, assemblyMatrix)}
                 </TableCell>
               ))}
@@ -8203,21 +8248,17 @@ const mergeExistingMappingsWithNormalizer = (existingMappings = [], normalizerMa
 
 const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenceOnlyChange }) => {
   const { isDarkMode, tokens: themeTokens } = useThemeContext();
-  const tableTone = {
-    bg: themeTokens.table?.background || (isDarkMode ? 'rgba(6, 12, 24, 0.82)' : '#ffffff'),
-    header: themeTokens.table?.header || (isDarkMode ? '#111827' : '#f8fafc'),
-    text: themeTokens.text?.primary || (isDarkMode ? '#f8fafc' : '#0f172a'),
-    muted: themeTokens.text?.secondary || (isDarkMode ? '#94a3b8' : '#66717f'),
-    border: themeTokens.table?.line || (isDarkMode ? 'rgba(255,255,255,0.08)' : '#e1e6ec'),
-    focusBg: themeTokens.surface?.elevatedSoft || (isDarkMode ? '#0f172a' : '#ffffff'),
-    warningBg: themeTokens.state?.warningBg || (isDarkMode ? 'rgba(245, 158, 11, 0.14)' : '#fff8e5'),
-  };
+  const pageTokens = buildFactWisePageTokens(isDarkMode, themeTokens);
+  const tableTone = buildFactWiseTableTone(pageTokens);
+  const normalizedCancelButtonSx = factWiseCancelButtonSx(pageTokens);
+  const tableHeaderCellSx = (sx = {}) => factWiseTableHeaderCellSx(tableTone, sx);
+  const tableBodyCellSx = (sx = {}) => factWiseTableBodyCellSx(tableTone, sx);
   const buttonSx = {
     borderRadius: '999px',
     minHeight: 32,
     px: 1.6,
     fontSize: 12,
-    fontWeight: 800,
+    fontWeight: 600,
     textTransform: 'none',
     transition: 'transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease, background 0.18s ease',
     '&:hover': {
@@ -8238,12 +8279,10 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
   };
   const containedButtonSx = {
     ...buttonSx,
-    background: 'linear-gradient(135deg, #2563eb 0%, #0284c7 100%)',
-    boxShadow: '0 12px 24px -14px rgba(37, 99, 235, 0.82), inset 0 1px 0 rgba(255, 255, 255, 0.28)',
+    ...factWisePrimaryButtonSx,
     '&:hover': {
-      ...buttonSx['&:hover'],
-      background: 'linear-gradient(135deg, #1d4ed8 0%, #0369a1 100%)',
-      boxShadow: '0 16px 30px -16px rgba(37, 99, 235, 0.95), inset 0 1px 0 rgba(255, 255, 255, 0.38)',
+      ...factWisePrimaryButtonSx['&:hover'],
+      transform: 'translateY(-1px)',
     },
   };
   const columns = useMemo(() => {
@@ -8358,17 +8397,28 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
 
   return (
     <>
-    <Paper elevation={0} sx={{ mt: 1.5, p: 1.2, border: `1px solid ${tableTone.border}`, bgcolor: tableTone.focusBg }}>
+    <Paper
+      elevation={0}
+      sx={{
+        mt: 1.5,
+        p: 1.2,
+        border: `1px solid ${tableTone.headerBorder}`,
+        bgcolor: tableTone.bg,
+        borderRadius: '16px',
+        boxShadow: tableTone.shadow,
+      }}
+    >
       <Stack direction="row" alignItems="center" justifyContent="space-between" gap={1}>
         <Stack direction="row" alignItems="center" gap={1} flexWrap="wrap">
-          <Typography sx={{ fontSize: 13, fontWeight: 800 }}>Sheet view</Typography>
-          <Chip size="small" label={`${filteredRows.length} of ${rows.length} rows`} />
+          <Typography sx={{ fontSize: 13.5, fontWeight: 600, color: tableTone.text }}>Sheet view</Typography>
+          <Chip size="small" label={`${filteredRows.length} of ${rows.length} rows`} sx={{ height: 24, fontSize: 11.5, fontWeight: 500 }} />
           {lowConfidenceOnly && (
             <Chip
               size="small"
               color="warning"
               label="Low confidence only"
               onDelete={() => onLowConfidenceOnlyChange(false)}
+              sx={{ height: 24, fontSize: 11.5, fontWeight: 500 }}
             />
           )}
           {relationFilter !== 'all' && (
@@ -8377,6 +8427,7 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
               variant="outlined"
               label={activeRelationFilter?.label || 'Relation filter'}
               onDelete={() => setRelationFilter('all')}
+              sx={{ height: 24, fontSize: 11.5, fontWeight: 500 }}
             />
           )}
           {issueFilter !== 'all' && (
@@ -8385,6 +8436,7 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
               variant="outlined"
               label={activeIssueFilter?.label || 'Issue filter'}
               onDelete={() => setIssueFilter('all')}
+              sx={{ height: 24, fontSize: 11.5, fontWeight: 500 }}
             />
           )}
         </Stack>
@@ -8395,7 +8447,12 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
             startIcon={<VisibilityIcon />}
             onClick={() => setAllRowsOpen(true)}
             disabled={!filteredRows.length}
-            sx={outlineButtonSx}
+            sx={{
+              ...outlineButtonSx,
+              height: 40,
+              mt: { xs: 0, sm: '18px' },
+              alignSelf: { xs: 'center', sm: 'flex-start' },
+            }}
           >
             View all rows
           </Button>
@@ -8450,13 +8507,13 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
         </Stack>
       </Stack>
     </Paper>
-    <TableContainer sx={{ mt: 1, maxHeight: 520, border: `1px solid ${tableTone.border}`, bgcolor: tableTone.bg }}>
-      <Table stickyHeader size="small">
+    <TableContainer sx={factWiseTableContainerSx(tableTone, { mt: 1, maxHeight: 520 })}>
+      <Table stickyHeader size="small" sx={factWiseTableSx(tableTone)}>
         <TableHead>
           <TableRow>
-            <TableCell sx={{ fontWeight: 800, bgcolor: tableTone.header, color: tableTone.text, borderColor: tableTone.border, width: 56 }}>Actions</TableCell>
+            <TableCell sx={tableHeaderCellSx({ width: 62, textAlign: 'center' })}>Actions</TableCell>
             {visibleColumns.map((column) => (
-              <TableCell key={column.key} sx={{ fontWeight: 800, bgcolor: tableTone.header, color: tableTone.text, borderColor: tableTone.border, minWidth: column.width }}>
+              <TableCell key={column.key} sx={tableHeaderCellSx({ minWidth: column.width })}>
                 {column.key === 'confidence' ? (
                   <Stack direction="row" alignItems="center" gap={0.5}>
                     <span>{column.label}</span>
@@ -8487,14 +8544,24 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
               </TableCell>
             </TableRow>
           ) : filteredRows.slice(0, 250).map(({ row, originalIndex }) => (
-            <TableRow key={`${row.sourceRow}-${row.relation}-${originalIndex}`} sx={{ bgcolor: row.confidence < 70 ? tableTone.warningBg : 'inherit' }}>
-              <TableCell>
+            <TableRow
+              key={`${row.sourceRow}-${row.relation}-${originalIndex}`}
+              sx={factWiseTableRowSx(tableTone, { warning: row.confidence < 70 })}
+            >
+              <TableCell sx={tableBodyCellSx({ width: 62, textAlign: 'center', py: 0.95 })}>
                 <IconButton size="small" color="error" onClick={() => handleDeleteRow(originalIndex)}>
                   <DeleteOutlineIcon fontSize="small" />
                 </IconButton>
               </TableCell>
               {visibleColumns.map((column) => (
-                <TableCell key={column.key} sx={{ maxWidth: column.width + 40, p: column.editable ? 0.5 : 1, color: tableTone.text, borderColor: tableTone.border }}>
+                <TableCell
+                  key={column.key}
+                  sx={tableBodyCellSx({
+                    maxWidth: column.width + 40,
+                    p: column.editable ? 0.5 : undefined,
+                    minWidth: column.width,
+                  })}
+                >
                   {column.editable ? (
                     <Box
                       component="input"
@@ -8504,22 +8571,25 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
                         width: '100%',
                         minWidth: column.width,
                         border: '1px solid transparent',
-                        borderRadius: '3px',
+                        borderRadius: '8px',
                         bgcolor: 'transparent',
                         color: tableTone.text,
                         caretColor: tableTone.text,
                         px: 0.75,
                         py: 0.55,
                         font: 'inherit',
+                        fontSize: 13,
+                        fontWeight: 400,
                         '&:focus': {
                           bgcolor: tableTone.focusBg,
-                          borderColor: '#1976d2',
+                          borderColor: '#007aff',
+                          boxShadow: '0 0 0 2px rgba(0, 122, 255, 0.12)',
                           outline: 'none',
                         },
                       }}
                     />
                   ) : (
-                    <Typography sx={{ fontSize: 13, color: tableTone.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    <Typography sx={{ fontSize: 13, fontWeight: 400, color: tableTone.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                       {column.key === 'confidence' ? `${row[column.key]}%` : row[column.key]}
                     </Typography>
                   )}
@@ -8530,7 +8600,7 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
         </TableBody>
       </Table>
       {rows.length > 250 && (
-        <Box sx={{ p: 1, bgcolor: tableTone.header, borderTop: `1px solid ${tableTone.border}` }}>
+        <Box sx={{ p: 1, bgcolor: tableTone.header, borderTop: `1px solid ${tableTone.headerBorder}` }}>
           <Typography sx={{ fontSize: 12, color: tableTone.muted }}>Showing first 250 rows for prototype performance.</Typography>
         </Box>
       )}
@@ -8539,7 +8609,7 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
         <DialogTitle>
           <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ xs: 'flex-start', sm: 'center' }} gap={1}>
             <Box>
-              <Typography sx={{ fontSize: 18, fontWeight: 800 }}>All normalized rows</Typography>
+              <Typography sx={{ fontSize: 18, fontWeight: 600 }}>All normalized rows</Typography>
               <Typography sx={{ mt: 0.4, fontSize: 13, color: tableTone.muted }}>
                 Showing the same rows and visible columns as the current sheet view.
               </Typography>
@@ -8556,38 +8626,23 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
         </DialogTitle>
         <DialogContent>
           <TableContainer
-            sx={{
+            sx={factWiseTableContainerSx(tableTone, {
               maxHeight: '64vh',
-              overflow: 'auto',
-              border: `1px solid ${tableTone.border}`,
-              bgcolor: tableTone.bg,
-              '&::-webkit-scrollbar': { height: 10, width: 10 },
-              '&::-webkit-scrollbar-thumb': {
-                borderRadius: 8,
-                bgcolor: isDarkMode ? 'rgba(148, 163, 184, 0.42)' : 'rgba(100, 116, 139, 0.38)',
-              },
-            }}
+            })}
           >
-            <Table stickyHeader size="small" sx={{ width: 'max-content', minWidth: '100%', tableLayout: 'fixed' }}>
+            <Table stickyHeader size="small" sx={factWiseTableSx(tableTone, { width: 'max-content', minWidth: '100%', tableLayout: 'fixed' })}>
               <TableHead>
                 <TableRow>
-                  <TableCell sx={{ minWidth: 70, fontWeight: 800, bgcolor: tableTone.header, color: tableTone.text, borderColor: tableTone.border }}>
+                  <TableCell sx={tableHeaderCellSx({ minWidth: 70 })}>
                     #
                   </TableCell>
                   {visibleColumns.map((column) => (
                     <TableCell
                       key={column.key}
-                      sx={{
+                      sx={tableHeaderCellSx({
                         minWidth: column.width,
                         maxWidth: column.width + 80,
-                        fontWeight: 800,
-                        whiteSpace: 'nowrap',
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        bgcolor: tableTone.header,
-                        color: tableTone.text,
-                        borderColor: tableTone.border,
-                      }}
+                      })}
                     >
                       {column.key === 'confidence' ? (
                         <Stack direction="row" alignItems="center" gap={0.5}>
@@ -8603,22 +8658,23 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
               </TableHead>
               <TableBody>
                 {allRowsVisibleRows.map(({ row, originalIndex }, pageIndex) => (
-                  <TableRow key={`all-normalized-${originalIndex}`} sx={{ bgcolor: row.confidence < 70 ? tableTone.warningBg : 'inherit' }}>
-                    <TableCell sx={{ minWidth: 70, color: tableTone.text, borderColor: tableTone.border, fontWeight: 700 }}>
+                  <TableRow
+                    key={`all-normalized-${originalIndex}`}
+                    sx={factWiseTableRowSx(tableTone, { warning: row.confidence < 70 })}
+                  >
+                    <TableCell sx={tableBodyCellSx({ minWidth: 70, fontWeight: 500 })}>
                       {allRowsPage * allRowsPerPage + pageIndex + 1}
                     </TableCell>
                     {visibleColumns.map((column) => (
                       <TableCell
                         key={column.key}
-                        sx={{
+                        sx={tableBodyCellSx({
                           minWidth: column.width,
                           maxWidth: column.width + 80,
                           whiteSpace: 'nowrap',
                           overflow: 'hidden',
                           textOverflow: 'ellipsis',
-                          color: tableTone.text,
-                          borderColor: tableTone.border,
-                        }}
+                        })}
                       >
                         {column.key === 'confidence' ? `${row[column.key]}%` : row[column.key]}
                       </TableCell>
@@ -8662,7 +8718,7 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
       >
         <DialogTitle>Delete primary material?</DialogTitle>
         <DialogContent>
-          <Typography sx={{ fontSize: 14, color: '#536171' }}>
+          <Typography sx={{ fontSize: 14, color: tableTone.muted }}>
             This row is marked as Primary. If you delete it, the next alternate in this group will become Primary and the remaining alternates will be renumbered.
           </Typography>
           {pendingPrimaryGroupCount <= 1 && (
@@ -8672,7 +8728,7 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
           )}
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setPendingPrimaryDeleteIndex(null)}>Cancel</Button>
+          <Button onClick={() => setPendingPrimaryDeleteIndex(null)} sx={normalizedCancelButtonSx}>Cancel</Button>
           <Button color="error" variant="contained" onClick={confirmPrimaryDelete}>Delete</Button>
         </DialogActions>
       </Dialog>
@@ -9058,13 +9114,38 @@ const FieldPatternReviewTable = ({
       currentGroup.rows.push(row);
     }
   });
-  const clientScrollableWidth = Math.max(170, sourceColumns.length * 170);
-  const factwiseScrollableWidth = Math.max(105, 105 + (visibleFields.length * 150));
-  const reviewRowHeight = 96;
+  const reviewSourceRowWidth = 96;
+  const reviewSourceColumnWidth = 190;
+  const reviewActionColumnWidth = 92;
+  const reviewTypeColumnWidth = 116;
+  const reviewFactwiseColumnWidth = 168;
+  const clientScrollableWidth = Math.max(reviewSourceColumnWidth, sourceColumns.length * reviewSourceColumnWidth);
+  const factwiseScrollableWidth = Math.max(
+    reviewTypeColumnWidth,
+    reviewTypeColumnWidth + (visibleFields.length * reviewFactwiseColumnWidth)
+  );
+  const reviewRowHeight = 84;
+  const isReviewDark = ['#09090b', '#090b10', '#0f131a'].includes(theme?.page || theme?.pageTokens?.bg);
+  const reviewHeaderBg = isReviewDark ? '#1b1d23' : '#fff3c4';
+  const reviewSubHeaderBg = isReviewDark ? '#17181d' : '#fff8df';
+  const reviewFactwiseHeaderBg = isReviewDark ? 'rgba(45, 212, 191, 0.12)' : '#d9f8ed';
+  const reviewFactwiseSubHeaderBg = isReviewDark ? 'rgba(45, 212, 191, 0.075)' : '#eafbf5';
+  const reviewBodyBg = isReviewDark ? '#171b23' : '#ffffff';
+  const reviewAltRowBg = isReviewDark ? '#1b1d23' : '#fbfdff';
+  const reviewClientCellBg = isReviewDark ? '#171b23' : '#fffdf3';
+  const reviewClientAltCellBg = isReviewDark ? '#1b1d23' : '#fff9e8';
+  const reviewFactwiseCellBg = isReviewDark ? '#171b23' : '#f6fffb';
+  const reviewFactwiseAltCellBg = isReviewDark ? '#1b1d23' : '#effcf7';
+  const reviewLine = isReviewDark ? 'rgba(148, 163, 184, 0.14)' : '#dde5ef';
+  const reviewStrongLine = isReviewDark ? 'rgba(148, 163, 184, 0.22)' : '#cdd8e5';
+  const reviewDivider = isReviewDark ? 'rgba(45, 212, 191, 0.26)' : '#a9d9c9';
+  const reviewHeaderText = isReviewDark ? '#d7dee9' : '#4d5665';
+  const reviewClientText = isReviewDark ? '#d7dee9' : '#5b4a16';
+  const reviewFactwiseText = isReviewDark ? '#99f6e4' : '#087265';
   const warningRowOutline = (row) => {
     if (!row.needsReview) return {};
     return {
-      boxShadow: 'inset 0 1px #f0b35c, inset 0 -1px #f0b35c',
+      boxShadow: `inset 3px 0 0 ${isReviewDark ? '#fbbf24' : '#d97706'}`,
     };
   };
   const scrollPaneHorizontally = useCallback((event, scrollbarRef) => {
@@ -9075,22 +9156,33 @@ const FieldPatternReviewTable = ({
   }, []);
 
   return (
-    <Paper elevation={0} sx={{ border: `1px solid ${theme.border}`, borderRadius: '8px', overflow: 'hidden', bgcolor: theme.paper }}>
+    <Paper
+      elevation={0}
+      sx={{
+        border: `1px solid ${theme.borderStrong || theme.border}`,
+        borderRadius: '12px',
+        overflow: 'hidden',
+        bgcolor: theme.paper,
+        boxShadow: isReviewDark
+          ? '0 18px 44px -32px rgba(0,0,0,0.82)'
+          : '0 18px 42px -34px rgba(15,23,42,0.26)',
+      }}
+    >
       <Stack
         direction={{ xs: 'column', md: 'row' }}
         justifyContent="space-between"
         alignItems={{ xs: 'stretch', md: 'center' }}
-        gap={1}
-        sx={{ px: 1.5, py: 1.1, borderBottom: `1px solid ${theme.border}`, bgcolor: theme.paperSoft }}
+        gap={1.25}
+        sx={{ px: 1.6, py: 1.25, borderBottom: `1px solid ${theme.border}`, bgcolor: theme.paperSoft }}
       >
-        <Stack direction="row" alignItems="center" gap={0.75} flexWrap="wrap">
-          <Typography sx={{ fontSize: 14, fontWeight: 850, color: theme.text }}>All detected rows</Typography>
-          <Chip size="small" label={contract?.display?.reviewModeLabel || ''} sx={{ height: 25, fontSize: 11, fontWeight: 800, bgcolor: '#e4f3f0', color: '#0f6e63' }} />
-          <Chip size="small" variant="outlined" label={`${Number(contract?.summary?.sourceRowCount || 0)} source rows`} sx={{ height: 25, fontSize: 11, fontWeight: 800, bgcolor: theme.paper }} />
-          <Chip size="small" variant="outlined" label={`${filteredRows.length} displayed rows`} sx={{ height: 25, fontSize: 11, fontWeight: 800, bgcolor: theme.paper }} />
+        <Stack direction="row" alignItems="center" gap={0.8} flexWrap="wrap">
+          <Typography sx={{ fontSize: 14, fontWeight: 550, color: theme.text }}>All detected rows</Typography>
+          <Chip size="small" label={contract?.display?.reviewModeLabel || ''} sx={{ height: 25, fontSize: 11, fontWeight: 500, bgcolor: reviewFactwiseHeaderBg, color: reviewFactwiseText, border: `1px solid ${reviewLine}` }} />
+          <Chip size="small" variant="outlined" label={`${Number(contract?.summary?.sourceRowCount || 0)} source rows`} sx={{ height: 25, fontSize: 11, fontWeight: 500, bgcolor: theme.paper, color: theme.text, borderColor: theme.border }} />
+          <Chip size="small" variant="outlined" label={`${filteredRows.length} displayed rows`} sx={{ height: 25, fontSize: 11, fontWeight: 500, bgcolor: theme.paper, color: theme.text, borderColor: theme.border }} />
         </Stack>
         <Stack direction={{ xs: 'column', sm: 'row' }} alignItems="center" gap={1} sx={{ width: { xs: '100%', md: 'auto' } }}>
-          <FormControl size="small" sx={{ minWidth: 190 }}>
+          <FormControl size="small" sx={{ minWidth: { xs: '100%', sm: 190 } }}>
             <Select
               value={pairingMismatchFilter}
               onChange={(event) => {
@@ -9117,34 +9209,34 @@ const FieldPatternReviewTable = ({
                 <InputAdornment position="start"><SearchIcon sx={{ fontSize: 18, color: theme.muted }} /></InputAdornment>
               ),
             }}
-            sx={{ width: { xs: '100%', md: 340 } }}
+            sx={{ width: { xs: '100%', md: 360 } }}
           />
         </Stack>
       </Stack>
 
       <Box sx={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', minWidth: 0 }}>
-        <Box sx={{ minWidth: 0, borderRight: '2px solid #64748b' }}>
-          <Box sx={{ height: 36, display: 'flex', alignItems: 'center', justifyContent: 'center', bgcolor: '#e8eef6', color: '#334155', fontSize: 13, fontWeight: 850, borderBottom: '1px solid #94a3b8' }}>Client file</Box>
-          <Box sx={{ height: 40, display: 'grid', gridTemplateColumns: '88px minmax(0, 1fr)', bgcolor: '#f3f6fb', borderBottom: '1px solid #94a3b8' }}>
-            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', px: 1, color: '#334155', fontSize: 12, fontWeight: 850, borderRight: '1px solid #cbd5e1' }}>Source row</Box>
+        <Box sx={{ minWidth: 0, borderRight: `1px solid ${reviewDivider}` }}>
+          <Box sx={{ height: 38, display: 'flex', alignItems: 'center', justifyContent: 'center', bgcolor: reviewHeaderBg, color: reviewClientText, fontSize: 12.5, fontWeight: 550, borderBottom: `1px solid ${reviewStrongLine}` }}>Client file</Box>
+          <Box sx={{ height: 42, display: 'grid', gridTemplateColumns: `${reviewSourceRowWidth}px minmax(0, 1fr)`, bgcolor: reviewSubHeaderBg, borderBottom: `1px solid ${reviewStrongLine}` }}>
+            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', px: 1, color: reviewClientText, fontSize: 12, fontWeight: 500, borderRight: `1px solid ${reviewLine}` }}>Source row</Box>
             <Box sx={{ overflow: 'hidden' }}>
-              <Box sx={{ width: clientScrollableWidth, transform: `translateX(-${clientHorizontalScroll}px)`, display: 'grid', gridTemplateColumns: `repeat(${Math.max(1, sourceColumns.length)}, 170px)`, height: '100%' }}>
+              <Box sx={{ width: clientScrollableWidth, transform: `translateX(-${clientHorizontalScroll}px)`, display: 'grid', gridTemplateColumns: `repeat(${Math.max(1, sourceColumns.length)}, ${reviewSourceColumnWidth}px)`, height: '100%' }}>
                 {(sourceColumns.length ? sourceColumns : ['Customer values']).map((column) => (
-                  <Box key={`source-header-${column}`} title={column} sx={{ display: 'flex', alignItems: 'center', px: 1, color: '#334155', fontSize: 12, fontWeight: 850, borderRight: '1px solid #dbe3ee', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{column}</Box>
+                  <Box key={`source-header-${column}`} title={column} sx={{ display: 'flex', alignItems: 'center', px: 1.25, color: reviewClientText, fontSize: 12, fontWeight: 500, borderRight: `1px solid ${reviewLine}`, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{column}</Box>
                 ))}
               </Box>
             </Box>
           </Box>
         </Box>
         <Box sx={{ minWidth: 0 }}>
-          <Box sx={{ height: 36, display: 'flex', alignItems: 'center', justifyContent: 'center', bgcolor: '#e4f3f0', color: '#0f6e63', fontSize: 13, fontWeight: 850, borderBottom: '1px solid #94a3b8' }}>FactWise interpretation</Box>
-          <Box sx={{ height: 40, display: 'grid', gridTemplateColumns: '84px minmax(0, 1fr)', bgcolor: '#eef8f6', borderBottom: '1px solid #94a3b8' }}>
-            <Box sx={{ display: 'flex', alignItems: 'center', px: 1, color: '#0f6e63', fontSize: 12, fontWeight: 850, borderRight: '1px solid #c7dfda' }}>Actions</Box>
+          <Box sx={{ height: 38, display: 'flex', alignItems: 'center', justifyContent: 'center', bgcolor: reviewFactwiseHeaderBg, color: reviewFactwiseText, fontSize: 12.5, fontWeight: 550, borderBottom: `1px solid ${reviewStrongLine}` }}>FactWise interpretation</Box>
+          <Box sx={{ height: 42, display: 'grid', gridTemplateColumns: `${reviewActionColumnWidth}px minmax(0, 1fr)`, bgcolor: reviewFactwiseSubHeaderBg, borderBottom: `1px solid ${reviewStrongLine}` }}>
+            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', px: 1, color: reviewFactwiseText, fontSize: 12, fontWeight: 500, borderRight: `1px solid ${reviewLine}` }}>Actions</Box>
             <Box sx={{ overflow: 'hidden' }}>
-              <Box sx={{ width: factwiseScrollableWidth, transform: `translateX(-${factwiseHorizontalScroll}px)`, display: 'grid', gridTemplateColumns: `105px repeat(${visibleFields.length}, 150px)`, height: '100%' }}>
-                <Box sx={{ display: 'flex', alignItems: 'center', px: 1, color: '#0f6e63', fontSize: 12, fontWeight: 850, borderRight: '1px solid #d5ebe7' }}>Type</Box>
+              <Box sx={{ width: factwiseScrollableWidth, transform: `translateX(-${factwiseHorizontalScroll}px)`, display: 'grid', gridTemplateColumns: `${reviewTypeColumnWidth}px repeat(${visibleFields.length}, ${reviewFactwiseColumnWidth}px)`, height: '100%' }}>
+                <Box sx={{ display: 'flex', alignItems: 'center', px: 1.25, color: reviewFactwiseText, fontSize: 12, fontWeight: 500, borderRight: `1px solid ${reviewLine}` }}>Type</Box>
                 {visibleFields.map((field) => (
-                  <Box key={`factwise-header-${field.key}`} title={field.label} sx={{ display: 'flex', alignItems: 'center', px: 1, color: '#0f6e63', fontSize: 12, fontWeight: 850, borderRight: '1px solid #d5ebe7', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{field.label}{field.required ? ' *' : ''}</Box>
+                  <Box key={`factwise-header-${field.key}`} title={field.label} sx={{ display: 'flex', alignItems: 'center', px: 1.25, color: reviewFactwiseText, fontSize: 12, fontWeight: 500, borderRight: `1px solid ${reviewLine}`, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{field.label}{field.required ? ' *' : ''}</Box>
                 ))}
               </Box>
             </Box>
@@ -9152,7 +9244,7 @@ const FieldPatternReviewTable = ({
         </Box>
       </Box>
 
-      <Box sx={{ maxHeight: 'calc(100dvh - 333px)', overflowY: 'auto', overflowX: 'hidden', bgcolor: '#fff' }}>
+      <Box sx={{ maxHeight: 'calc(100dvh - 364px)', overflowY: 'auto', overflowX: 'hidden', bgcolor: reviewBodyBg }}>
         {visibleSourceGroups.map((group, groupIndex) => {
           const sourceValues = new Map((group.left || []).map((item) => [item.column, item.value]));
           const groupHeight = Math.max(reviewRowHeight, group.rows.length * reviewRowHeight);
@@ -9166,9 +9258,9 @@ const FieldPatternReviewTable = ({
                 minWidth: 0,
                 height: groupHeight,
                 position: 'relative',
-                borderLeft: '2px solid #94a3b8',
-                borderRight: '2px solid #94a3b8',
-                borderTop: groupIndex === 0 ? '2px solid #94a3b8' : 0,
+                borderLeft: `1px solid ${reviewStrongLine}`,
+                borderRight: `1px solid ${reviewStrongLine}`,
+                borderTop: groupIndex === 0 ? `1px solid ${reviewStrongLine}` : 0,
                 '&::after': {
                   content: '""',
                   position: 'absolute',
@@ -9176,16 +9268,16 @@ const FieldPatternReviewTable = ({
                   right: 0,
                   bottom: 0,
                   height: '1px',
-                  bgcolor: '#334155',
+                  bgcolor: reviewStrongLine,
                   zIndex: 4,
                   pointerEvents: 'none',
                 },
-                ...(groupNeedsReview ? { outline: '1px solid #f0b35c', outlineOffset: '-3px' } : {}),
+                ...(groupNeedsReview ? { bgcolor: isReviewDark ? 'rgba(251, 191, 36, 0.035)' : 'rgba(217, 119, 6, 0.035)' } : {}),
               }}
             >
-              <Box sx={{ minWidth: 0, display: 'grid', gridTemplateColumns: '88px minmax(0, 1fr)', borderRight: '2px solid #64748b', bgcolor: '#fff' }}>
-                <Stack alignItems="center" justifyContent="center" gap={0.25} sx={{ px: 0.5, borderRight: '1px solid #e2e8f0' }}>
-                  <Typography sx={{ color: '#1f2937', fontSize: 12, fontWeight: 850 }}>{group.sourceRow || '-'}</Typography>
+              <Box sx={{ minWidth: 0, display: 'grid', gridTemplateColumns: `${reviewSourceRowWidth}px minmax(0, 1fr)`, borderRight: `1px solid ${reviewDivider}`, bgcolor: reviewClientCellBg }}>
+                <Stack alignItems="center" justifyContent="center" gap={0.45} sx={{ px: 0.75, borderRight: `1px solid ${reviewLine}`, bgcolor: reviewClientCellBg }}>
+                  <Typography sx={{ color: theme.text, fontSize: 12.5, fontWeight: 500, lineHeight: 1 }}>{group.sourceRow || '-'}</Typography>
                   {group.rows[0]?.hasPairingMismatch && (
                     <Tooltip title={fmt(group.rows[0]?.warnings?.[0]?.message) || 'MPN and manufacturer counts do not match'}>
                       <Chip
@@ -9193,31 +9285,33 @@ const FieldPatternReviewTable = ({
                         color="warning"
                         variant="outlined"
                         label={`${group.rows[0]?.mpnCount || 0}/${group.rows[0]?.manufacturerCount || 0}`}
-                        sx={{ height: 20, fontSize: 10, fontWeight: 800 }}
+                        sx={{ height: 21, fontSize: 10.5, fontWeight: 500, borderRadius: '999px' }}
                       />
                     </Tooltip>
                   )}
                 </Stack>
                 <Box sx={{ minWidth: 0, overflow: 'hidden' }} onWheel={(event) => scrollPaneHorizontally(event, clientHorizontalScrollRef)}>
-                  <Box sx={{ width: clientScrollableWidth, height: '100%', transform: `translateX(-${clientHorizontalScroll}px)`, display: 'grid', gridTemplateColumns: `repeat(${Math.max(1, sourceColumns.length)}, 170px)` }}>
+                  <Box sx={{ width: clientScrollableWidth, height: '100%', transform: `translateX(-${clientHorizontalScroll}px)`, display: 'grid', gridTemplateColumns: `repeat(${Math.max(1, sourceColumns.length)}, ${reviewSourceColumnWidth}px)` }}>
                     {(sourceColumns.length ? sourceColumns : ['Customer values']).map((column) => (
-                      <Box key={`${group.key}-source-${column}`} sx={{ minWidth: 0, px: 1, py: 0.9, borderRight: '1px solid #edf1f5', color: '#1f2937', fontSize: 12, lineHeight: 1.45, overflow: 'auto', overflowWrap: 'anywhere' }}>{fmt(sourceValues.get(column))}</Box>
+                      <Box key={`${group.key}-source-${column}`} sx={{ minWidth: 0, px: 1.15, py: 0.85, borderRight: `1px solid ${reviewLine}`, bgcolor: groupIndex % 2 ? reviewClientAltCellBg : reviewClientCellBg, color: theme.text, fontSize: 12.25, fontWeight: 400, lineHeight: 1.35, overflow: 'auto', overflowWrap: 'anywhere' }}>{fmt(sourceValues.get(column))}</Box>
                     ))}
                   </Box>
                 </Box>
               </Box>
 
-              <Box sx={{ minWidth: 0, bgcolor: '#fff' }}>
+              <Box sx={{ minWidth: 0, bgcolor: reviewFactwiseCellBg }}>
                 {group.rows.map((row, rowIndex) => {
                   const isAlternate = /^Alternate\b/i.test(fmt(row.relation));
-                  const rowBackground = rowIndex === 0 ? '#fff' : '#f8fbff';
+                  const rowBackground = rowIndex === 0
+                    ? (groupIndex % 2 ? reviewFactwiseAltCellBg : reviewFactwiseCellBg)
+                    : reviewAltRowBg;
                   return (
-                    <Box key={row.id} sx={{ height: reviewRowHeight, display: 'grid', gridTemplateColumns: '84px minmax(0, 1fr)', bgcolor: rowBackground, borderBottom: rowIndex < group.rows.length - 1 ? '1px solid #e2e8f0' : 0, ...warningRowOutline(row) }}>
-                      <Stack direction="row" alignItems="center" justifyContent="center" gap={0.25} flexWrap="nowrap" sx={{ px: 0.35, py: 0.5, borderRight: '1px solid #e2e8f0', overflow: 'hidden' }}>
+                    <Box key={row.id} sx={{ height: reviewRowHeight, display: 'grid', gridTemplateColumns: `${reviewActionColumnWidth}px minmax(0, 1fr)`, bgcolor: rowBackground, borderBottom: rowIndex < group.rows.length - 1 ? `1px solid ${reviewLine}` : 0, ...warningRowOutline(row) }}>
+                      <Stack direction="row" alignItems="center" justifyContent="center" gap={0.5} flexWrap="nowrap" sx={{ px: 0.65, py: 0.6, borderRight: `1px solid ${reviewLine}`, overflow: 'hidden' }}>
                         {(row.patterns || []).map((pattern, patternIndex) => (
                           <Tooltip key={`${row.id}-pattern-${pattern.patternKey || patternIndex}`} title="Teach or re-teach this row's pattern">
                             <span>
-                              <IconButton size="small" disabled={loading || !pattern.teachContext?.sample} onClick={() => onReteach(pattern)} aria-label={`Teach pattern for ${row.relation}`} sx={{ width: 24, height: 24, color: '#1d4ed8', border: '1px solid #93c5fd', bgcolor: '#fff' }}>
+                              <IconButton size="small" disabled={loading || !pattern.teachContext?.sample} onClick={() => onReteach(pattern)} aria-label={`Teach pattern for ${row.relation}`} sx={{ width: 27, height: 27, color: isReviewDark ? '#93c5fd' : '#007aff', border: `1px solid ${isReviewDark ? 'rgba(147,197,253,0.34)' : 'rgba(0, 122, 255, 0.32)'}`, bgcolor: isReviewDark ? 'rgba(37, 99, 235, 0.12)' : '#ffffff', boxShadow: isReviewDark ? 'none' : '0 5px 14px -12px rgba(0, 122, 255, 0.42)' }}>
                                 <TuneIcon sx={{ fontSize: 14 }} />
                               </IconButton>
                             </span>
@@ -9226,7 +9320,7 @@ const FieldPatternReviewTable = ({
                         {rowIndex === 0 && allowAddAlternate && (
                           <Tooltip title="Add alternate">
                             <span>
-                              <IconButton size="small" disabled={!row.occurrenceId} onClick={() => onAddAlternate(row)} aria-label={`Add alternate to source row ${group.sourceRow}`} sx={{ width: 24, height: 24, color: '#334155' }}>
+                              <IconButton size="small" disabled={!row.occurrenceId} onClick={() => onAddAlternate(row)} aria-label={`Add alternate to source row ${group.sourceRow}`} sx={{ width: 27, height: 27, color: isReviewDark ? theme.muted : '#087265', '&:hover': { bgcolor: isReviewDark ? 'rgba(45, 212, 191, 0.10)' : '#d9f8ed' } }}>
                                 <AddIcon sx={{ fontSize: 14 }} />
                               </IconButton>
                             </span>
@@ -9234,15 +9328,15 @@ const FieldPatternReviewTable = ({
                         )}
                         {isAlternate && (
                           <Tooltip title={`Remove ${row.relation}`}>
-                            <IconButton size="small" color="error" onClick={() => onRemoveEntry(row)} aria-label={`Remove ${row.relation}`} sx={{ width: 24, height: 24 }}><DeleteOutlineIcon sx={{ fontSize: 14 }} /></IconButton>
+                            <IconButton size="small" color="error" onClick={() => onRemoveEntry(row)} aria-label={`Remove ${row.relation}`} sx={{ width: 26, height: 26 }}><DeleteOutlineIcon sx={{ fontSize: 14 }} /></IconButton>
                           </Tooltip>
                         )}
                       </Stack>
                       <Box sx={{ minWidth: 0, overflow: 'hidden' }} onWheel={(event) => scrollPaneHorizontally(event, factwiseHorizontalScrollRef)}>
-                        <Box sx={{ width: factwiseScrollableWidth, height: '100%', transform: `translateX(-${factwiseHorizontalScroll}px)`, display: 'grid', gridTemplateColumns: `105px repeat(${visibleFields.length}, 150px)` }}>
-                          <Box sx={{ px: 1, py: 0.9, color: isAlternate ? '#2563eb' : '#1f2937', fontSize: 12, fontWeight: 850, borderRight: '1px solid #edf1f5' }}>{row.relation}</Box>
+                        <Box sx={{ width: factwiseScrollableWidth, height: '100%', transform: `translateX(-${factwiseHorizontalScroll}px)`, display: 'grid', gridTemplateColumns: `${reviewTypeColumnWidth}px repeat(${visibleFields.length}, ${reviewFactwiseColumnWidth}px)` }}>
+                          <Box sx={{ px: 1.15, py: 0.85, color: isAlternate ? (isReviewDark ? '#93c5fd' : '#2563eb') : theme.text, fontSize: 12.25, fontWeight: 500, borderRight: `1px solid ${reviewLine}`, bgcolor: rowBackground }}>{row.relation}</Box>
                           {visibleFields.map((field) => (
-                            <Box key={`${row.id}-field-${field.key}`} component="textarea" value={row.fields?.[field.key] ?? ''} onChange={(event) => onValueChange(row, field.key, event.target.value)} aria-label={`${row.relation} ${field.label}`} rows={3} sx={{ display: 'block', width: '100%', height: reviewRowHeight - 2, m: 0, px: 1, py: 0.8, border: 0, borderRight: '1px solid #edf1f5', outline: 0, resize: 'none', overflow: 'auto', bgcolor: 'transparent', color: '#1f2937', font: 'inherit', fontSize: 12, lineHeight: 1.35, boxSizing: 'border-box', '&:focus': { boxShadow: 'inset 0 0 0 2px #60a5fa' } }} />
+                            <Box key={`${row.id}-field-${field.key}`} component="textarea" value={row.fields?.[field.key] ?? ''} onChange={(event) => onValueChange(row, field.key, event.target.value)} aria-label={`${row.relation} ${field.label}`} rows={2} sx={{ display: 'block', width: '100%', height: reviewRowHeight - 2, m: 0, px: 1.15, py: 0.8, border: 0, borderRight: `1px solid ${reviewLine}`, outline: 0, resize: 'none', overflow: 'auto', bgcolor: rowBackground, color: theme.text, font: 'inherit', fontSize: 12.25, fontWeight: 400, lineHeight: 1.35, boxSizing: 'border-box', '&:focus': { boxShadow: `inset 0 0 0 2px ${theme.pageTokens?.primary || '#007aff'}`, bgcolor: isReviewDark ? 'rgba(0, 122, 255, 0.08)' : 'rgba(0, 122, 255, 0.08)' } }} />
                           ))}
                         </Box>
                       </Box>
@@ -9253,27 +9347,69 @@ const FieldPatternReviewTable = ({
             </Box>
           );
         })}
-        {!visibleSourceGroups.length && <Box sx={{ py: 5, textAlign: 'center', color: '#64748b' }}>No rows match this search.</Box>}
+        {!visibleSourceGroups.length && <Box sx={{ py: 5, textAlign: 'center', color: theme.muted }}>No rows match this search.</Box>}
       </Box>
 
-      <Box sx={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', minWidth: 0, borderTop: '1px solid #cbd5e1' }}>
-        <Box ref={clientHorizontalScrollRef} onScroll={(event) => setClientHorizontalScroll(event.currentTarget.scrollLeft)} sx={{ overflowX: 'auto', overflowY: 'hidden', borderRight: '2px solid #64748b' }}>
-          <Box sx={{ width: clientScrollableWidth + 88, height: 10 }} />
+      <Box sx={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', minWidth: 0, borderTop: `1px solid ${reviewLine}`, bgcolor: isReviewDark ? '#17181d' : theme.paperSoft }}>
+        <Box ref={clientHorizontalScrollRef} onScroll={(event) => setClientHorizontalScroll(event.currentTarget.scrollLeft)} sx={{ overflowX: 'auto', overflowY: 'hidden', borderRight: `1px solid ${reviewDivider}` }}>
+          <Box sx={{ width: clientScrollableWidth + reviewSourceRowWidth, height: 10 }} />
         </Box>
         <Box ref={factwiseHorizontalScrollRef} onScroll={(event) => setFactwiseHorizontalScroll(event.currentTarget.scrollLeft)} sx={{ overflowX: 'auto', overflowY: 'hidden' }}>
-          <Box sx={{ width: factwiseScrollableWidth + 84, height: 10 }} />
+          <Box sx={{ width: factwiseScrollableWidth + reviewActionColumnWidth, height: 10 }} />
         </Box>
       </Box>
 
       {filteredRows.length > pageSize && (
-        <Stack direction="row" alignItems="center" justifyContent="center" gap={1} sx={{ p: 1 }}>
-          <ShadcnButton size="sm" variant="outline" disabled={safePage === 0} onClick={() => onPageChange(Math.max(0, safePage - 1))} className="h-9">
-            Previous
-          </ShadcnButton>
-          <Chip size="small" variant="outlined" label={`Rows ${pageStart + 1}-${Math.min(pageStart + visibleRows.length, filteredRows.length)} of ${filteredRows.length}`} sx={{ height: 30, fontSize: 11.5, fontWeight: 800 }} />
-          <ShadcnButton size="sm" variant="outline" disabled={safePage >= pageCount - 1} onClick={() => onPageChange(Math.min(pageCount - 1, safePage + 1))} className="h-9">
-            Next
-          </ShadcnButton>
+        <Stack
+          direction={{ xs: 'column', sm: 'row' }}
+          alignItems={{ xs: 'stretch', sm: 'center' }}
+          justifyContent="space-between"
+          gap={1}
+          sx={{
+            px: 1.5,
+            py: 1.05,
+            borderTop: `1px solid ${reviewLine}`,
+            bgcolor: isReviewDark ? '#17181d' : theme.paperSoft,
+          }}
+        >
+          <Typography sx={{ fontSize: 12, fontWeight: 400, color: theme.muted }}>
+            Rows {pageStart + 1}-{Math.min(pageStart + visibleRows.length, filteredRows.length)} of {filteredRows.length}
+          </Typography>
+          <Stack direction="row" alignItems="center" gap={0.75} sx={{ alignSelf: { xs: 'flex-start', sm: 'center' } }}>
+            <IconButton
+              size="small"
+              disabled={safePage === 0}
+              onClick={() => onPageChange(Math.max(0, safePage - 1))}
+              aria-label="Previous review page"
+              sx={{
+                width: 30,
+                height: 30,
+                border: `1px solid ${theme.border}`,
+                color: theme.text,
+                bgcolor: theme.paper,
+              }}
+            >
+              <ChevronLeftIcon sx={{ fontSize: 18 }} />
+            </IconButton>
+            <Typography sx={{ minWidth: 84, textAlign: 'center', fontSize: 12.5, fontWeight: 500, color: theme.text }}>
+              Page {safePage + 1} of {pageCount}
+            </Typography>
+            <IconButton
+              size="small"
+              disabled={safePage >= pageCount - 1}
+              onClick={() => onPageChange(Math.min(pageCount - 1, safePage + 1))}
+              aria-label="Next review page"
+              sx={{
+                width: 30,
+                height: 30,
+                border: `1px solid ${theme.border}`,
+                color: theme.text,
+                bgcolor: theme.paper,
+              }}
+            >
+              <ChevronRightIcon sx={{ fontSize: 18 }} />
+            </IconButton>
+          </Stack>
         </Stack>
       )}
     </Paper>
@@ -9420,68 +9556,102 @@ const withStagedPatternEdit = (staged, edit) => ([
 // orange = alternate, blue = group/key column, yellow = mixed-primary+alt
 // value packed in one cell. Rendered against a dark tooltip background so
 // the visual pattern reads at a glance without parsing the text.
-const EXAMPLE_ROLE_STYLES = {
-  header:  { bg: '#2d2d3a', color: '#ffffff', weight: 700 },
-  primary: { bg: '#1f4d2b', color: '#c8f7c8', weight: 600 },
-  alt:     { bg: '#4a2f1f', color: '#ffcfa8', weight: 500 },
-  key:     { bg: '#2a3a4d', color: '#a8d0ff', weight: 500 },
-  mixed:   { bg: '#4a3f1f', color: '#ffe89a', weight: 500 },
-  plain:   { bg: 'transparent', color: '#dddddd', weight: 400 },
-};
+const getExampleRoleStyles = (isDarkMode) => ({
+  header:  { bg: isDarkMode ? '#202631' : '#f6f8fb', color: isDarkMode ? '#f8fafc' : '#334155', weight: 550 },
+  primary: { bg: isDarkMode ? 'rgba(34, 197, 94, 0.18)' : '#ecfdf5', color: isDarkMode ? '#bbf7d0' : '#047857', weight: 500 },
+  alt:     { bg: isDarkMode ? 'rgba(245, 158, 11, 0.18)' : '#fff7ed', color: isDarkMode ? '#fde68a' : '#b45309', weight: 500 },
+  key:     { bg: isDarkMode ? 'rgba(0, 122, 255, 0.16)' : '#eff6ff', color: isDarkMode ? '#93c5fd' : '#1d4ed8', weight: 500 },
+  mixed:   { bg: isDarkMode ? 'rgba(234, 179, 8, 0.18)' : '#fefce8', color: isDarkMode ? '#fef08a' : '#a16207', weight: 500 },
+  plain:   { bg: 'transparent', color: isDarkMode ? '#d4d4d8' : '#475569', weight: 400 },
+});
 
 // Big, high-contrast option-example tooltip. Same shape drives every
 // dropdown that carries `option.example = { caption, rows: [[{text, role}]] }`.
 // Includes the option label as a heading, the mini-sheet, a "what to look
 // for" caption, and a colour legend for primary vs alternate.
 const OptionExampleTooltip = ({ option, children }) => {
+  const { isDarkMode, tokens: themeTokens } = useThemeContext();
+  const pageTokens = buildFactWisePageTokens(isDarkMode, themeTokens);
+  const exampleStyles = getExampleRoleStyles(isDarkMode);
+  const tooltipBg = pageTokens.surface;
+  const tooltipText = pageTokens.text;
+  const tooltipMuted = pageTokens.muted;
+  const tooltipBorder = pageTokens.strongBorder;
+  const tooltipLine = isDarkMode ? 'rgba(148, 163, 184, 0.24)' : '#dbe3ee';
   if (!option?.example) return children;
   return (
     <Tooltip
       arrow
       placement="right"
+      disableInteractive={false}
       enterDelay={100}
       leaveDelay={200}
       componentsProps={{
-        tooltip: {
+        popper: {
           sx: {
-            bgcolor: '#1e1e28',
-            color: '#ffffff',
-            maxWidth: 'none',
-            p: 2,
-            border: '1px solid #444',
-            boxShadow: 6,
+            zIndex: 1800,
           },
         },
-        arrow: { sx: { color: '#1e1e28' } },
+        tooltip: {
+          className: 'bom-normalizer-option-example-tooltip',
+          sx: {
+            bgcolor: `${tooltipBg} !important`,
+            backgroundColor: `${tooltipBg} !important`,
+            color: `${tooltipText} !important`,
+            maxWidth: 560,
+            p: 1.4,
+            border: `1px solid ${tooltipBorder} !important`,
+            borderRadius: '10px !important',
+            boxShadow: isDarkMode
+              ? '0 22px 56px -30px rgba(0,0,0,0.88), inset 0 1px 0 rgba(255,255,255,0.04)'
+              : '0 22px 50px -34px rgba(15,23,42,0.36), inset 0 1px 0 rgba(255,255,255,0.95)',
+            fontFamily: 'var(--fw-font-stack)',
+            fontSize: '12px !important',
+            fontWeight: '400 !important',
+            '& *': {
+              fontFamily: 'var(--fw-font-stack)',
+            },
+          },
+        },
+        arrow: {
+          sx: {
+            color: `${tooltipBg} !important`,
+            '&::before': {
+              border: `1px solid ${tooltipBorder} !important`,
+              backgroundColor: `${tooltipBg} !important`,
+            },
+          },
+        },
       }}
       title={
-        <Box sx={{ minWidth: 380 }}>
-          <Box sx={{ fontSize: 14, fontWeight: 700, mb: 0.5 }}>{option.label}</Box>
-          <Box sx={{ fontSize: 12, opacity: 0.75, mb: 1.5 }}>
-            Example of what your sheet looks like:
+        <Box sx={{ minWidth: 360, color: tooltipText }}>
+          <Box sx={{ fontSize: 13.5, fontWeight: 550, mb: 0.35 }}>{option.label}</Box>
+          <Box sx={{ fontSize: 11.75, fontWeight: 400, color: tooltipMuted, mb: 1 }}>
+            Example pattern
           </Box>
           <Box
             component="table"
             sx={{
               borderCollapse: 'collapse',
-              fontFamily: 'monospace',
-              fontSize: 13,
+              fontFamily: 'var(--fw-font-stack)',
+              fontSize: 12.5,
               width: '100%',
+              border: `1px solid ${tooltipLine}`,
             }}
           >
             <tbody>
               {option.example.rows.map((row, ri) => (
                 <tr key={ri}>
                   {row.map((cell, ci) => {
-                    const style = EXAMPLE_ROLE_STYLES[cell.role || 'plain'] || EXAMPLE_ROLE_STYLES.plain;
+                    const style = exampleStyles[cell.role || 'plain'] || exampleStyles.plain;
                     return (
                       <Box
                         key={ci}
                         component="td"
                         sx={{
-                          border: '1px solid #555',
+                          border: `1px solid ${tooltipLine}`,
                           px: 1.25,
-                          py: 0.75,
+                          py: 0.65,
                           fontWeight: style.weight,
                           bgcolor: style.bg,
                           color: style.color,
@@ -9497,24 +9667,35 @@ const OptionExampleTooltip = ({ option, children }) => {
             </tbody>
           </Box>
           {option.example.caption && (
-            <Box sx={{ mt: 1.5, fontSize: 12.5, lineHeight: 1.5, color: '#ffe07a' }}>
-              <strong>What to look for:</strong> {option.example.caption}
+            <Box sx={{ mt: 1.1, fontSize: 12, fontWeight: 400, lineHeight: 1.45, color: isDarkMode ? '#fde68a' : '#92400e' }}>
+              {option.example.caption}
             </Box>
           )}
-          <Box sx={{ display: 'flex', gap: 1.5, mt: 1.25, fontSize: 11, opacity: 0.85, flexWrap: 'wrap' }}>
+          <Box sx={{ display: 'flex', gap: 1.4, mt: 1.05, fontSize: 11, fontWeight: 400, color: tooltipMuted, flexWrap: 'wrap' }}>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-              <Box sx={{ width: 12, height: 12, bgcolor: '#1f4d2b', border: '1px solid #555' }} />
+              <Box sx={{ width: 10, height: 10, borderRadius: '3px', bgcolor: exampleStyles.primary.bg, border: `1px solid ${tooltipLine}` }} />
               <span>= Primary</span>
             </Box>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-              <Box sx={{ width: 12, height: 12, bgcolor: '#4a2f1f', border: '1px solid #555' }} />
+              <Box sx={{ width: 10, height: 10, borderRadius: '3px', bgcolor: exampleStyles.alt.bg, border: `1px solid ${tooltipLine}` }} />
               <span>= Alternate</span>
             </Box>
           </Box>
         </Box>
       }
     >
-      {children}
+      {React.cloneElement(children, {
+        onClick: (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          children.props?.onClick?.(event);
+        },
+        onMouseDown: (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          children.props?.onMouseDown?.(event);
+        },
+      })}
     </Tooltip>
   );
 };
@@ -9523,28 +9704,577 @@ const BomNormalizer = () => {
   const navigate = useNavigate();
   const location = useLocation();
   const { isDarkMode, tokens: themeTokens } = useThemeContext();
-  const normalizerTheme = useMemo(() => ({
-    page: themeTokens.surface?.page || (isDarkMode ? '#0b0f19' : '#f8fafc'),
-    header: isDarkMode ? 'rgba(11, 16, 26, 0.92)' : '#ffffff',
-    paper: themeTokens.surface?.cardSolid || (isDarkMode ? '#131823' : '#ffffff'),
-    paperSoft: themeTokens.surface?.elevatedSoft || (isDarkMode ? '#0f172a' : '#f8fafc'),
-    table: themeTokens.table?.background || (isDarkMode ? 'rgba(6, 12, 24, 0.82)' : '#ffffff'),
-    tableHeader: themeTokens.table?.header || (isDarkMode ? '#111827' : '#f8fafc'),
-    hover: themeTokens.table?.hover || (isDarkMode ? 'rgba(37, 99, 235, 0.08)' : '#eff6ff'),
-    text: themeTokens.text?.primary || (isDarkMode ? '#f8fafc' : '#0f172a'),
-    muted: themeTokens.text?.secondary || (isDarkMode ? '#94a3b8' : '#475569'),
-    disabled: themeTokens.text?.disabled || (isDarkMode ? '#64748b' : '#94a3b8'),
-    border: themeTokens.border?.default || (isDarkMode ? 'rgba(255,255,255,0.14)' : 'rgba(226, 232, 240, 0.8)'),
-    borderStrong: themeTokens.border?.strong || (isDarkMode ? 'rgba(255,255,255,0.2)' : 'rgba(203, 213, 225, 0.8)'),
-    warningBg: themeTokens.state?.warningBg || (isDarkMode ? 'rgba(245, 158, 11, 0.14)' : '#fff8e5'),
-    panelGradient: isDarkMode
-      ? 'linear-gradient(145deg, rgba(20, 27, 44, 0.94) 0%, rgba(11, 16, 26, 0.98) 100%)'
-      : 'linear-gradient(145deg, rgba(255, 255, 255, 0.96) 0%, rgba(248, 250, 252, 0.92) 100%)',
-    panelSoftGradient: isDarkMode
-      ? 'linear-gradient(145deg, rgba(15, 23, 42, 0.76) 0%, rgba(8, 13, 24, 0.86) 100%)'
-      : 'linear-gradient(145deg, rgba(255, 255, 255, 0.9) 0%, rgba(241, 245, 249, 0.82) 100%)',
-  }), [isDarkMode, themeTokens]);
-  const [mousePos, setMousePos] = useState({ x: 72, y: 22 });
+  const normalizerTheme = useMemo(() => {
+    const pageTokens = buildFactWisePageTokens(isDarkMode, themeTokens);
+    return {
+      page: pageTokens.bg,
+      header: isDarkMode ? 'rgba(15, 19, 26, 0.92)' : 'rgba(255, 255, 255, 0.82)',
+      paper: pageTokens.surface,
+      paperSoft: pageTokens.surfaceSoft,
+      table: pageTokens.table,
+      tableHeader: pageTokens.tableHeader,
+      hover: pageTokens.rowHover,
+      text: pageTokens.text,
+      muted: pageTokens.muted,
+      disabled: pageTokens.disabled,
+      border: pageTokens.border,
+      borderStrong: pageTokens.strongBorder,
+      warningBg: pageTokens.warningBg,
+      panelGradient: pageTokens.panelGradient,
+      panelSoftGradient: pageTokens.panelSoftGradient,
+      pageTokens,
+    };
+  }, [isDarkMode, themeTokens]);
+  const normalizerTableTone = useMemo(
+    () => buildFactWiseTableTone(normalizerTheme.pageTokens),
+    [normalizerTheme.pageTokens]
+  );
+  const snackbarAlertSx = factWiseToastAlertSx(normalizerTheme.pageTokens, 'success', {
+    minHeight: 38,
+    maxWidth: 'min(360px, calc(100vw - 40px))',
+    boxShadow: isDarkMode
+      ? '0 18px 44px -24px rgba(0,0,0,0.82)'
+      : '0 18px 42px -28px rgba(15,23,42,0.24)',
+    sx: {
+      width: 'fit-content',
+    },
+  });
+  const cancelButtonSx = factWiseCancelButtonSx(normalizerTheme.pageTokens);
+  const normalizerFieldSx = factWiseFieldSx(normalizerTheme.pageTokens, { height: 36 });
+  const normalizerSelectSx = factWiseSelectFieldSx(normalizerTheme.pageTokens, { height: 36 });
+  const normalizerInputLabelSx = factWiseInputLabelSx(normalizerTheme.pageTokens);
+  const normalizerSelectMenuSx = {
+    maxWidth: 'calc(100vw - 32px)',
+    maxHeight: 220,
+    backgroundColor: normalizerTheme.pageTokens.surface,
+    color: normalizerTheme.pageTokens.text,
+    border: `1px solid ${normalizerTheme.pageTokens.strongBorder}`,
+    borderRadius: '8px',
+    boxShadow: isDarkMode
+      ? '0 18px 42px -26px rgba(0,0,0,0.72)'
+      : '0 18px 38px -28px rgba(15,23,42,0.24)',
+  };
+  const uploadedFileBadgeSx = {
+    height: 32,
+    px: 1.15,
+    borderRadius: '999px',
+    border: isDarkMode ? '1px solid rgba(74, 222, 128, 0.30)' : '1px solid #bbf7d0',
+    bgcolor: isDarkMode ? 'rgba(20, 83, 45, 0.26)' : '#f0fdf4',
+    color: isDarkMode ? '#bbf7d0' : '#166534',
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 0.65,
+    minWidth: 0,
+    maxWidth: { xs: '100%', sm: 260 },
+    boxShadow: isDarkMode ? 'none' : '0 10px 22px -18px rgba(22, 101, 52, 0.45)',
+  };
+  const sourcePreviewChipSx = {
+    height: 24,
+    fontSize: 11.5,
+    fontWeight: 500,
+    borderRadius: '999px',
+    bgcolor: isDarkMode ? 'rgba(20, 25, 35, 0.96)' : normalizerTheme.paperSoft,
+    backgroundColor: `${isDarkMode ? 'rgba(20, 25, 35, 0.96)' : normalizerTheme.paperSoft} !important`,
+    color: `${isDarkMode ? '#dbe4ef' : normalizerTheme.text} !important`,
+    border: `1px solid ${isDarkMode ? 'rgba(148, 163, 184, 0.28)' : normalizerTheme.borderStrong}`,
+    '& .MuiChip-label': {
+      px: 1,
+    },
+  };
+  const visualTeachSpanSurfaceSx = {
+    display: 'flex',
+    flexWrap: 'wrap',
+    alignItems: 'flex-start',
+    alignContent: 'flex-start',
+    gap: '5px 4px',
+    p: { xs: 1.15, sm: 1.35 },
+    minHeight: 112,
+    maxHeight: { xs: 210, sm: 238 },
+    overflowY: 'auto',
+    borderRadius: '10px',
+    border: `1px solid ${normalizerTheme.borderStrong}`,
+    bgcolor: isDarkMode ? '#111827' : '#f8fbff',
+    boxShadow: isDarkMode
+      ? 'inset 0 1px 0 rgba(255,255,255,0.05), 0 14px 28px -28px rgba(0,0,0,0.9)'
+      : '0 14px 30px -26px rgba(15,23,42,0.32), inset 0 1px 0 rgba(255,255,255,0.98)',
+    fontFamily: 'var(--fw-font-stack)',
+    fontSize: { xs: 15, sm: 16 },
+    fontWeight: 400,
+    lineHeight: 1.25,
+    color: normalizerTheme.text,
+    cursor: 'default',
+    userSelect: 'none',
+  };
+  const visualTeachRoleTone = (role, roleStyle = {}) => {
+    if (!role) return roleStyle;
+    const lightBgByRole = {
+      cpn: '#f1e9ff',
+      mpn: '#e7f1ff',
+      manufacturer: '#fff4bf',
+      description: '#e0f6ff',
+      quantity: '#dcfce7',
+      uom: '#d7fbf2',
+      level: '#ffedd5',
+      parent: '#ffe4ec',
+      notes: '#e9edff',
+      internalNotes: '#f4e8ff',
+      alternateList: '#d7fbf2',
+      insertionMarker: '#fff0b8',
+      groupSeparator: '#ffe0e0',
+      ignore: '#eef2f7',
+    };
+    const lightColorByRole = {
+      cpn: '#6d28d9',
+      mpn: '#075fce',
+      manufacturer: '#995c00',
+      description: '#0369a1',
+      quantity: '#047857',
+      uom: '#0f766e',
+      level: '#9a3412',
+      parent: '#be123c',
+      notes: '#3730a3',
+      internalNotes: '#6b21a8',
+      alternateList: '#0f766e',
+      insertionMarker: '#a16207',
+      groupSeparator: '#b91c1c',
+      ignore: '#475569',
+    };
+    const darkBgByRole = {
+      cpn: 'rgba(167, 139, 250, 0.28)',
+      mpn: 'rgba(59, 130, 246, 0.30)',
+      manufacturer: 'rgba(251, 191, 36, 0.30)',
+      description: 'rgba(56, 189, 248, 0.28)',
+      quantity: 'rgba(52, 211, 153, 0.26)',
+      uom: 'rgba(45, 212, 191, 0.26)',
+      level: 'rgba(251, 146, 60, 0.28)',
+      parent: 'rgba(244, 114, 182, 0.28)',
+      notes: 'rgba(129, 140, 248, 0.28)',
+      internalNotes: 'rgba(192, 132, 252, 0.28)',
+      alternateList: 'rgba(45, 212, 191, 0.28)',
+      insertionMarker: 'rgba(251, 191, 36, 0.30)',
+      groupSeparator: 'rgba(248, 113, 113, 0.30)',
+      ignore: 'rgba(148, 163, 184, 0.18)',
+    };
+    const darkColorByRole = {
+      cpn: '#c4b5fd',
+      mpn: '#93c5fd',
+      manufacturer: '#fcd34d',
+      description: '#7dd3fc',
+      quantity: '#86efac',
+      uom: '#99f6e4',
+      level: '#fdba74',
+      parent: '#fda4af',
+      notes: '#a5b4fc',
+      internalNotes: '#d8b4fe',
+      alternateList: '#99f6e4',
+      insertionMarker: '#fcd34d',
+      groupSeparator: '#fecaca',
+      ignore: '#cbd5e1',
+    };
+    const bgByRole = isDarkMode ? darkBgByRole : lightBgByRole;
+    const colorByRole = isDarkMode ? darkColorByRole : lightColorByRole;
+    return {
+      ...roleStyle,
+      bg: bgByRole[role] || (isDarkMode ? 'rgba(0, 122, 255, 0.24)' : 'rgba(0, 122, 255, 0.12)'),
+      color: colorByRole[role] || roleStyle.color || normalizerTheme.text,
+    };
+  };
+  const visualTeachCharacterSx = (role, roleStyle = {}, selected = false) => {
+    const tone = visualTeachRoleTone(role, roleStyle);
+    return ({
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flex: '0 0 auto',
+    minWidth: 24,
+    height: 32,
+    px: 0.45,
+    borderRadius: '7px',
+    border: `1px solid ${
+      selected
+        ? normalizerTheme.pageTokens.primary
+        : role
+          ? (isDarkMode ? 'rgba(255,255,255,0.16)' : 'rgba(15,23,42,0.10)')
+          : (isDarkMode ? 'rgba(148,163,184,0.12)' : 'rgba(148,163,184,0.18)')
+    }`,
+    bgcolor: selected
+      ? (isDarkMode ? 'rgba(0, 122, 255, 0.34)' : 'rgba(0, 122, 255, 0.18)')
+      : (role ? tone.bg : (isDarkMode ? 'rgba(31, 41, 55, 0.9)' : '#ffffff')),
+    color: tone.color || normalizerTheme.text,
+    fontWeight: role ? 600 : 500,
+    fontSize: 16,
+    letterSpacing: 0,
+    cursor: 'pointer',
+    boxShadow: selected
+      ? `0 0 0 1px ${normalizerTheme.pageTokens.primary}, 0 12px 22px -16px rgba(0, 122, 255, 0.8)`
+      : (role && !isDarkMode ? '0 8px 16px -15px rgba(15,23,42,0.24)' : 'none'),
+    outline: selected ? `1px solid ${normalizerTheme.pageTokens.primary}` : 'none',
+    outlineOffset: '1px',
+    transition: 'background-color 120ms ease, border-color 120ms ease, box-shadow 120ms ease, transform 120ms ease',
+    '&:hover': {
+      transform: 'translateY(-1px)',
+      borderColor: selected
+        ? normalizerTheme.pageTokens.primary
+        : (isDarkMode ? 'rgba(147, 197, 253, 0.42)' : 'rgba(0, 122, 255, 0.32)'),
+      bgcolor: selected
+        ? (isDarkMode ? 'rgba(0, 122, 255, 0.40)' : 'rgba(0, 122, 255, 0.22)')
+        : (role ? tone.bg : (isDarkMode ? 'rgba(55, 65, 81, 0.98)' : '#eef6ff')),
+    },
+  });
+  };
+  const visualTeachRoleButtonSx = (role) => {
+    const darkBgByRole = {
+      cpn: '#2f235f',
+      mpn: '#143c70',
+      manufacturer: '#4b3208',
+      description: '#0b4662',
+      quantity: '#0d4934',
+      uom: '#064a43',
+      level: '#4d2d13',
+      parent: '#552033',
+      notes: '#262d66',
+      internalNotes: '#3c1f5c',
+      alternateList: '#064a43',
+      insertionMarker: '#4d3d05',
+      groupSeparator: '#542126',
+      ignore: '#293241',
+    };
+    const darkColorByRole = {
+      cpn: '#ddd6fe',
+      mpn: '#bfdbfe',
+      manufacturer: '#fbbf24',
+      description: '#bae6fd',
+      quantity: '#bbf7d0',
+      uom: '#a7f3d0',
+      level: '#fed7aa',
+      parent: '#fb7185',
+      notes: '#c7d2fe',
+      internalNotes: '#e9d5ff',
+      alternateList: '#5eead4',
+      insertionMarker: '#fde047',
+      groupSeparator: '#fca5a5',
+      ignore: '#e2e8f0',
+    };
+    const lightBgByRole = {
+      manufacturer: '#fff3c4',
+      parent: '#ffe4ec',
+      alternateList: '#d8fff7',
+      insertionMarker: '#fff5bf',
+      groupSeparator: '#ffe2e2',
+      ignore: '#f1f5f9',
+    };
+    const lightColorByRole = {
+      manufacturer: '#b45309',
+      parent: '#be123c',
+      alternateList: '#047c6e',
+      insertionMarker: '#a16207',
+      groupSeparator: '#b91c1c',
+      ignore: '#475569',
+    };
+    const bg = isDarkMode
+      ? (darkBgByRole[role.key] || '#12345c')
+      : (lightBgByRole[role.key] || role.bg);
+    const color = isDarkMode
+      ? (darkColorByRole[role.key] || role.color)
+      : (lightColorByRole[role.key] || role.color);
+    const border = isDarkMode ? color : role.color;
+    return {
+      minHeight: 34,
+      px: 1.55,
+      borderRadius: '999px',
+      borderColor: `${border} !important`,
+      color: `${color} !important`,
+      bgcolor: bg,
+      backgroundColor: `${bg} !important`,
+      fontSize: 12,
+      fontWeight: 600,
+      lineHeight: 1,
+      boxShadow: isDarkMode ? '0 8px 18px -18px rgba(0,0,0,0.85)' : '0 8px 18px -16px rgba(15,23,42,0.26)',
+      '&:hover': {
+        borderColor: `${border} !important`,
+        bgcolor: bg,
+        backgroundColor: `${bg} !important`,
+        filter: isDarkMode ? 'brightness(1.16) saturate(1.15)' : 'brightness(1.02) saturate(1.08)',
+      },
+      '&.Mui-disabled': {
+        borderColor: `${border} !important`,
+        bgcolor: bg,
+        backgroundColor: `${bg} !important`,
+        color: `${color} !important`,
+        opacity: isDarkMode ? 0.94 : 0.86,
+      },
+    };
+  };
+  const visualTeachLightCardSx = {
+    border: `1px solid ${isDarkMode ? normalizerTheme.border : '#dbe4ef'}`,
+    bgcolor: isDarkMode ? normalizerTheme.paper : '#ffffff',
+    boxShadow: isDarkMode ? 'none' : '0 14px 34px -30px rgba(15,23,42,0.32)',
+  };
+  const visualTeachSoftCardSx = {
+    border: `1px solid ${isDarkMode ? normalizerTheme.border : '#dbe4ef'}`,
+    bgcolor: isDarkMode ? normalizerTheme.paperSoft : '#f8fbff',
+    boxShadow: isDarkMode ? 'none' : '0 12px 30px -28px rgba(15,23,42,0.24)',
+  };
+  const darkOutlineButtonStyle = isDarkMode
+    ? {
+        backgroundColor: '#151a24',
+        color: '#e5e7eb',
+        borderColor: 'rgba(148, 163, 184, 0.34)',
+        boxShadow: 'none',
+      }
+    : undefined;
+  const darkOutlineButtonClass = isDarkMode
+    ? 'hover:!bg-[#1c2431] hover:!text-white hover:!border-[rgba(148,163,184,0.48)]'
+    : '';
+  const sourcePreviewStats = (blockLabel = 'BOM tables') => ([
+    { key: 'columns', label: `${visibleSourceHeaders.length} columns` },
+    {
+      key: 'rows',
+      label: quantityVariantFilterActive
+        ? `${previewDataRows.length} shown / ${dataRows.length} included rows`
+        : (sourceEndRow ? `${dataRows.length} included / ${sourceDataRows.length} detected rows` : `${dataRows.length} data rows`),
+    },
+    multiBlockSummary ? { key: 'blocks', label: `${multiBlockSummary.blockCount} ${blockLabel}`, color: 'success', variant: 'outlined' } : null,
+    sourceEndRow ? { key: 'cutoff', label: `Using rows through ${sourceEndRow}`, color: 'info', variant: 'outlined' } : null,
+    sourceLimitActive ? { key: 'excluded', label: `${sourceRowsExcludedByLimit} rows excluded`, color: 'warning', variant: 'outlined' } : null,
+    { key: 'header', label: sheetScope === 'single' ? `Header row ${headerRowIndex + 1}` : `${selectedSheetNames.length} sheets merged` },
+  ]).filter(Boolean);
+  const renderSourcePreviewActions = (blockLabel) => (
+    <Stack direction="row" alignItems="center" justifyContent="flex-end" gap={0.75} flexWrap="wrap" sx={{ minWidth: 0 }}>
+      {sourcePreviewStats(blockLabel).map((chip) => (
+        <Chip
+          key={chip.key}
+          size="small"
+          color={chip.color}
+          variant={chip.variant}
+          label={chip.label}
+          sx={sourcePreviewChipSx}
+        />
+      ))}
+      <ShadcnButton
+        size="sm"
+        variant="outline"
+        onClick={() => setSourceGridOpen(true)}
+        disabled={!sourceGridRows.length}
+        className={`h-8 ${darkOutlineButtonClass}`}
+        style={darkOutlineButtonStyle}
+      >
+        <VisibilityIcon fontSize="inherit" />
+        View all rows
+      </ShadcnButton>
+    </Stack>
+  );
+  const normalizerGlobalFieldStyles = {
+    '.bom-normalizer-page, .MuiDialog-root': {
+      '--fw-bom-surface': normalizerTheme.pageTokens.surface,
+      '--fw-bom-surface-soft': normalizerTheme.pageTokens.surfaceSoft,
+      '--fw-bom-border': normalizerTheme.pageTokens.border,
+      '--fw-bom-text': normalizerTheme.pageTokens.text,
+      '--fw-bom-muted': normalizerTheme.pageTokens.muted,
+    },
+    '.bom-normalizer-page .MuiPaper-root, .MuiDialog-root .MuiPaper-root': {
+      backgroundImage: 'none',
+    },
+    '.bom-normalizer-page .MuiButton-root, .MuiDialog-root .MuiButton-root': {
+      fontWeight: '500 !important',
+      letterSpacing: '0 !important',
+      textTransform: 'none !important',
+    },
+    '.bom-normalizer-page .MuiChip-root, .MuiDialog-root .MuiChip-root': {
+      fontWeight: '500 !important',
+      letterSpacing: '0 !important',
+    },
+    '.bom-normalizer-page .MuiTableCell-head, .MuiDialog-root .MuiTableCell-head': {
+      backgroundColor: `${normalizerTheme.pageTokens.tableHeader} !important`,
+      color: `${normalizerTheme.pageTokens.text} !important`,
+      borderColor: `${normalizerTheme.pageTokens.tableLine} !important`,
+      fontSize: '12.5px !important',
+      fontWeight: '550 !important',
+      letterSpacing: '0 !important',
+    },
+    '.bom-normalizer-page .MuiTableCell-body, .MuiDialog-root .MuiTableCell-body': {
+      backgroundColor: 'transparent',
+      color: `${normalizerTheme.pageTokens.text} !important`,
+      borderColor: `${normalizerTheme.pageTokens.rowLine} !important`,
+      fontSize: '12.5px !important',
+      fontWeight: '400 !important',
+      letterSpacing: '0 !important',
+    },
+    '.bom-normalizer-page .MuiTableRow-root:hover .MuiTableCell-body, .MuiDialog-root .MuiTableRow-root:hover .MuiTableCell-body': {
+      backgroundColor: `${normalizerTheme.pageTokens.rowHover} !important`,
+    },
+    '.bom-normalizer-page .MuiTextField-root, .MuiDialog-root .MuiTextField-root': {
+      ...normalizerFieldSx,
+      gap: '5px',
+      '& .MuiInputLabel-root': {
+        ...normalizerFieldSx['& .MuiInputLabel-root'],
+        marginBottom: '0 !important',
+      },
+      '& .MuiInputBase-root': {
+        ...normalizerFieldSx['& .MuiInputBase-root'],
+        marginTop: '0 !important',
+      },
+    },
+    '.bom-normalizer-page .MuiFormControl-root:not(.MuiTextField-root), .MuiDialog-root .MuiFormControl-root:not(.MuiTextField-root)': {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '5px',
+      '& .MuiInputLabel-root': {
+        ...normalizerInputLabelSx,
+        mb: '0 !important',
+      },
+      '& .MuiInputBase-root': {
+        ...normalizerSelectSx,
+        marginTop: '0 !important',
+      },
+      '& .MuiFormHelperText-root': {
+        color: normalizerTheme.muted,
+        fontSize: '11px',
+        fontWeight: 400,
+        lineHeight: 1.35,
+        ml: 0,
+        mt: '4px',
+      },
+    },
+    '.bom-normalizer-page .MuiAutocomplete-root .MuiInputBase-root, .MuiDialog-root .MuiAutocomplete-root .MuiInputBase-root': {
+      minHeight: '36px !important',
+      height: '36px !important',
+      py: '0 !important',
+      pr: '36px !important',
+    },
+    '.bom-normalizer-page .MuiAutocomplete-root .MuiInputBase-input, .MuiDialog-root .MuiAutocomplete-root .MuiInputBase-input': {
+      py: '0 !important',
+      fontSize: '12.5px',
+      fontWeight: 400,
+      lineHeight: 1.25,
+    },
+    '.bom-normalizer-page .MuiAutocomplete-endAdornment, .MuiDialog-root .MuiAutocomplete-endAdornment': {
+      top: '50%',
+      transform: 'translateY(-50%)',
+      right: '8px !important',
+    },
+    '.bom-normalizer-page .MuiAlert-root.MuiAlert-standardInfo, .MuiDialog-root .MuiAlert-root.MuiAlert-standardInfo': {
+      ...factWiseAlertSx(normalizerTheme.pageTokens, 'info', {
+        borderRadius: '10px',
+        minHeight: 36,
+        py: 0.55,
+        px: 1.15,
+        fontSize: '12.5px',
+        iconSize: 17,
+        boxShadow: isDarkMode ? 'none' : '0 12px 28px -24px rgba(15, 23, 42, 0.22)',
+      }),
+    },
+    '.bom-normalizer-page .MuiAlert-root.MuiAlert-standardSuccess, .MuiDialog-root .MuiAlert-root.MuiAlert-standardSuccess': {
+      ...factWiseAlertSx(normalizerTheme.pageTokens, 'success', {
+        borderRadius: '10px',
+        minHeight: 36,
+        py: 0.55,
+        px: 1.15,
+        fontSize: '12.5px',
+        iconSize: 17,
+        boxShadow: isDarkMode ? 'none' : '0 12px 28px -24px rgba(15, 23, 42, 0.22)',
+      }),
+    },
+    '.bom-normalizer-page .MuiAlert-root.MuiAlert-standardWarning, .MuiDialog-root .MuiAlert-root.MuiAlert-standardWarning': {
+      ...factWiseAlertSx(normalizerTheme.pageTokens, 'warning', {
+        borderRadius: '10px',
+        minHeight: 36,
+        py: 0.55,
+        px: 1.15,
+        fontSize: '12.5px',
+        iconSize: 17,
+        boxShadow: isDarkMode ? 'none' : '0 12px 28px -24px rgba(15, 23, 42, 0.22)',
+      }),
+    },
+    '.bom-normalizer-page .MuiAlert-root.MuiAlert-standardError, .MuiDialog-root .MuiAlert-root.MuiAlert-standardError': {
+      ...factWiseAlertSx(normalizerTheme.pageTokens, 'error', {
+        borderRadius: '10px',
+        minHeight: 36,
+        py: 0.55,
+        px: 1.15,
+        fontSize: '12.5px',
+        iconSize: 17,
+        boxShadow: isDarkMode ? 'none' : '0 12px 28px -24px rgba(15, 23, 42, 0.22)',
+      }),
+    },
+    '.MuiMenu-paper, .MuiAutocomplete-paper': {
+      ...normalizerSelectMenuSx,
+      '& .MuiList-root, & .MuiAutocomplete-listbox': {
+        py: '3px !important',
+      },
+      '& .MuiMenuItem-root, & .MuiAutocomplete-option': {
+        minHeight: '30px !important',
+        alignItems: 'center !important',
+        margin: '1px 5px !important',
+        padding: '4px 10px !important',
+        fontSize: '12.5px !important',
+        fontWeight: '400 !important',
+        lineHeight: '1.3 !important',
+        letterSpacing: '0 !important',
+        borderRadius: '7px !important',
+      },
+      '& .MuiMenuItem-root .MuiTypography-root, & .MuiAutocomplete-option .MuiTypography-root, & .MuiMenuItem-root .MuiListItemText-primary, & .MuiAutocomplete-option .MuiListItemText-primary': {
+        fontSize: '12.5px !important',
+        fontWeight: '400 !important',
+        lineHeight: '1.3 !important',
+        letterSpacing: '0 !important',
+      },
+      '& .MuiMenuItem-root .MuiListItemText-root': {
+        margin: '0 !important',
+        minWidth: 0,
+      },
+      '& .MuiMenuItem-root .MuiListItemText-secondary, & .MuiAutocomplete-option .MuiListItemText-secondary': {
+        fontSize: '11.5px !important',
+        fontWeight: '400 !important',
+        lineHeight: '1.3 !important',
+      },
+      '& .MuiListItemText-primary': {
+        fontSize: '12.5px !important',
+        fontWeight: '400 !important',
+        lineHeight: '1.3 !important',
+      },
+      '& .MuiMenuItem-root.Mui-selected, & .MuiAutocomplete-option[aria-selected="true"]': {
+        bgcolor: normalizerTheme.pageTokens.primarySoft,
+        color: normalizerTheme.text,
+        fontWeight: '500 !important',
+      },
+      '& .MuiMenuItem-root.Mui-selected .MuiTypography-root, & .MuiAutocomplete-option[aria-selected="true"] .MuiTypography-root, & .MuiMenuItem-root.Mui-selected .MuiListItemText-primary, & .MuiAutocomplete-option[aria-selected="true"] .MuiListItemText-primary': {
+        fontWeight: '500 !important',
+      },
+      '& .MuiMenuItem-root .MuiCheckbox-root, & .MuiAutocomplete-option .MuiCheckbox-root': {
+        width: '24px !important',
+        height: '24px !important',
+        padding: '2px !important',
+        marginRight: '8px !important',
+        color: `${normalizerTheme.muted} !important`,
+      },
+      '& .MuiMenuItem-root .MuiCheckbox-root.Mui-checked, & .MuiAutocomplete-option .MuiCheckbox-root.Mui-checked': {
+        color: `${normalizerTheme.pageTokens.primary} !important`,
+      },
+      '& .MuiMenuItem-root .MuiCheckbox-root .MuiSvgIcon-root, & .MuiAutocomplete-option .MuiCheckbox-root .MuiSvgIcon-root': {
+        width: '18px !important',
+        height: '18px !important',
+      },
+      '& .MuiMenuItem-root .MuiSvgIcon-root:not(.MuiCheckbox-root .MuiSvgIcon-root), & .MuiAutocomplete-option .MuiSvgIcon-root:not(.MuiCheckbox-root .MuiSvgIcon-root)': {
+        width: '17px !important',
+        height: '17px !important',
+        color: `${normalizerTheme.muted} !important`,
+      },
+      '& .MuiMenuItem-root > .MuiBox-root, & .MuiAutocomplete-option > .MuiBox-root': {
+        gap: '6px !important',
+        alignItems: 'center !important',
+      },
+    },
+    '.bom-normalizer-option-example-tooltip.MuiTooltip-tooltip': {
+      backgroundColor: `${normalizerTheme.pageTokens.surface} !important`,
+      color: `${normalizerTheme.pageTokens.text} !important`,
+      border: `1px solid ${normalizerTheme.pageTokens.strongBorder} !important`,
+      boxShadow: `${isDarkMode
+        ? '0 22px 56px -30px rgba(0,0,0,0.88), inset 0 1px 0 rgba(255,255,255,0.04)'
+        : '0 22px 50px -34px rgba(15,23,42,0.36), inset 0 1px 0 rgba(255,255,255,0.95)'} !important`,
+      fontWeight: '400 !important',
+    },
+  };
   // BOM structure gate. Asked here rather than at upload so the user answers
   // after seeing the normalized rows, when "does this have levels" is a
   // question about real output instead of raw headers.
@@ -9816,17 +10546,6 @@ const BomNormalizer = () => {
   const restoreInFlightRef = useRef(false);
   const backendRoleInferenceKeyRef = useRef('');
   const backendSuggestedConfigRef = useRef(null);
-
-  useEffect(() => {
-    const handleMouseMove = (event) => {
-      setMousePos({
-        x: (event.clientX / window.innerWidth) * 100,
-        y: (event.clientY / window.innerHeight) * 100,
-      });
-    };
-    window.addEventListener('mousemove', handleMouseMove);
-    return () => window.removeEventListener('mousemove', handleMouseMove);
-  }, []);
 
   const headers = useMemo(
     () => preparedHeaders.length ? preparedHeaders : makeUniqueHeaders(sheetRows[headerRowIndex] || []),
@@ -15352,39 +16071,66 @@ const BomNormalizer = () => {
     return (
       <Box
         sx={{
-          minHeight: '100vh',
-          bgcolor: normalizerTheme.page,
+          ...factWisePageShellSx(normalizerTheme.pageTokens),
           color: normalizerTheme.text,
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          px: 2,
+          px: { xs: 2, sm: 3 },
+          py: 4,
         }}
       >
+        <Box sx={factWiseTopShadeSx(isDarkMode)} />
+        <Box sx={factWiseGlowSx(normalizerTheme.pageTokens)} />
+        <Box sx={factWiseGridOverlaySx(normalizerTheme.pageTokens)} />
         <Paper
           elevation={0}
           sx={{
-            width: 'min(520px, 100%)',
-            p: { xs: 3, sm: 4 },
+            position: 'relative',
+            zIndex: 1,
+            width: 'min(460px, 100%)',
+            p: { xs: 2.5, sm: 3 },
             border: `1px solid ${normalizerTheme.border}`,
-            borderRadius: 3,
-            bgcolor: `${normalizerTheme.paper} !important`,
+            borderRadius: '18px',
+            bgcolor: `${normalizerTheme.panelGradient} !important`,
             color: `${normalizerTheme.text} !important`,
-            boxShadow: isDarkMode ? '0 24px 80px rgba(0,0,0,0.42)' : '0 24px 80px rgba(15,23,42,0.12)',
+            boxShadow: isDarkMode
+              ? '0 28px 80px -42px rgba(0,0,0,0.92), inset 0 1px 0 rgba(255,255,255,0.04)'
+              : '0 24px 70px -42px rgba(15,23,42,0.34), inset 0 1px 0 rgba(255,255,255,0.86)',
           }}
         >
-          <Stack spacing={2.25}>
-            <Box>
-              <Typography variant="h5" fontWeight={900} sx={{ color: normalizerTheme.text }}>
-                Applying template
-              </Typography>
-              <Typography sx={{ mt: 0.75, color: normalizerTheme.muted, lineHeight: 1.5 }}>
-                Preparing the workbook with "{replayName}" and opening the final mapped data.
-              </Typography>
+          <Stack spacing={2}>
+            <Box sx={{ display: 'flex', gap: 1.5, alignItems: 'flex-start' }}>
+              <Box
+                sx={{
+                  width: 38,
+                  height: 38,
+                  borderRadius: '12px',
+                  display: 'grid',
+                  placeItems: 'center',
+                  flex: '0 0 auto',
+                  bgcolor: normalizerTheme.pageTokens.primarySoft,
+                  border: `1px solid ${normalizerTheme.borderStrong}`,
+                }}
+              >
+                <CircularProgress size={18} thickness={4} sx={{ color: normalizerTheme.pageTokens.primary }} />
+              </Box>
+              <Box sx={{ minWidth: 0 }}>
+                <Typography sx={{ color: normalizerTheme.text, fontSize: 20, fontWeight: 600, lineHeight: 1.25, letterSpacing: 0 }}>
+                  Applying template
+                </Typography>
+                <Typography sx={{ mt: 0.55, color: normalizerTheme.muted, fontSize: 13.5, fontWeight: 400, lineHeight: 1.45 }}>
+                  Preparing the workbook with{' '}
+                  <Box component="span" sx={{ color: normalizerTheme.text, fontWeight: 500 }}>
+                    "{replayName}"
+                  </Box>{' '}
+                  and opening the final mapped data.
+                </Typography>
+              </Box>
             </Box>
 
             {error ? (
-              <Alert severity="error">
+              <Alert severity="error" sx={dialogAlertSx('error')}>
                 {error}
               </Alert>
             ) : (
@@ -15393,14 +16139,41 @@ const BomNormalizer = () => {
                   variant={progressTotal ? 'determinate' : 'indeterminate'}
                   value={progressValue}
                   sx={{
-                    height: 8,
+                    height: 6,
                     borderRadius: 999,
-                    bgcolor: isDarkMode ? 'rgba(148, 163, 184, 0.18)' : '#e2e8f0',
+                    bgcolor: isDarkMode ? 'rgba(148, 163, 184, 0.16)' : '#dbe7f3',
+                    '& .MuiLinearProgress-bar': {
+                      borderRadius: 999,
+                      background: 'linear-gradient(90deg, #007aff 0%, #48a2ff 100%)',
+                    },
                   }}
                 />
-                <Typography variant="body2" sx={{ color: normalizerTheme.muted }}>
-                  Running saved normalization, mapping, and final-page tool rules in order.
-                </Typography>
+                <Box
+                  sx={{
+                    display: 'flex',
+                    alignItems: 'flex-start',
+                    gap: 0.8,
+                    px: 1.15,
+                    py: 0.85,
+                    borderRadius: '12px',
+                    bgcolor: isDarkMode ? 'rgba(148, 163, 184, 0.08)' : 'rgba(241, 245, 249, 0.86)',
+                    border: `1px solid ${normalizerTheme.border}`,
+                  }}
+                >
+                  <Box
+                    sx={{
+                      width: 6,
+                      height: 6,
+                      mt: 0.65,
+                      borderRadius: '50%',
+                      bgcolor: normalizerTheme.pageTokens.primary,
+                      flex: '0 0 auto',
+                    }}
+                  />
+                  <Typography variant="body2" sx={{ color: normalizerTheme.muted, fontSize: 12.5, fontWeight: 400, lineHeight: 1.45 }}>
+                    Running saved normalization, mapping, and final-page tool rules in order.
+                  </Typography>
+                </Box>
               </>
             )}
 
@@ -15424,7 +16197,7 @@ const BomNormalizer = () => {
     return (
       <Stack gap={1} sx={{ p: 1.25 }}>
         <Paper elevation={0} sx={{ p: 1, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paperSoft }}>
-          <Typography sx={{ mb: 0.65, fontSize: 12.5, fontWeight: 850 }}>
+          <Typography sx={{ mb: 0.65, fontSize: 12.25, fontWeight: 500, color: normalizerTheme.text }}>
             Source Excel row {visualTeachContext.sample?.sourceRow || '-'}
           </Typography>
           <WorksheetSamplePreview
@@ -15441,8 +16214,8 @@ const BomNormalizer = () => {
         <Paper elevation={0} sx={{ p: 1, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}>
           <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 0.7 }}>
             <Box>
-              <Typography sx={{ fontSize: 12.5, fontWeight: 850 }}>Tag cell spans</Typography>
-              <Typography sx={{ fontSize: 11.5, color: normalizerTheme.muted }}>{visualTeachContext.sourceColumn}</Typography>
+              <Typography sx={{ fontSize: 12.25, fontWeight: 500, color: normalizerTheme.text }}>Tag cell spans</Typography>
+              <Typography sx={{ fontSize: 11.25, fontWeight: 400, color: normalizerTheme.muted }}>{visualTeachContext.sourceColumn}</Typography>
             </Box>
             <Stack direction="row" gap={0.5}>
               <Button size="small" disabled={!visualTeachSelection} onClick={handleClearVisualTeachSelection}>Clear selected</Button>
@@ -15451,7 +16224,7 @@ const BomNormalizer = () => {
           </Stack>
           <Box
             onMouseUp={handleVisualTeachMouseUp}
-            sx={{ p: 1.2, minHeight: 82, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paperSoft, fontFamily: 'monospace', fontSize: 13, lineHeight: 2.2, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', cursor: 'text', userSelect: 'none' }}
+            sx={visualTeachSpanSurfaceSx}
           >
             {(visualTeachContext.sourceValue || '').split('').map((char, index) => {
               const role = visualTeachPreparedTags[index];
@@ -15461,18 +16234,20 @@ const BomNormalizer = () => {
                 <Box
                   key={`${index}-${char}`}
                   component="span"
+                  role="button"
+                  aria-label={char === ' ' ? `Select space at position ${index + 1}` : `Select ${char} at position ${index + 1}`}
                   onMouseDown={(event) => { event.preventDefault(); handleVisualTeachMouseDown(index); }}
                   onMouseEnter={() => handleVisualTeachMouseEnter(index)}
-                  sx={{ px: role ? 0.1 : 0, py: 0.1, borderRadius: role ? '3px' : 0, bgcolor: style.bg || 'transparent', color: style.color || normalizerTheme.text, fontWeight: role ? 850 : 600, outline: selected ? '2px dashed #0f172a' : 'none', outlineOffset: '-1px' }}
+                  sx={visualTeachCharacterSx(role, style, selected)}
                 >
-                  {char}
+                  {char === ' ' ? '\u00A0' : char}
                 </Box>
               );
             })}
           </Box>
           <Stack direction="row" gap={0.65} flexWrap="wrap" sx={{ mt: 0.9 }}>
             {visualTeachRoleOptions.map((role) => (
-              <Button key={role.key} size="small" variant="outlined" disabled={!visualTeachSelection} onClick={() => handleApplyVisualTeachRole(role.key)} sx={{ borderColor: role.color, color: role.color, bgcolor: role.bg, fontWeight: 800 }}>
+              <Button key={role.key} size="small" variant="outlined" disabled={!visualTeachSelection} onClick={() => handleApplyVisualTeachRole(role.key)} sx={visualTeachRoleButtonSx(role)}>
                 {role.label}
               </Button>
             ))}
@@ -15550,17 +16325,17 @@ const BomNormalizer = () => {
 
         <Paper elevation={0} sx={{ p: 1, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}>
           <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 0.7 }}>
-            <Typography sx={{ fontSize: 12.5, fontWeight: 850 }}>Generated FactWise rows</Typography>
+            <Typography sx={{ fontSize: 12.25, fontWeight: 500, color: normalizerTheme.text }}>Generated FactWise rows</Typography>
             <Button size="small" variant="outlined" startIcon={<VisibilityIcon />} disabled={visualTeachPreviewLoading} onClick={handlePreviewVisualTeachPattern}>Preview</Button>
           </Stack>
           {visualTeachPreviewEntries.length ? (
             <TableContainer sx={{ border: `1px solid ${normalizerTheme.border}`, maxHeight: 260 }}>
               <Table stickyHeader size="small">
-                <TableHead><TableRow><TableCell sx={{ fontWeight: 850 }}>Type</TableCell>{visualTeachMappedFields.map((field) => <TableCell key={field.key} sx={{ fontWeight: 850 }}>{field.label}</TableCell>)}</TableRow></TableHead>
+                <TableHead><TableRow><TableCell sx={{ fontWeight: 500 }}>Type</TableCell>{visualTeachMappedFields.map((field) => <TableCell key={field.key} sx={{ fontWeight: 500 }}>{field.label}</TableCell>)}</TableRow></TableHead>
                 <TableBody>
                   {visualTeachPreviewEntries.map((entry, index) => (
                     <TableRow key={`${entry.relation}-${index}`}>
-                      <TableCell sx={{ fontWeight: 800 }}>{entry.relation}</TableCell>
+                      <TableCell sx={{ fontWeight: 500 }}>{entry.relation}</TableCell>
                       {visualTeachMappedFields.map((field) => (
                         <TableCell key={field.key} sx={{ minWidth: 160 }}>
                           <TextField fullWidth size="small" value={visualTeachEntryOverrides[index]?.[field.key] ?? entry.fields?.[field.key] ?? ''} onChange={(event) => {
@@ -15575,11 +16350,36 @@ const BomNormalizer = () => {
               </Table>
             </TableContainer>
           ) : <Alert severity="info">Tag a mapped field to preview generated rows.</Alert>}
-          <Stack direction="row" justifyContent="flex-end" sx={{ mt: 1 }}>
+          <Stack
+            direction="row"
+            justifyContent="flex-end"
+            sx={{
+              mt: 1,
+              pt: 1,
+              borderTop: `1px solid ${isDarkMode ? normalizerTheme.border : '#e4ebf3'}`,
+              bgcolor: isDarkMode ? 'transparent' : '#fbfdff',
+            }}
+          >
             <Button
               variant="contained"
               disabled={!visualTeachCanUseInterpretation || (!visualTeachIsIgnoreInterpretation && !visualTeachPreparedTags.some((role) => visualTeachMappedFieldKeys.includes(role))) || fieldPatternLoading || visualTeachPreviewLoading}
               onClick={handleApplyVisualTeachPattern}
+              sx={{
+                minWidth: 176,
+                height: 36,
+                px: 2.2,
+                fontSize: 12.5,
+                fontWeight: 500,
+                borderRadius: '999px',
+                '&.Mui-disabled': {
+                  opacity: '1 !important',
+                  bgcolor: isDarkMode ? 'rgba(148, 163, 184, 0.12) !important' : '#edf3fa !important',
+                  background: isDarkMode ? 'rgba(148, 163, 184, 0.12) !important' : '#edf3fa !important',
+                  color: isDarkMode ? 'rgba(226, 232, 240, 0.52) !important' : '#7c8798 !important',
+                  border: `1px solid ${isDarkMode ? 'rgba(148, 163, 184, 0.18)' : '#d2dce9'} !important`,
+                  boxShadow: 'none !important',
+                },
+              }}
             >
               Use this interpretation
             </Button>
@@ -15591,45 +16391,50 @@ const BomNormalizer = () => {
 
   return (
     <Box
+      className="bom-normalizer-page"
       sx={{
-        minHeight: '100vh',
-        position: 'relative',
-        isolation: 'isolate',
-        overflow: 'hidden',
-        bgcolor: normalizerTheme.page,
-        color: normalizerTheme.text,
+        ...factWisePageShellSx(normalizerTheme.pageTokens),
+        minHeight: 'calc(100vh - 66px)',
         '& .MuiPaper-root, & .MuiCard-root': {
           background: `${normalizerTheme.panelGradient} !important`,
           color: `${normalizerTheme.text} !important`,
           borderColor: `${normalizerTheme.border} !important`,
-          borderRadius: '8px',
+          borderRadius: '14px',
           boxShadow: isDarkMode
-            ? '0 18px 48px -34px rgba(0, 0, 0, 0.9), inset 0 1px 0 rgba(255, 255, 255, 0.04)'
-            : '0 18px 44px -34px rgba(15, 23, 42, 0.24), inset 0 1px 0 rgba(255, 255, 255, 0.84)',
+            ? '0 18px 42px -30px rgba(0, 0, 0, 0.86), inset 0 1px 0 rgba(255, 255, 255, 0.04)'
+            : '0 18px 40px -32px rgba(15, 23, 42, 0.20), inset 0 1px 0 rgba(255, 255, 255, 0.86)',
         },
         '& .MuiTableContainer-root': {
-          bgcolor: `${normalizerTheme.table} !important`,
-          borderColor: `${normalizerTheme.border} !important`,
-          borderRadius: '8px',
+          bgcolor: `${normalizerTableTone.bg} !important`,
+          borderColor: `${normalizerTableTone.headerBorder} !important`,
+          borderRadius: '16px',
         },
         '& .MuiTableCell-root': {
-          color: `${normalizerTheme.text} !important`,
-          borderColor: `${normalizerTheme.border} !important`,
+          color: `${normalizerTableTone.text} !important`,
+          borderColor: `${normalizerTableTone.border} !important`,
+          fontSize: '13px',
+          fontWeight: 400,
+          lineHeight: 1.45,
         },
         '& .MuiTableHead-root .MuiTableCell-root': {
-          bgcolor: `${normalizerTheme.tableHeader} !important`,
+          bgcolor: `${normalizerTableTone.header} !important`,
+          color: `${normalizerTableTone.text} !important`,
+          fontSize: '13px !important',
+          fontWeight: '600 !important',
+          letterSpacing: '0 !important',
+          borderBottom: `1px solid ${normalizerTableTone.headerBorder} !important`,
         },
         '& table': {
-          backgroundColor: `${normalizerTheme.table} !important`,
+          backgroundColor: `${normalizerTableTone.bg} !important`,
         },
         '& th': {
-          backgroundColor: `${normalizerTheme.tableHeader} !important`,
-          color: `${normalizerTheme.text} !important`,
-          borderColor: `${normalizerTheme.border} !important`,
+          backgroundColor: `${normalizerTableTone.header} !important`,
+          color: `${normalizerTableTone.text} !important`,
+          borderColor: `${normalizerTableTone.headerBorder} !important`,
         },
         '& td': {
-          color: `${normalizerTheme.text} !important`,
-          borderColor: `${normalizerTheme.border} !important`,
+          color: `${normalizerTableTone.text} !important`,
+          borderColor: `${normalizerTableTone.border} !important`,
         },
         '& table input': {
           color: `${normalizerTheme.text} !important`,
@@ -15638,23 +16443,17 @@ const BomNormalizer = () => {
         '& table input:focus': {
           backgroundColor: `${normalizerTheme.paperSoft} !important`,
         },
-        '& .MuiInputBase-root': {
-          color: normalizerTheme.text,
-          borderRadius: '8px',
-          backgroundColor: isDarkMode ? 'rgba(15, 23, 42, 0.42)' : 'rgba(255, 255, 255, 0.8)',
-        },
-        '& .MuiInputLabel-root, & .MuiFormHelperText-root, & .MuiStepLabel-label': {
+        '& .MuiStepLabel-label': {
           color: `${normalizerTheme.muted} !important`,
-        },
-        '& .MuiOutlinedInput-notchedOutline': {
-          borderColor: `${normalizerTheme.borderStrong} !important`,
+          fontSize: '13px',
+          fontWeight: 500,
         },
         '& .MuiButton-root': {
           borderRadius: '999px',
           minHeight: 34,
           px: 1.8,
           fontSize: 12,
-          fontWeight: 800,
+          fontWeight: 500,
           textTransform: 'none',
           transition: 'transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease, background 0.18s ease',
         },
@@ -15662,12 +16461,14 @@ const BomNormalizer = () => {
           transform: 'translateY(-1px)',
         },
         '& .MuiButton-contained': {
-          background: 'linear-gradient(135deg, #2563eb 0%, #0284c7 100%) !important',
-          boxShadow: '0 12px 24px -14px rgba(37, 99, 235, 0.82), inset 0 1px 0 rgba(255, 255, 255, 0.28)',
+          ...factWisePrimaryButtonSx,
+          background: `${factWisePrimaryButtonSx.background} !important`,
+          color: `${factWisePrimaryButtonSx.color} !important`,
         },
         '& .MuiButton-contained:hover': {
-          background: 'linear-gradient(135deg, #1d4ed8 0%, #0369a1 100%) !important',
-          boxShadow: '0 16px 30px -16px rgba(37, 99, 235, 0.95), inset 0 1px 0 rgba(255, 255, 255, 0.38)',
+          ...factWisePrimaryButtonSx['&:hover'],
+          background: `${factWisePrimaryButtonSx.background} !important`,
+          transform: 'translateY(-1px)',
         },
         '& .MuiButton-outlined': {
           color: `${isDarkMode ? '#dbeafe' : '#1d4ed8'} !important`,
@@ -15686,44 +16487,52 @@ const BomNormalizer = () => {
         },
         '& .MuiChip-root': {
           borderRadius: '999px',
-          fontWeight: 800,
+          fontWeight: 500,
         },
       }}
     >
-      <Box
-        sx={{
-          pointerEvents: 'none',
-          position: 'fixed',
-          width: '62vw',
-          height: '62vw',
-          minWidth: 520,
-          minHeight: 520,
-          left: `${mousePos.x}%`,
-          top: `${mousePos.y}%`,
-          transform: 'translate(-50%, -50%)',
-          borderRadius: '50%',
-          filter: 'blur(90px)',
-          opacity: isDarkMode ? 0.26 : 0.18,
-          background: 'radial-gradient(circle, var(--color-brand, #2383e2) 0%, transparent 70%)',
-          transition: 'left 0.7s cubic-bezier(0.16, 1, 0.3, 1), top 0.7s cubic-bezier(0.16, 1, 0.3, 1)',
-          zIndex: 0,
-        }}
-      />
-      <Box className="auth-grid-pattern" sx={{ position: 'fixed', inset: 0, pointerEvents: 'none', opacity: isDarkMode ? 0.36 : 0.28, zIndex: 0 }} />
+      <GlobalStyles styles={normalizerGlobalFieldStyles} />
+      <Box sx={factWiseTopShadeSx(isDarkMode)} />
+      <Box sx={factWiseGlowSx(normalizerTheme.pageTokens)} />
+      <Box sx={factWiseGridOverlaySx(normalizerTheme.pageTokens)} />
 
-      <Box sx={{ position: 'relative', zIndex: 1, px: { xs: 2, lg: 4 }, py: 2.5, borderBottom: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.header, backdropFilter: 'blur(18px) saturate(170%)' }}>
+      <Box sx={{ position: 'relative', zIndex: 1, px: { xs: 2, lg: 4 }, pt: 2.25, pb: 1.75 }}>
         <Stack direction={{ xs: 'column', md: 'row' }} alignItems={{ xs: 'flex-start', md: 'center' }} justifyContent="space-between" gap={2}>
-          <Box>
-            <Typography sx={{ fontSize: 24, fontWeight: 800, color: normalizerTheme.text }}>BOM Normalizer</Typography>
-            <Typography sx={{ mt: 0.4, fontSize: 13, color: normalizerTheme.muted }}>
-              Prototype workbench for turning messy BOM sheets into a normalized MPN/MFR/alternate table.
+          <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 1.25, minWidth: 0 }}>
+            <IconButton
+              aria-label="Back"
+              onClick={() => navigate(-1)}
+              size="small"
+              sx={{
+                width: 34,
+                height: 34,
+                mt: 0.05,
+                borderRadius: '999px',
+                color: normalizerTheme.text,
+                border: `1px solid ${normalizerTheme.borderStrong}`,
+                bgcolor: isDarkMode ? 'rgba(15, 23, 42, 0.48)' : 'rgba(255, 255, 255, 0.82)',
+                boxShadow: isDarkMode ? 'none' : '0 10px 22px -18px rgba(15, 23, 42, 0.35)',
+                '&:hover': {
+                  bgcolor: normalizerTheme.pageTokens.primarySoft,
+                  borderColor: normalizerTheme.pageTokens.primary,
+                  color: normalizerTheme.pageTokens.primaryText,
+                },
+              }}
+            >
+              <ChevronLeftIcon fontSize="small" />
+            </IconButton>
+            <Box sx={{ minWidth: 0 }}>
+              <Typography sx={{ fontSize: 20, fontWeight: 600, lineHeight: 1.35, color: normalizerTheme.text }}>BOM Normalizer</Typography>
+            <Typography sx={{ mt: 0.35, fontSize: 13, fontWeight: 400, color: normalizerTheme.muted }}>
+              Normalize BOM sheets for mapping.
             </Typography>
+            </Box>
           </Box>
         </Stack>
       </Box>
 
-      <Box sx={{ position: 'relative', zIndex: 1, px: { xs: 2, lg: 4 }, py: 3 }}>
-        <Stepper activeStep={displayedStep} alternativeLabel sx={{ mb: 3 }}>
+      <Box sx={{ position: 'relative', zIndex: 1, px: { xs: 2, lg: 4 }, pt: 1.5, pb: 3 }}>
+        <Stepper activeStep={displayedStep} alternativeLabel sx={{ mb: 2.5 }}>
           {['Upload', 'Configure', 'Results'].map((label) => (
             <Step key={label}>
               <StepLabel>{label}</StepLabel>
@@ -15734,7 +16543,7 @@ const BomNormalizer = () => {
         {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
         {busy && (
           <Paper elevation={0} sx={{ mb: 2, p: 1.5, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}>
-            <Typography sx={{ mb: 1, fontSize: 13, fontWeight: 700 }}>
+            <Typography sx={{ mb: 1, fontSize: 13, fontWeight: 600 }}>
               Processing workbook{progress.total ? `: ${progress.processed}/${progress.total} rows, ${progress.outputRows} output rows, ${progress.skippedRows || 0} skipped` : '...'}
             </Typography>
             <LinearProgress
@@ -15750,7 +16559,7 @@ const BomNormalizer = () => {
               <Paper elevation={0} sx={{ border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper, p: 3 }}>
                 <Stack direction={{ xs: 'column', sm: 'row' }} alignItems={{ xs: 'flex-start', sm: 'center' }} justifyContent="space-between" gap={1}>
                   <Box>
-                    <Typography sx={{ fontSize: 20, fontWeight: 800, color: normalizerTheme.text }}>{sourcePanelTitle}</Typography>
+                    <Typography sx={{ fontSize: 20, fontWeight: 600, color: normalizerTheme.text }}>{sourcePanelTitle}</Typography>
                     <Typography sx={{ mt: 0.8, color: normalizerTheme.muted, fontSize: 14 }}>
                       {sourcePanelDescription}
                     </Typography>
@@ -15772,7 +16581,7 @@ const BomNormalizer = () => {
                           <Paper key={item.id} elevation={0} sx={{ p: 1.25, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paperSoft }}>
                             <Stack direction="row" alignItems="center" gap={1}>
                               <Box sx={{ minWidth: 0, flex: 1 }}>
-                                <Typography sx={{ fontSize: 13.5, fontWeight: 800, wordBreak: 'break-word' }}>{item.fileName}</Typography>
+                                <Typography sx={{ fontSize: 13.5, fontWeight: 600, wordBreak: 'break-word' }}>{item.fileName}</Typography>
                                 <Stack direction="row" gap={0.75} flexWrap="wrap" sx={{ mt: 0.5 }}>
                                   <Chip size="small" label={item.type.toUpperCase()} />
                                   <Chip size="small" label={item.status} />
@@ -15823,8 +16632,8 @@ const BomNormalizer = () => {
                     {combineBusy && <LinearProgress />}
 
                     {mergeStage === 'match' && (
-                      <Paper elevation={0} sx={{ p: 1.5, border: '1px solid #e1e6ec', bgcolor: '#fbfcfd' }}>
-                        <Typography sx={{ fontSize: 14, fontWeight: 800, mb: 1.5 }}>Match primary and secondary sources</Typography>
+                      <Paper elevation={0} sx={{ p: 1.5, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paperSoft }}>
+                        <Typography sx={{ fontSize: 14, fontWeight: 600, mb: 1.5 }}>Match primary and secondary sources</Typography>
                         <Grid container spacing={1.5}>
                           <Grid item xs={12} md={6}>
                             <FormControl fullWidth size="small">
@@ -15923,7 +16732,7 @@ const BomNormalizer = () => {
                     )}
 
                     {mergeStage === 'options' && (
-                      <Paper elevation={0} sx={{ p: 1.5, border: '1px solid #e1e6ec', bgcolor: '#fbfcfd' }}>
+                      <Paper elevation={0} sx={{ p: 1.5, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paperSoft }}>
                         <Grid container spacing={1.5}>
                           <Grid item xs={12}>
                             <TextField
@@ -15936,7 +16745,7 @@ const BomNormalizer = () => {
                             />
                           </Grid>
                           <Grid item xs={12}>
-                            <Typography sx={{ fontSize: 13, fontWeight: 800, mb: 0.5 }}>Output format</Typography>
+                            <Typography sx={{ fontSize: 13, fontWeight: 600, mb: 0.5 }}>Output format</Typography>
                             <RadioGroup
                               row
                               value={mergeConfig.outputMode}
@@ -15948,7 +16757,7 @@ const BomNormalizer = () => {
                           </Grid>
                           <Grid item xs={12}>
                             <Stack direction="row" justifyContent="space-between" alignItems="center" gap={1}>
-                              <Typography sx={{ fontSize: 13, fontWeight: 800 }}>Columns to bring from secondary source</Typography>
+                              <Typography sx={{ fontSize: 13, fontWeight: 600 }}>Columns to bring from secondary source</Typography>
                               <Stack direction="row" gap={0.5}>
                                 <Button size="small" onClick={() => setMergeConfig((prev) => ({
                                   ...prev,
@@ -15993,7 +16802,7 @@ const BomNormalizer = () => {
                     )}
 
                     {mergeStage === 'preview' && mergePreview && (
-                      <Paper elevation={0} sx={{ p: 1.5, border: '1px solid #e1e6ec', bgcolor: '#fbfcfd' }}>
+                      <Paper elevation={0} sx={{ p: 1.5, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paperSoft }}>
                         <Grid container spacing={1} sx={{ mb: 1.5 }}>
                           <Grid item xs={6} md={3}>
                             <Chip
@@ -16030,7 +16839,7 @@ const BomNormalizer = () => {
                           <Button size="small" variant="outlined" disabled={mergePreviewPage === 0} onClick={() => setMergePreviewPage((page) => Math.max(0, page - 1))}>
                             Previous
                           </Button>
-                          <Typography sx={{ fontSize: 13, color: '#66717f' }}>
+                          <Typography sx={{ fontSize: 13, color: normalizerTheme.muted }}>
                             Showing {visibleMergePreviewRows.length ? mergePreviewStart + 1 : 0}-{Math.min(mergePreviewStart + visibleMergePreviewRows.length, mergeFilteredPreviewRows.length)} of {mergeFilteredPreviewRows.length}
                           </Typography>
                           <TextField
@@ -16119,8 +16928,8 @@ const BomNormalizer = () => {
                     )}
                   </Stack>
                 ) : (
-                  <Paper elevation={0} sx={{ mt: 2, p: 2, border: '1px dashed #c7d0da', bgcolor: '#fbfcfd' }}>
-                    <Typography sx={{ fontSize: 13.5, color: '#66717f' }}>
+                  <Paper elevation={0} sx={{ mt: 2, p: 2, border: `1px dashed ${normalizerTheme.borderStrong}`, bgcolor: normalizerTheme.paperSoft }}>
+                    <Typography sx={{ fontSize: 13.5, color: normalizerTheme.muted }}>
                       Choose a source to start. After upload, you can continue directly or prepare a merge.
                     </Typography>
                   </Paper>
@@ -16131,12 +16940,12 @@ const BomNormalizer = () => {
         ) : (
           <Stack spacing={2.5}>
             {currentStep === -1 && (
-              <Paper elevation={0} sx={{ p: 2.5, border: '1px solid #dce2e8' }}>
-                <Typography sx={{ fontSize: 18, fontWeight: 800 }}>Source setup</Typography>
-                <Typography sx={{ mt: 0.5, fontSize: 13, color: '#66717f', wordBreak: 'break-word' }}>{fileName}</Typography>
+              <Paper elevation={0} sx={{ p: 2.25, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}>
+                <Typography sx={{ fontSize: 17, fontWeight: 600 }}>Source setup</Typography>
+                <Typography sx={{ mt: 0.45, fontSize: 12.5, fontWeight: 400, color: normalizerTheme.muted, wordBreak: 'break-word' }}>{fileName}</Typography>
                 {workbook.SheetNames.length > 1 && (
                   <Alert severity="info" sx={{ mt: 1.5 }}>
-                    This workbook has {workbook.SheetNames.length} sheets. Choose one sheet, selected sheets, or all sheets before continuing.
+                    {workbook.SheetNames.length} sheets found. Choose the sheet(s) to normalize.
                   </Alert>
                 )}
                 {multiBlockSummary && (
@@ -16146,8 +16955,8 @@ const BomNormalizer = () => {
                     The normalizer will connect same-sheet and cross-sheet assembly blocks by matching part codes.
                   </Alert>
                 )}
-                <Grid container spacing={1.5} sx={{ mt: 1 }}>
-                  <Grid item xs={12} md={6}>
+                <Grid container columnSpacing={1.25} rowSpacing={1.1} alignItems="flex-start" sx={{ mt: 1 }}>
+                  <Grid item xs={12} sm={6} lg={3}>
                     <FormControl fullWidth size="small">
                       <InputLabel>Sheet selection</InputLabel>
                       <Select value={sheetScope} label="Sheet selection" onChange={(event) => handleSheetScopeChange(event.target.value)}>
@@ -16159,7 +16968,7 @@ const BomNormalizer = () => {
                   </Grid>
 
                   {sheetScope === 'single' && (
-                    <Grid item xs={12} md={6}>
+                    <Grid item xs={12} sm={6} lg={3}>
                       <FormControl fullWidth size="small">
                         <InputLabel>Sheet</InputLabel>
                         <Select value={sheetName} label="Sheet" onChange={(event) => handleSheetChange(event.target.value)}>
@@ -16172,7 +16981,7 @@ const BomNormalizer = () => {
                   )}
 
                   {sheetScope === 'selected' && (
-                    <Grid item xs={12} md={6}>
+                    <Grid item xs={12} sm={6} lg={3}>
                       <FormControl fullWidth size="small">
                         <InputLabel>Sheets</InputLabel>
                         <Select
@@ -16194,7 +17003,7 @@ const BomNormalizer = () => {
                   )}
 
                   {sheetScope === 'all' && (
-                    <Grid item xs={12} md={6}>
+                    <Grid item xs={12} sm={6} lg={3}>
                       <TextField
                         fullWidth
                         size="small"
@@ -16205,7 +17014,7 @@ const BomNormalizer = () => {
                     </Grid>
                   )}
 
-                  <Grid item xs={12} md={6}>
+                  <Grid item xs={12} sm={6} lg={3}>
                     <TextField
                       fullWidth
                       size="small"
@@ -16225,7 +17034,7 @@ const BomNormalizer = () => {
                     />
                   </Grid>
 
-                  <Grid item xs={12} md={6}>
+                  <Grid item xs={12} sm={6} lg={3}>
                     <TextField
                       fullWidth
                       size="small"
@@ -16243,7 +17052,7 @@ const BomNormalizer = () => {
                   </Grid>
 
                   {showAssemblyQuantityVariantSelector && (
-                    <Grid item xs={12} md={6}>
+                    <Grid item xs={12} sm={6} lg={3}>
                       <FormControl fullWidth size="small">
                         <InputLabel>Quantity variant</InputLabel>
                         <Select
@@ -16269,7 +17078,7 @@ const BomNormalizer = () => {
                   )}
 
                   {showMultiBlockQuantityVariantSelectors && multiBlockQuantityVariantGroups.map((group) => (
-                    <Grid item xs={12} md={6} key={group.key}>
+                    <Grid item xs={12} sm={6} lg={3} key={group.key}>
                       <FormControl fullWidth size="small">
                         <InputLabel>{`Quantity variant - ${group.label || 'BOM table'}`}</InputLabel>
                         <Select
@@ -16303,32 +17112,10 @@ const BomNormalizer = () => {
                     </Grid>
                   ))}
                 </Grid>
-                <Stack direction="row" gap={1} flexWrap="wrap" sx={{ mt: 1.5 }}>
-                  <Chip size="small" label={`${visibleSourceHeaders.length} columns`} />
-                  <Chip
-                    size="small"
-                    label={quantityVariantFilterActive
-                      ? `${previewDataRows.length} shown / ${dataRows.length} included rows`
-                      : (sourceEndRow ? `${dataRows.length} included / ${sourceDataRows.length} detected rows` : `${dataRows.length} data rows`)}
-                  />
-                  {multiBlockSummary && <Chip size="small" color="success" variant="outlined" label={`${multiBlockSummary.blockCount} BOM tables`} />}
-                  {sourceEndRow && <Chip size="small" color="info" variant="outlined" label={`Using rows through ${sourceEndRow}`} />}
-                  {sourceLimitActive && <Chip size="small" color="warning" variant="outlined" label={`${sourceRowsExcludedByLimit} rows excluded`} />}
-                  <Chip size="small" label={sheetScope === 'single' ? `Header row ${headerRowIndex + 1}` : `${selectedSheetNames.length} sheets merged`} />
-                </Stack>
-                <Box sx={{ mt: 2 }}>
-                  <Stack direction="row" alignItems="center" justifyContent="space-between" gap={1} flexWrap="wrap">
-                    <Typography sx={{ fontWeight: 800 }}>Source preview</Typography>
-                    <ShadcnButton
-                      size="sm"
-                      variant="outline"
-                      onClick={() => setSourceGridOpen(true)}
-                      disabled={!sourceGridRows.length}
-                      className="h-8"
-                    >
-                      <VisibilityIcon fontSize="inherit" />
-                      View all rows
-                    </ShadcnButton>
+                <Box sx={{ mt: 2.2 }}>
+                  <Stack direction={{ xs: 'column', lg: 'row' }} alignItems={{ xs: 'stretch', lg: 'center' }} justifyContent="space-between" gap={1.15}>
+                    <Typography sx={{ fontSize: 14.5, fontWeight: 550, color: normalizerTheme.text }}>Source preview</Typography>
+                    {renderSourcePreviewActions('BOM tables')}
                   </Stack>
                   {sourceEndRow && (
                     <Alert severity="info" sx={{ mt: 1, mb: 1.25 }}>
@@ -16338,42 +17125,47 @@ const BomNormalizer = () => {
                   <SourcePreview headers={headers} rows={previewDataRows.slice(0, 8)} assemblyMatrix={sourcePreviewAssemblyMatrix} />
                 </Box>
                 <Stack direction="row" justifyContent="space-between" sx={{ mt: 2 }}>
-                  <ShadcnButton variant="outline" onClick={handleBackFromSourceSetup} disabled={busy}>Back</ShadcnButton>
+                  <ShadcnButton
+                    variant="outline"
+                    onClick={handleBackFromSourceSetup}
+                    disabled={busy}
+                    className={darkOutlineButtonClass}
+                    style={darkOutlineButtonStyle}
+                  >
+                    Back
+                  </ShadcnButton>
                   <ShadcnButton onClick={() => setCurrentStep(2)} disabled={busy}>Next: identify columns</ShadcnButton>
                 </Stack>
               </Paper>
             )}
 
             {(currentStep === 1 || currentStep === 2) && (
-              <Paper elevation={0} sx={{ p: 2.5, border: '1px solid #dce2e8' }}>
+              <Paper elevation={0} sx={{ p: 2.25, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}>
                 <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ xs: 'stretch', sm: 'flex-start' }} gap={1.5}>
                   <Box>
-                    <Typography sx={{ fontSize: 18, fontWeight: 800 }}>Configure source columns and parsing</Typography>
-                    <Typography sx={{ mt: 0.5, fontSize: 13, color: '#66717f' }}>
-                      Pick the important columns first. Parser assumptions update automatically from those choices.
+                    <Typography sx={{ fontSize: 17, fontWeight: 600 }}>Configure source columns and parsing</Typography>
+                    <Typography sx={{ mt: 0.45, fontSize: 13, fontWeight: 400, color: normalizerTheme.muted }}>
+                      Map the key columns and parsing rules.
                     </Typography>
-                    <Typography sx={{ mt: 0.5, fontSize: 13, color: '#66717f', wordBreak: 'break-word' }}>{fileName}</Typography>
                   </Box>
                   <Box sx={{ display: 'flex', justifyContent: { xs: 'flex-start', sm: 'flex-end' }, gap: 1, flexWrap: 'wrap' }}>
-                    <ShadcnButton
-                      size="sm"
-                      variant="outline"
-                      onClick={() => setSourceGridOpen(true)}
-                      disabled={!sourceGridRows.length}
-                      className="h-8"
-                    >
-                      <VisibilityIcon fontSize="inherit" />
-                      View all rows
-                    </ShadcnButton>
+                    {fileName && (
+                      <Box sx={uploadedFileBadgeSx} title={fileName}>
+                        <InsertDriveFileOutlinedIcon sx={{ fontSize: 16, flexShrink: 0 }} />
+                        <Typography noWrap sx={{ minWidth: 0, fontSize: 12.5, fontWeight: 500, lineHeight: 1.2 }}>
+                          {fileName}
+                        </Typography>
+                      </Box>
+                    )}
                   </Box>
                 </Stack>
                 {workbook.SheetNames.length > 1 && (
                   <Alert severity="info" sx={{ mt: 1.5 }}>
-                    This workbook has {workbook.SheetNames.length} sheets. Choose one sheet, selected sheets, or all sheets before continuing.
+                    {workbook.SheetNames.length} sheets found. Choose the sheet(s) to normalize.
                   </Alert>
                 )}
-                <Grid container spacing={1.5} sx={{ mt: 1 }}>
-                  <Grid item xs={12} md={6}>
+                <Grid container columnSpacing={1.25} rowSpacing={1.1} alignItems="flex-start" sx={{ mt: 1 }}>
+                  <Grid item xs={12} sm={6} lg={3}>
                     <FormControl fullWidth size="small">
                       <InputLabel>Sheet selection</InputLabel>
                       <Select value={sheetScope} label="Sheet selection" onChange={(event) => handleSheetScopeChange(event.target.value)}>
@@ -16385,7 +17177,7 @@ const BomNormalizer = () => {
                   </Grid>
 
                   {sheetScope === 'single' && (
-                    <Grid item xs={12} md={6}>
+                    <Grid item xs={12} sm={6} lg={3}>
                       <FormControl fullWidth size="small">
                         <InputLabel>Sheet</InputLabel>
                         <Select value={sheetName} label="Sheet" onChange={(event) => handleSheetChange(event.target.value)}>
@@ -16398,7 +17190,7 @@ const BomNormalizer = () => {
                   )}
 
                   {sheetScope === 'selected' && (
-                    <Grid item xs={12} md={6}>
+                    <Grid item xs={12} sm={6} lg={3}>
                       <FormControl fullWidth size="small">
                         <InputLabel>Sheets</InputLabel>
                         <Select
@@ -16420,7 +17212,7 @@ const BomNormalizer = () => {
                   )}
 
                   {sheetScope === 'all' && (
-                    <Grid item xs={12} md={6}>
+                    <Grid item xs={12} sm={6} lg={3}>
                       <TextField
                         fullWidth
                         size="small"
@@ -16431,7 +17223,7 @@ const BomNormalizer = () => {
                     </Grid>
                   )}
 
-                  <Grid item xs={12} md={6}>
+                  <Grid item xs={12} sm={6} lg={3}>
                     <TextField
                       fullWidth
                       size="small"
@@ -16451,7 +17243,7 @@ const BomNormalizer = () => {
                     />
                   </Grid>
 
-                  <Grid item xs={12} md={6}>
+                  <Grid item xs={12} sm={6} lg={3}>
                     <TextField
                       fullWidth
                       size="small"
@@ -16469,7 +17261,7 @@ const BomNormalizer = () => {
                   </Grid>
 
                   {showAssemblyQuantityVariantSelector && (
-                    <Grid item xs={12} md={6}>
+                    <Grid item xs={12} sm={6} lg={3}>
                       <FormControl fullWidth size="small">
                         <InputLabel>Quantity variant</InputLabel>
                         <Select
@@ -16495,7 +17287,7 @@ const BomNormalizer = () => {
                   )}
 
                   {showMultiBlockQuantityVariantSelectors && multiBlockQuantityVariantGroups.map((group) => (
-                    <Grid item xs={12} md={6} key={group.key}>
+                    <Grid item xs={12} sm={6} lg={3} key={group.key}>
                       <FormControl fullWidth size="small">
                         <InputLabel>{`Quantity variant - ${group.label || 'BOM table'}`}</InputLabel>
                         <Select
@@ -16529,19 +17321,6 @@ const BomNormalizer = () => {
                     </Grid>
                   ))}
                 </Grid>
-                <Stack direction="row" gap={1} flexWrap="wrap" sx={{ mt: 1.2 }}>
-                  <Chip size="small" label={`${visibleSourceHeaders.length} columns`} />
-                  <Chip
-                    size="small"
-                    label={quantityVariantFilterActive
-                      ? `${previewDataRows.length} shown / ${dataRows.length} included rows`
-                      : (sourceEndRow ? `${dataRows.length} included / ${sourceDataRows.length} detected rows` : `${dataRows.length} data rows`)}
-                  />
-                  {multiBlockSummary && <Chip size="small" color="success" variant="outlined" label={`${multiBlockSummary.blockCount} linked BOM tables`} />}
-                  {sourceEndRow && <Chip size="small" color="info" variant="outlined" label={`Using rows through ${sourceEndRow}`} />}
-                  {sourceLimitActive && <Chip size="small" color="warning" variant="outlined" label={`${sourceRowsExcludedByLimit} rows excluded`} />}
-                  <Chip size="small" label={sheetScope === 'single' ? `Header row ${headerRowIndex + 1}` : `${selectedSheetNames.length} sheets merged`} />
-                </Stack>
                 {multiBlockSummary && (
                   <Alert severity="info" sx={{ mt: 1.25 }}>
                     {config.bomLayout === 'multi_block_assembly'
@@ -16549,18 +17328,21 @@ const BomNormalizer = () => {
                       : 'Linked BOM tables were detected. Select Multi-block assembly BOM in BOM layout if this workbook should be expanded through those links.'}
                   </Alert>
                 )}
-                <Box sx={{ mt: 2 }}>
-                  <Typography sx={{ fontWeight: 800 }}>Source preview</Typography>
+                <Box sx={{ mt: 2.2 }}>
+                  <Stack direction={{ xs: 'column', lg: 'row' }} alignItems={{ xs: 'stretch', lg: 'center' }} justifyContent="space-between" gap={1.15}>
+                    <Typography sx={{ fontSize: 14.5, fontWeight: 550, color: normalizerTheme.text }}>Source preview</Typography>
+                    {renderSourcePreviewActions('linked BOM tables')}
+                  </Stack>
                   <SourcePreview headers={headers} rows={previewDataRows.slice(0, 8)} getHeaderLabel={getPreviewHeaderLabel} assemblyMatrix={sourcePreviewAssemblyMatrix} />
                 </Box>
-                <Grid container spacing={1.5} sx={{ mt: 1 }}>
+                <Grid container columnSpacing={1.25} rowSpacing={1.05} alignItems="flex-start" sx={{ mt: 2.35 }}>
                   {ROLE_FIELDS.map((field) => {
                     const selectedHeader = roles[field.key] || '';
                     const roleHeaderOptions = ['', ...visibleSourceHeaders];
                     const conditionalRule = config.conditionalFieldMappings?.[field.key];
                     return (
-                      <Grid item xs={12} md={6} key={field.key}>
-                        <Stack direction="row" gap={0.75} alignItems="flex-start">
+                      <Grid item xs={12} sm={6} lg={4} xl={3} key={field.key}>
+                        <Stack direction="row" gap={0.55} alignItems="flex-start">
                           <Autocomplete
                             fullWidth
                             size="small"
@@ -16588,7 +17370,7 @@ const BomNormalizer = () => {
                               if (!option) {
                                 return (
                                   <Box component="li" {...props}>
-                                    <Typography sx={{ fontSize: 14, fontWeight: 600 }}>None</Typography>
+                                    <Typography sx={{ fontSize: 12.5, fontWeight: 400 }}>None</Typography>
                                   </Box>
                                 );
                               }
@@ -16600,7 +17382,7 @@ const BomNormalizer = () => {
                                 <Box component="li" {...props}>
                                   <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, width: '100%', minWidth: 0 }}>
                                     <Box sx={{ minWidth: 0, maxWidth: isSelected && columnName ? '62%' : '100%' }}>
-                                      <Typography noWrap sx={{ fontSize: 14, fontWeight: isSelected ? 800 : 600 }}>
+                                      <Typography noWrap sx={{ fontSize: 12.5, fontWeight: isSelected ? 500 : 400 }}>
                                         {isSelected && showColumnLabel ? `Column ${columnName}` : option}
                                       </Typography>
                                       {isSelected && showColumnLabel && (
@@ -16615,7 +17397,7 @@ const BomNormalizer = () => {
                                         onMouseDown={(event) => event.stopPropagation()}
                                         sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.55, flexShrink: 0, px: 0.75, py: 0.25, borderRadius: 999, border: `1px solid ${normalizerTheme.borderStrong}`, bgcolor: isDarkMode ? 'rgba(15, 23, 42, 0.34)' : 'rgba(248, 250, 252, 0.92)' }}
                                       >
-                                        <Typography sx={{ fontSize: 11, lineHeight: 1, fontWeight: 800, color: normalizerTheme.muted, whiteSpace: 'nowrap' }}>
+                                        <Typography sx={{ fontSize: 11, lineHeight: 1, fontWeight: 600, color: normalizerTheme.muted, whiteSpace: 'nowrap' }}>
                                           Column {columnName}
                                         </Typography>
                                         <Switch
@@ -16631,16 +17413,18 @@ const BomNormalizer = () => {
                               );
                             }}
                           />
-                          <Tooltip title={`Conditional mapping for ${field.label}`}>
-                            <Button
-                              size="small"
-                              variant={conditionalRule ? 'contained' : 'outlined'}
-                              onClick={() => openConditionalFieldMapping(field)}
-                              sx={{ minWidth: 72, height: 40, px: 1, whiteSpace: 'nowrap' }}
-                            >
-                              IF / ELSE
-                            </Button>
-                          </Tooltip>
+                          <Box sx={{ pt: '16px', flexShrink: 0 }}>
+                            <Tooltip title={`Conditional mapping for ${field.label}`}>
+                              <Button
+                                size="small"
+                                variant={conditionalRule ? 'contained' : 'outlined'}
+                                onClick={() => openConditionalFieldMapping(field)}
+                                sx={{ minWidth: 64, height: 34, minHeight: 34, px: 0.9, fontSize: 11.5, fontWeight: 500, whiteSpace: 'nowrap' }}
+                              >
+                                IF / ELSE
+                              </Button>
+                            </Tooltip>
+                          </Box>
                         </Stack>
                         {conditionalRule && (
                           <Typography sx={{ mt: 0.45, fontSize: 11, color: normalizerTheme.muted }}>
@@ -16656,11 +17440,18 @@ const BomNormalizer = () => {
                   className="rounded-lg border border-slate-200 bg-white shadow-sm"
                   sx={{ mt: 2, p: 1.5 }}
                 >
-                  <Box sx={{ minWidth: 0 }}>
-                    <Typography sx={{ fontSize: 14, fontWeight: 800 }}>Detected setup</Typography>
-                    <Typography sx={{ mt: 0.4, fontSize: 13, color: '#536171' }}>{roleCombinationHint}</Typography>
-                  </Box>
-                  <Grid container spacing={1.5} sx={{ mt: 0.5 }}>
+                  <Stack direction={{ xs: 'column', sm: 'row' }} alignItems={{ xs: 'flex-start', sm: 'center' }} justifyContent="space-between" gap={1}>
+                    <Typography sx={{ fontSize: 14, fontWeight: 550, color: normalizerTheme.text }}>Detected setup</Typography>
+                    {bomLayoutActive && (
+                      <Chip
+                        size="small"
+                        variant="outlined"
+                        label="BOM layout controls parsing"
+                        sx={{ height: 24, fontSize: 11.5, fontWeight: 500 }}
+                      />
+                    )}
+                  </Stack>
+                  <Grid container spacing={1.5} sx={{ mt: 0.75 }}>
                     <Grid item xs={12} md={3}>
                       <FormControl fullWidth size="small">
                         <InputLabel>Where are MPN, MFR and CPN?</InputLabel>
@@ -16726,7 +17517,7 @@ const BomNormalizer = () => {
                             <MenuItem key={option.value} value={option.value}>
                               <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1, width: '100%', minWidth: 0 }}>
                                 <Box sx={{ minWidth: 0, whiteSpace: 'normal' }}>
-                                  <Typography sx={{ fontSize: 14, fontWeight: 700 }}>
+                                  <Typography sx={{ fontSize: 14, fontWeight: 600 }}>
                                     {option.label}
                                   </Typography>
                                   <Typography sx={{ mt: 0.25, fontSize: 11.5, color: normalizerTheme.muted, whiteSpace: 'normal' }}>
@@ -16799,7 +17590,7 @@ const BomNormalizer = () => {
                           {ALTERNATE_LAYOUT_OPTIONS.map((option) => (
                             <MenuItem key={option.value} value={option.value}>
                               <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1, width: '100%', minWidth: 0 }}>
-                                <Typography noWrap sx={{ fontSize: 14, fontWeight: 700 }}>
+                                <Typography noWrap sx={{ fontSize: 14, fontWeight: 600 }}>
                                   {option.label}
                                 </Typography>
                                 {/* One "i" affordance, two payloads: the worked example when the
@@ -16820,7 +17611,7 @@ const BomNormalizer = () => {
                                         justifyContent: 'center',
                                         flexShrink: 0,
                                         fontSize: 12,
-                                        fontWeight: 900,
+                                        fontWeight: 600,
                                         color: normalizerTheme.muted,
                                         border: `1px solid ${normalizerTheme.borderStrong}`,
                                       }}
@@ -16922,7 +17713,7 @@ const BomNormalizer = () => {
                             )}
                             label={(
                               <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.6, minWidth: 0 }}>
-                                <Typography noWrap sx={{ fontSize: 12.5, fontWeight: 800, color: normalizerTheme.text }}>
+                                <Typography noWrap sx={{ fontSize: 12.5, fontWeight: 600, color: normalizerTheme.text }}>
                                   Include in-cell alternates
                                 </Typography>
                                 <Tooltip
@@ -16941,7 +17732,7 @@ const BomNormalizer = () => {
                                       justifyContent: 'center',
                                       flexShrink: 0,
                                       fontSize: 11,
-                                      fontWeight: 900,
+                                      fontWeight: 600,
                                       color: normalizerTheme.muted,
                                       border: `1px solid ${normalizerTheme.borderStrong}`,
                                     }}
@@ -17060,11 +17851,11 @@ const BomNormalizer = () => {
                     </Alert>
                   )}
                   {config.alternateLayout === 'separate_columns' && !bomLayoutActive && (
-                    <Paper elevation={0} sx={{ mt: 1.5, p: 1.25, border: '1px solid #e1e6ec', bgcolor: '#fff' }}>
+                    <Paper elevation={0} sx={{ mt: 1.5, p: 1.25, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}>
                       <Stack direction={{ xs: 'column', sm: 'row' }} alignItems={{ xs: 'flex-start', sm: 'center' }} justifyContent="space-between" gap={1}>
                         <Box>
-                          <Typography sx={{ fontSize: 13, fontWeight: 800 }}>Mark alternate columns</Typography>
-                          <Typography sx={{ fontSize: 12.5, color: '#66717f' }}>
+                          <Typography sx={{ fontSize: 13, fontWeight: 600 }}>Mark alternate columns</Typography>
+                          <Typography sx={{ fontSize: 12.5, color: normalizerTheme.muted }}>
                             {showAlternateManufacturerGroups
                               ? 'Add one group for each alternate set, then choose that alternate CPN, MPN, MFR, Qty, and UOM columns.'
                               : 'Add one group for each alternate MPN column. CPN, Qty, and UOM can be mapped here or copied from primary.'}
@@ -17166,17 +17957,12 @@ const BomNormalizer = () => {
                         </Alert>
                       )}
                       {alternateColumnGroups.length > 0 && (
-                        <Typography sx={{ mt: 1, fontSize: 12.5, color: '#536171' }}>
+                        <Typography sx={{ mt: 1, fontSize: 12.5, color: normalizerTheme.muted }}>
                           {alternateColumnGroups.length} alternate group{alternateColumnGroups.length === 1 ? '' : 's'} will be parsed.
                         </Typography>
                       )}
                     </Paper>
                   )}
-                  <Typography sx={{ mt: 1, fontSize: 13, color: '#536171', lineHeight: 1.45 }}>
-                    <strong>Detected rule:</strong> {bomLayoutActive ? selectedBomLayoutOption?.description : selectedStructureOption?.description || '-'}
-                    {!bomLayoutActive && selectedAlternateOption?.description ? ` ${selectedAlternateOption.description}` : ''}
-                    {' '}Blank BOM levels will be treated as level 1.
-                  </Typography>
                   {config.alternateLayout === 'same_group_rows' && groupKeyRequired && !bomLayoutActive && (
                     <Alert severity="error" sx={{ mt: 1 }}>
                       Select the group key column. Review and normalization cannot continue without it.
@@ -17194,11 +17980,11 @@ const BomNormalizer = () => {
                   )}
                   {detectedCleanupOptions.length > 0 && (
                     <Box sx={{ mt: 1.5 }}>
-                      <Typography sx={{ fontSize: 13, fontWeight: 800 }}>Clean visual rows before parsing</Typography>
+                      <Typography sx={{ fontSize: 13, fontWeight: 600 }}>Clean visual rows before parsing</Typography>
                       <Grid container spacing={1} sx={{ mt: 0.25 }}>
                         {detectedCleanupOptions.map((option) => (
                           <Grid item xs={12} md={4} key={option.key}>
-                            <Paper elevation={0} sx={{ p: 1, border: '1px solid #e1e6ec', bgcolor: '#fff' }}>
+                            <Paper elevation={0} sx={{ p: 1, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}>
                               <Stack direction="row" alignItems="center" gap={0.5}>
                                 <Switch
                                   size="small"
@@ -17206,8 +17992,8 @@ const BomNormalizer = () => {
                                   onChange={(event) => setConfig((prev) => ({ ...prev, [option.key]: event.target.checked }))}
                                 />
                                 <Box>
-                                  <Typography sx={{ fontSize: 12.5, fontWeight: 800 }}>{option.label}</Typography>
-                                  <Typography sx={{ fontSize: 12, color: '#66717f' }}>
+                                  <Typography sx={{ fontSize: 12.5, fontWeight: 600 }}>{option.label}</Typography>
+                                  <Typography sx={{ fontSize: 12, color: normalizerTheme.muted }}>
                                     {cleanupDetections[option.key]} detected
                                   </Typography>
                                 </Box>
@@ -17220,13 +18006,22 @@ const BomNormalizer = () => {
                   )}
                 </Paper>
                 <Stack direction="row" justifyContent="space-between" sx={{ mt: 2 }}>
-                  <ShadcnButton variant="outline" onClick={handleBackFromSourceSetup} disabled={busy}>Back</ShadcnButton>
+                  <ShadcnButton
+                    variant="outline"
+                    onClick={handleBackFromSourceSetup}
+                    disabled={busy}
+                    className={darkOutlineButtonClass}
+                    style={darkOutlineButtonStyle}
+                  >
+                    Back
+                  </ShadcnButton>
                   <Stack direction="row" gap={1}>
                     <ShadcnButton
                       variant="outline"
                       disabled={fieldPatternLoading || !headers.length || !dataRows.length || groupKeyRequired}
                       onClick={() => handleTeachFieldPattern()}
-                      className="border-blue-200 text-blue-700 hover:bg-blue-50"
+                      className={isDarkMode ? darkOutlineButtonClass : 'border-blue-200 text-blue-700 hover:bg-blue-50'}
+                      style={darkOutlineButtonStyle}
                     >
                       {fieldPatternLoading ? <CircularProgress size={14} /> : <TuneIcon fontSize="inherit" />}
                       Review patterns
@@ -17237,11 +18032,11 @@ const BomNormalizer = () => {
             )}
 
             {currentStep === 4 && (
-              <Paper elevation={0} sx={{ p: 2.5, border: '1px solid #dce2e8' }}>
+              <Paper elevation={0} sx={{ p: 2.5, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}>
                 <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={1.5}>
                   <Box>
                     <Stack direction="row" alignItems="center" gap={1} flexWrap="wrap">
-                      <Typography sx={{ fontSize: 18, fontWeight: 800 }}>Normalized editable sheet</Typography>
+                      <Typography sx={{ fontSize: 18, fontWeight: 600 }}>Normalized editable sheet</Typography>
                       {quality.lowConfidence > 0 && (
                         <Tooltip title={CONFIDENCE_HELP_TEXT} arrow>
                           <Chip
@@ -17255,19 +18050,19 @@ const BomNormalizer = () => {
                               height: 28,
                               px: 0.5,
                               fontSize: 13,
-                              fontWeight: 800,
-                              borderColor: lowConfidenceOnly ? 'transparent' : '#f59e0b',
-                              bgcolor: lowConfidenceOnly ? '#f59e0b' : (isDarkMode ? 'rgba(245, 158, 11, 0.16)' : '#fff7ed'),
-                              color: lowConfidenceOnly ? '#111827' : (isDarkMode ? '#fbbf24' : '#92400e'),
+                              fontWeight: 600,
+                              borderColor: lowConfidenceOnly ? 'transparent' : (isDarkMode ? '#facc15' : '#f2b400'),
+                              bgcolor: lowConfidenceOnly ? (isDarkMode ? '#facc15' : '#ffd84d') : (isDarkMode ? '#443605' : '#fff2bd'),
+                              color: lowConfidenceOnly ? '#1f2937' : (isDarkMode ? '#fde68a' : '#8a4b00'),
                               '&:hover': {
-                                bgcolor: lowConfidenceOnly ? '#fbbf24' : (isDarkMode ? 'rgba(245, 158, 11, 0.24)' : '#ffedd5'),
+                                bgcolor: lowConfidenceOnly ? (isDarkMode ? '#fde047' : '#ffcf24') : (isDarkMode ? '#564407' : '#ffe691'),
                               },
                             }}
                           />
                         </Tooltip>
                       )}
                     </Stack>
-                    <Typography sx={{ mt: 0.5, fontSize: 13, color: '#66717f' }}>
+                    <Typography sx={{ mt: 0.5, fontSize: 13, color: normalizerTheme.muted }}>
                       Review the parsed output, edit cells directly, or delete rows before downloading.
                     </Typography>
                   </Box>
@@ -17284,9 +18079,9 @@ const BomNormalizer = () => {
                         px: 2.2,
                         borderRadius: '999px',
                         fontSize: 13,
-                        fontWeight: 850,
-                        bgcolor: isDarkMode ? 'rgba(15, 23, 42, 0.68)' : '#ffffff',
-                        borderColor: isDarkMode ? 'rgba(96, 165, 250, 0.38)' : '#bfdbfe',
+                        fontWeight: 500,
+                        bgcolor: isDarkMode ? 'rgba(15, 23, 42, 0.68)' : normalizerTheme.paper,
+                        borderColor: isDarkMode ? 'rgba(96, 165, 250, 0.38)' : 'rgba(0, 122, 255, 0.28)',
                         boxShadow: isDarkMode ? 'none' : '0 10px 22px -18px rgba(37, 99, 235, 0.52)',
                       }}
                     >
@@ -17351,17 +18146,10 @@ const BomNormalizer = () => {
                       disabled={!normalizedRows.length}
                       onClick={(event) => setDownloadMenuAnchor(event.currentTarget)}
                       sx={{
+                        ...factWisePrimaryButtonSx,
                         minHeight: 40,
+                        height: 40,
                         px: 2.4,
-                        borderRadius: '999px',
-                        fontSize: 13,
-                        fontWeight: 850,
-                        background: 'linear-gradient(135deg, #2563eb 0%, #0284c7 100%)',
-                        boxShadow: '0 18px 30px -18px rgba(37, 99, 235, 0.9), inset 0 1px 0 rgba(255, 255, 255, 0.32)',
-                        '&:hover': {
-                          background: 'linear-gradient(135deg, #1d4ed8 0%, #0369a1 100%)',
-                          boxShadow: '0 22px 36px -20px rgba(37, 99, 235, 1), inset 0 1px 0 rgba(255, 255, 255, 0.4)',
-                        },
                       }}
                     >
                       Download
@@ -17438,65 +18226,51 @@ const BomNormalizer = () => {
         maxWidth="xl"
         fullWidth
       >
-        <DialogTitle>
+        <DialogTitle sx={{ px: 2.75, py: 2 }}>
           <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ xs: 'flex-start', sm: 'center' }} gap={1}>
             <Box>
-              <Typography sx={{ fontSize: 18, fontWeight: 800 }}>All source rows</Typography>
-              <Typography sx={{ mt: 0.4, fontSize: 13, color: normalizerTheme.muted }}>
+              <Typography sx={{ fontSize: 17, fontWeight: 550, color: normalizerTheme.text }}>All source rows</Typography>
+              <Typography sx={{ mt: 0.35, fontSize: 12.5, fontWeight: 400, color: normalizerTheme.muted }}>
                 Showing detected source rows from the selected sheet setup.
               </Typography>
             </Box>
             <Stack direction="row" gap={0.75} flexWrap="wrap">
-              <Chip size="small" label={`${sourceGridRows.length} shown / ${sourceDataRows.length} detected rows`} />
-              {sourceEndRow && <Chip size="small" color="info" variant="outlined" label={`Cutoff row ${sourceEndRow}`} />}
-              {sourceLimitActive && <Chip size="small" color="warning" variant="outlined" label={`${sourceRowsExcludedByLimit} excluded`} />}
+              <Chip size="small" label={`${sourceGridRows.length} shown / ${sourceDataRows.length} detected rows`} sx={{ height: 24, fontSize: 11.5, fontWeight: 500 }} />
+              {sourceEndRow && <Chip size="small" color="info" variant="outlined" label={`Cutoff row ${sourceEndRow}`} sx={{ height: 24, fontSize: 11.5, fontWeight: 500 }} />}
+              {sourceLimitActive && <Chip size="small" color="warning" variant="outlined" label={`${sourceRowsExcludedByLimit} excluded`} sx={{ height: 24, fontSize: 11.5, fontWeight: 500 }} />}
             </Stack>
           </Stack>
         </DialogTitle>
-        <DialogContent>
+        <DialogContent sx={{ px: 2.75 }}>
           {sourceEndRow && (
             <Alert severity="info" sx={{ mb: 1.25 }}>
               Rows after sheet row {sourceEndRow} are visible here for review, but they are excluded from normalization.
             </Alert>
           )}
           <TableContainer
-            sx={{
+            sx={factWiseTableContainerSx(normalizerTableTone, {
               maxHeight: '62vh',
-              overflow: 'auto',
-              border: `1px solid ${normalizerTheme.border}`,
-              bgcolor: normalizerTheme.table,
-              '&::-webkit-scrollbar': { height: 10, width: 10 },
-              '&::-webkit-scrollbar-thumb': {
-                borderRadius: 8,
-                bgcolor: isDarkMode ? 'rgba(148, 163, 184, 0.42)' : 'rgba(100, 116, 139, 0.38)',
-              },
-            }}
+            })}
           >
-            <Table stickyHeader size="small" sx={{ width: 'max-content', minWidth: '100%', tableLayout: 'fixed' }}>
+            <Table stickyHeader size="small" sx={factWiseTableSx(normalizerTableTone, { width: 'max-content', minWidth: '100%', tableLayout: 'fixed' })}>
               <TableHead>
                 <TableRow>
-                  <TableCell sx={{ minWidth: 90, fontWeight: 800, bgcolor: normalizerTheme.tableHeader, color: normalizerTheme.text, borderColor: normalizerTheme.border }}>
+                  <TableCell sx={factWiseTableHeaderCellSx(normalizerTableTone, { minWidth: 90, fontWeight: 550 })}>
                     Sheet row
                   </TableCell>
                   {sourceEndRow && (
-                    <TableCell sx={{ minWidth: 105, fontWeight: 800, bgcolor: normalizerTheme.tableHeader, color: normalizerTheme.text, borderColor: normalizerTheme.border }}>
+                    <TableCell sx={factWiseTableHeaderCellSx(normalizerTableTone, { minWidth: 105, fontWeight: 550 })}>
                       Status
                     </TableCell>
                   )}
                   {visibleSourceHeaders.map((header) => (
                     <TableCell
                       key={header}
-                      sx={{
+                      sx={factWiseTableHeaderCellSx(normalizerTableTone, {
                         minWidth: 170,
                         maxWidth: 280,
-                        fontWeight: 800,
-                        whiteSpace: 'nowrap',
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        bgcolor: normalizerTheme.tableHeader,
-                        color: normalizerTheme.text,
-                        borderColor: normalizerTheme.border,
-                      }}
+                        fontWeight: 550,
+                      })}
                     >
                       {header}
                     </TableCell>
@@ -17509,39 +18283,40 @@ const BomNormalizer = () => {
                   return (
                     <TableRow
                       key={`source-grid-${row.__sourceRow || index}-${index}`}
-                      sx={{
-                        bgcolor: excluded
-                          ? (isDarkMode ? 'rgba(239, 68, 68, 0.08)' : 'rgba(254, 226, 226, 0.7)')
-                          : 'transparent',
+                      sx={factWiseTableRowSx(normalizerTableTone, {
+                        sx: {
+                          bgcolor: excluded
+                            ? (isDarkMode ? 'rgba(239, 68, 68, 0.08)' : 'rgba(254, 226, 226, 0.7)')
+                            : normalizerTableTone.row,
                         opacity: excluded ? 0.72 : 1,
-                      }}
+                        },
+                      })}
                     >
-                      <TableCell sx={{ minWidth: 90, color: normalizerTheme.text, borderColor: normalizerTheme.border, fontWeight: 700 }}>
+                      <TableCell sx={factWiseTableBodyCellSx(normalizerTableTone, { minWidth: 90, fontWeight: 500 })}>
                         {row.__sourceRow || ''}
                       </TableCell>
                       {sourceEndRow && (
-                        <TableCell sx={{ minWidth: 105, color: normalizerTheme.text, borderColor: normalizerTheme.border }}>
+                        <TableCell sx={factWiseTableBodyCellSx(normalizerTableTone, { minWidth: 105 })}>
                           <Chip
                             size="small"
                             color={excluded ? 'warning' : 'success'}
                             variant={excluded ? 'outlined' : 'filled'}
                             label={excluded ? 'Excluded' : 'Included'}
+                            sx={{ height: 23, fontSize: 11, fontWeight: 500 }}
                           />
                         </TableCell>
                       )}
                       {visibleSourceHeaders.map((header) => (
                         <TableCell
                           key={header}
-                          sx={{
+                          sx={factWiseTableBodyCellSx(normalizerTableTone, {
                             minWidth: 170,
                             maxWidth: 280,
                             whiteSpace: 'nowrap',
                             overflow: 'hidden',
                             textOverflow: 'ellipsis',
-                            color: normalizerTheme.text,
-                            borderColor: normalizerTheme.border,
                             ...sourceCellStyleSx(row, header),
-                          }}
+                          })}
                         >
                           {displaySourceCellValue(row[header], header, sourcePreviewAssemblyMatrix)}
                         </TableCell>
@@ -17554,24 +18329,68 @@ const BomNormalizer = () => {
           </TableContainer>
         </DialogContent>
         <DialogActions sx={{ px: 3, pb: 2, justifyContent: 'space-between', gap: 1, flexWrap: 'wrap' }}>
-          <Typography sx={{ fontSize: 13, color: normalizerTheme.muted }}>
-            Page {sourceGridPage + 1} of {sourceGridTotalPages}
-          </Typography>
-          <Stack direction="row" gap={1}>
-            <Button
-              variant="outlined"
+          <Stack
+            direction="row"
+            alignItems="center"
+            gap={0.75}
+            sx={{
+              minHeight: 34,
+              px: 0.5,
+              borderRadius: '999px',
+              color: normalizerTheme.muted,
+            }}
+          >
+            <IconButton
+              size="small"
               disabled={sourceGridPage === 0}
               onClick={() => setSourceGridPage((page) => Math.max(0, page - 1))}
+              aria-label="Previous source rows page"
+              sx={{
+                width: 28,
+                height: 28,
+                color: normalizerTheme.text,
+                border: `1px solid ${normalizerTheme.borderStrong}`,
+                bgcolor: isDarkMode ? 'rgba(255,255,255,0.04)' : normalizerTheme.paper,
+                '&:hover': {
+                  bgcolor: isDarkMode ? 'rgba(255,255,255,0.08)' : normalizerTheme.pageTokens.rowHover,
+                },
+                '&.Mui-disabled': {
+                  color: normalizerTheme.disabled,
+                  borderColor: normalizerTheme.border,
+                  bgcolor: 'transparent',
+                },
+              }}
             >
-              Previous
-            </Button>
-            <Button
-              variant="outlined"
+              <ChevronLeftIcon sx={{ fontSize: 18 }} />
+            </IconButton>
+            <Typography sx={{ fontSize: 12.5, fontWeight: 500, color: normalizerTheme.muted, minWidth: 74, textAlign: 'center' }}>
+              Page {sourceGridPage + 1} of {sourceGridTotalPages}
+            </Typography>
+            <IconButton
+              size="small"
               disabled={sourceGridPage >= sourceGridTotalPages - 1}
               onClick={() => setSourceGridPage((page) => Math.min(sourceGridTotalPages - 1, page + 1))}
+              aria-label="Next source rows page"
+              sx={{
+                width: 28,
+                height: 28,
+                color: normalizerTheme.text,
+                border: `1px solid ${normalizerTheme.borderStrong}`,
+                bgcolor: isDarkMode ? 'rgba(255,255,255,0.04)' : normalizerTheme.paper,
+                '&:hover': {
+                  bgcolor: isDarkMode ? 'rgba(255,255,255,0.08)' : normalizerTheme.pageTokens.rowHover,
+                },
+                '&.Mui-disabled': {
+                  color: normalizerTheme.disabled,
+                  borderColor: normalizerTheme.border,
+                  bgcolor: 'transparent',
+                },
+              }}
             >
-              Next
-            </Button>
+              <ChevronRightIcon sx={{ fontSize: 18 }} />
+            </IconButton>
+          </Stack>
+          <Stack direction="row" gap={1}>
             <Button variant="contained" onClick={() => setSourceGridOpen(false)}>Done</Button>
           </Stack>
         </DialogActions>
@@ -17581,19 +18400,12 @@ const BomNormalizer = () => {
         autoHideDuration={5000}
         onClose={() => setSuccessMessage('')}
         anchorOrigin={{ vertical: 'top', horizontal: 'right' }}
-        sx={{ mt: 7, maxWidth: 420, zIndex: 1600 }}
+        sx={{ mt: 7, maxWidth: 360, zIndex: 1600 }}
       >
         <Alert
           severity="success"
-          variant="filled"
           onClose={() => setSuccessMessage('')}
-          sx={{
-            width: 'auto',
-            maxWidth: 420,
-            borderRadius: '14px',
-            boxShadow: '0 18px 50px rgba(15,23,42,0.22)',
-            alignItems: 'center'
-          }}
+          sx={snackbarAlertSx}
         >
           {successMessage}
         </Alert>
@@ -17604,14 +18416,14 @@ const BomNormalizer = () => {
       }} maxWidth="md" fullWidth>
         <DialogTitle>Choose PDF Processing Method</DialogTitle>
         <DialogContent>
-          <Typography sx={{ fontSize: 14, color: '#536171', mb: 2 }}>
+          <Typography sx={{ fontSize: 14, color: normalizerTheme.muted, mb: 2 }}>
             Pick the extraction method that best matches this PDF.
           </Typography>
-          <Paper elevation={0} sx={{ p: 1.5, mb: 2, border: '1px solid #e1e6ec', bgcolor: '#fbfcfd' }}>
+          <Paper elevation={0} sx={{ p: 1.5, mb: 2, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paperSoft }}>
             <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" alignItems={{ xs: 'flex-start', md: 'center' }} gap={1}>
               <Box>
-                <Typography sx={{ fontSize: 14, fontWeight: 800 }}>Split PDF by page ranges</Typography>
-                <Typography sx={{ mt: 0.35, fontSize: 12.5, color: '#66717f' }}>
+                <Typography sx={{ fontSize: 14, fontWeight: 600 }}>Split PDF by page ranges</Typography>
+                <Typography sx={{ mt: 0.35, fontSize: 12.5, color: normalizerTheme.muted }}>
                   Use this when different page ranges should be extracted as separate sources.
                 </Typography>
               </Box>
@@ -17673,11 +18485,11 @@ const BomNormalizer = () => {
               <Card
                 elevation={0}
                 onClick={() => handlePdfProcessingChoice('ocr')}
-                sx={{ height: '100%', cursor: 'pointer', border: '1px solid #dce2e8', '&:hover': { borderColor: '#1976d2', bgcolor: '#f8fafc' } }}
+                sx={{ height: '100%', cursor: 'pointer', border: `1px solid ${normalizerTheme.borderStrong}`, bgcolor: normalizerTheme.paper, '&:hover': { borderColor: normalizerTheme.pageTokens.primary, bgcolor: normalizerTheme.pageTokens.rowHover } }}
               >
                 <CardContent>
-                  <Typography sx={{ fontSize: 16, fontWeight: 800 }}>Simple OCR</Typography>
-                  <Typography sx={{ mt: 0.8, fontSize: 13, color: '#66717f' }}>
+                  <Typography sx={{ fontSize: 16, fontWeight: 600 }}>Simple OCR</Typography>
+                  <Typography sx={{ mt: 0.8, fontSize: 13, color: normalizerTheme.muted }}>
                     Best when the page is already a clean table — clear rows and columns, all text
                     readable, and nothing else around it. Anything outside the table comes through
                     as data too.
@@ -17689,11 +18501,11 @@ const BomNormalizer = () => {
               <Card
                 elevation={0}
                 onClick={() => handlePdfProcessingChoice('zonal')}
-                sx={{ height: '100%', cursor: 'pointer', border: '1px solid #dce2e8', '&:hover': { borderColor: '#1976d2', bgcolor: '#f8fafc' } }}
+                sx={{ height: '100%', cursor: 'pointer', border: `1px solid ${normalizerTheme.borderStrong}`, bgcolor: normalizerTheme.paper, '&:hover': { borderColor: normalizerTheme.pageTokens.primary, bgcolor: normalizerTheme.pageTokens.rowHover } }}
               >
                 <CardContent>
-                  <Typography sx={{ fontSize: 16, fontWeight: 800 }}>Select Area Manually</Typography>
-                  <Typography sx={{ mt: 0.8, fontSize: 13, color: '#66717f' }}>
+                  <Typography sx={{ fontSize: 16, fontWeight: 600 }}>Select Area Manually</Typography>
+                  <Typography sx={{ mt: 0.8, fontSize: 13, color: normalizerTheme.muted }}>
                     You draw a box around the exact part of each page you want, and only what is
                     inside the box gets extracted. Use for irregular tables or pages with extra
                     content to leave out.
@@ -17704,7 +18516,7 @@ const BomNormalizer = () => {
           </Grid>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => {
+          <Button sx={cancelButtonSx} onClick={() => {
             setPdfChoiceOpen(false);
             setPendingPdfAction(null);
           }}>
@@ -17715,7 +18527,7 @@ const BomNormalizer = () => {
       <Dialog open={factwiseDialogOpen} onClose={() => setFactwiseDialogOpen(false)} maxWidth="sm" fullWidth>
         <DialogTitle>Create Item Codes</DialogTitle>
         <DialogContent>
-          <Typography sx={{ fontSize: 14, color: '#536171', mb: 1.5 }}>
+          <Typography sx={{ fontSize: 14, color: normalizerTheme.muted, mb: 1.5 }}>
             Generate the Item code values from normalized rows before export.
           </Typography>
           <Grid container spacing={1.5}>
@@ -17813,8 +18625,8 @@ const BomNormalizer = () => {
                   </Stack>
                 </Grid>
                 <Grid item xs={12}>
-                  <Paper elevation={0} sx={{ p: 1.2, bgcolor: '#f8fafc', border: '1px solid #e1e6ec' }}>
-                    <Typography sx={{ fontSize: 13, fontWeight: 800 }}>Preview</Typography>
+                  <Paper elevation={0} sx={{ p: 1.2, bgcolor: normalizerTheme.paperSoft, border: `1px solid ${normalizerTheme.border}` }}>
+                    <Typography sx={{ fontSize: 13, fontWeight: 600 }}>Preview</Typography>
                     <Stack direction="row" gap={1} flexWrap="wrap" sx={{ mt: 0.8 }}>
                       {factwiseSerialPreview.map((value, index) => (
                         <Chip key={`${value}-${index}`} size="small" label={value || '(blank)'} />
@@ -17840,7 +18652,7 @@ const BomNormalizer = () => {
           </Grid>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setFactwiseDialogOpen(false)}>Cancel</Button>
+          <Button onClick={() => setFactwiseDialogOpen(false)} sx={cancelButtonSx}>Cancel</Button>
           <Button
             variant="contained"
             onClick={handleCreateFactwiseForNormalizer}
@@ -17854,7 +18666,7 @@ const BomNormalizer = () => {
       <Dialog open={tagDialogOpen} onClose={() => setTagDialogOpen(false)} maxWidth="sm" fullWidth>
         <DialogTitle>Add Tag Column</DialogTitle>
         <DialogContent>
-          <Typography sx={{ fontSize: 14, color: '#536171', mb: 1.5 }}>
+          <Typography sx={{ fontSize: 14, color: normalizerTheme.muted, mb: 1.5 }}>
             Add a numbered tag column to the normalized output. Rules are checked top to bottom.
           </Typography>
           <Grid container spacing={1.5}>
@@ -17885,7 +18697,7 @@ const BomNormalizer = () => {
               <Grid item xs={12}>
                 <Stack spacing={1}>
                   {tagConfig.rules.map((rule, index) => (
-                    <Paper key={`tag-rule-${index}`} elevation={0} sx={{ p: 1.2, border: '1px solid #e1e6ec', bgcolor: '#fbfcfd' }}>
+                    <Paper key={`tag-rule-${index}`} elevation={0} sx={{ p: 1.2, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paperSoft }}>
                       <Grid container spacing={1}>
                         <Grid item xs={12} sm={4}>
                           <FormControl fullWidth size="small">
@@ -18029,7 +18841,7 @@ const BomNormalizer = () => {
           </Grid>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setTagDialogOpen(false)}>Cancel</Button>
+          <Button onClick={() => setTagDialogOpen(false)} sx={cancelButtonSx}>Cancel</Button>
           <Button
             variant="contained"
             onClick={handleCreateTagForNormalizer}
@@ -18084,7 +18896,7 @@ const BomNormalizer = () => {
           </Alert>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setDeleteRowsOpen(false)} disabled={deleteRowsBusy}>Cancel</Button>
+          <Button onClick={() => setDeleteRowsOpen(false)} disabled={deleteRowsBusy} sx={cancelButtonSx}>Cancel</Button>
           <Button
             variant="contained"
             color="error"
@@ -18101,7 +18913,7 @@ const BomNormalizer = () => {
         <DialogContent>
           {manufacturerMatchLoading && (
             <Box sx={{ my: 2 }}>
-              <Typography sx={{ mb: 1, fontSize: 13, fontWeight: 700 }}>Loading manufacturer list...</Typography>
+              <Typography sx={{ mb: 1, fontSize: 13, fontWeight: 600 }}>Loading manufacturer list...</Typography>
               <LinearProgress />
             </Box>
           )}
@@ -18115,11 +18927,11 @@ const BomNormalizer = () => {
               </Stack>
               {manufacturerMatchPreview.length ? (
                 <>
-                  <TableContainer sx={{ maxHeight: 260, border: '1px solid #e1e6ec' }}>
-                    <Table stickyHeader size="small">
+                  <TableContainer sx={factWiseTableContainerSx(normalizerTableTone, { maxHeight: 260, borderRadius: '10px' })}>
+                    <Table stickyHeader size="small" sx={factWiseTableSx(normalizerTableTone)}>
                       <TableHead>
                         <TableRow>
-                          <TableCell sx={{ fontWeight: 800, bgcolor: '#f8fafc', width: 52 }}>
+                          <TableCell sx={factWiseTableHeaderCellSx(normalizerTableTone, { width: 52 })}>
                             <Checkbox
                               size="small"
                               checked={allManufacturerMatchesSelected}
@@ -18131,14 +18943,14 @@ const BomNormalizer = () => {
                               }}
                             />
                           </TableCell>
-                          <TableCell sx={{ fontWeight: 800, bgcolor: '#f8fafc' }}>Current</TableCell>
-                          <TableCell sx={{ fontWeight: 800, bgcolor: '#f8fafc' }}>Matched</TableCell>
+                          <TableCell sx={factWiseTableHeaderCellSx(normalizerTableTone)}>Current</TableCell>
+                          <TableCell sx={factWiseTableHeaderCellSx(normalizerTableTone)}>Matched</TableCell>
                         </TableRow>
                       </TableHead>
                       <TableBody>
                         {manufacturerMatchPreview.map((match) => (
                           <TableRow key={`${match.original}-${match.canonical}`}>
-                            <TableCell>
+                            <TableCell sx={factWiseTableBodyCellSx(normalizerTableTone)}>
                               <Checkbox
                                 size="small"
                                 checked={selectedManufacturerMatches.includes(match.key)}
@@ -18151,8 +18963,8 @@ const BomNormalizer = () => {
                                 }}
                               />
                             </TableCell>
-                            <TableCell>{match.original}</TableCell>
-                            <TableCell>{match.canonical}</TableCell>
+                            <TableCell sx={factWiseTableBodyCellSx(normalizerTableTone)}>{match.original}</TableCell>
+                            <TableCell sx={factWiseTableBodyCellSx(normalizerTableTone)}>{match.canonical}</TableCell>
                           </TableRow>
                         ))}
                       </TableBody>
@@ -18166,7 +18978,7 @@ const BomNormalizer = () => {
           )}
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setManufacturerMatchOpen(false)}>Cancel</Button>
+          <Button onClick={() => setManufacturerMatchOpen(false)} sx={cancelButtonSx}>Cancel</Button>
           <Button
             variant="contained"
             onClick={handleApplyManufacturerMatch}
@@ -18180,7 +18992,7 @@ const BomNormalizer = () => {
         <DialogTitle>
           <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ xs: 'flex-start', sm: 'center' }} gap={1}>
             <Box>
-              <Typography sx={{ fontSize: 18, fontWeight: 850 }}>Review MPN-Manufacturer Pairing</Typography>
+              <Typography sx={{ fontSize: 18, fontWeight: 600 }}>Review MPN-Manufacturer Pairing</Typography>
               <Typography sx={{ mt: 0.5, fontSize: 13, color: normalizerTheme.muted }}>
                 Some rows have a different count of MPNs and manufacturers. Confirm how these should be paired before opening the normalized output.
               </Typography>
@@ -18196,18 +19008,18 @@ const BomNormalizer = () => {
             <Table stickyHeader size="small" sx={{ minWidth: 920 }}>
               <TableHead>
                 <TableRow>
-                  <TableCell sx={{ width: 72, fontWeight: 850, bgcolor: normalizerTheme.tableHeader, color: normalizerTheme.text }}>Row</TableCell>
-                  <TableCell sx={{ width: 250, fontWeight: 850, bgcolor: normalizerTheme.tableHeader, color: normalizerTheme.text }}>MPNs</TableCell>
-                  <TableCell sx={{ width: 190, fontWeight: 850, bgcolor: normalizerTheme.tableHeader, color: normalizerTheme.text }}>Manufacturers</TableCell>
-                  <TableCell sx={{ width: 210, fontWeight: 850, bgcolor: normalizerTheme.tableHeader, color: normalizerTheme.text }}>Action</TableCell>
-                  <TableCell sx={{ width: 250, fontWeight: 850, bgcolor: normalizerTheme.tableHeader, color: normalizerTheme.text }}>Manual values</TableCell>
+                  <TableCell sx={{ width: 72, fontWeight: 600, bgcolor: normalizerTheme.tableHeader, color: normalizerTheme.text }}>Row</TableCell>
+                  <TableCell sx={{ width: 250, fontWeight: 600, bgcolor: normalizerTheme.tableHeader, color: normalizerTheme.text }}>MPNs</TableCell>
+                  <TableCell sx={{ width: 190, fontWeight: 600, bgcolor: normalizerTheme.tableHeader, color: normalizerTheme.text }}>Manufacturers</TableCell>
+                  <TableCell sx={{ width: 210, fontWeight: 600, bgcolor: normalizerTheme.tableHeader, color: normalizerTheme.text }}>Action</TableCell>
+                  <TableCell sx={{ width: 250, fontWeight: 600, bgcolor: normalizerTheme.tableHeader, color: normalizerTheme.text }}>Manual values</TableCell>
                 </TableRow>
               </TableHead>
               <TableBody>
                 {pairingReviewRows.map((issue, index) => (
                   <TableRow key={`${issue.key || issue.sourceRow}-${index}`}>
                     <TableCell sx={{ color: normalizerTheme.text, borderColor: normalizerTheme.border }}>
-                      <Typography sx={{ fontWeight: 800 }}>{issue.sourceRow}</Typography>
+                      <Typography sx={{ fontWeight: 600 }}>{issue.sourceRow}</Typography>
                     </TableCell>
                     <TableCell sx={{ color: normalizerTheme.text, borderColor: normalizerTheme.border }}>
                       <Chip size="small" color="warning" variant="outlined" label={issue.message} sx={{ mb: 0.75, maxWidth: '100%' }} />
@@ -18392,7 +19204,7 @@ const BomNormalizer = () => {
         <DialogContent>
           <Stack gap={1.5} sx={{ pt: 1 }}>
             <Stack direction={{ xs: 'column', sm: 'row' }} gap={1} alignItems={{ sm: 'center' }}>
-              <Typography sx={{ width: 48, fontSize: 12, fontWeight: 900 }}>IF</Typography>
+              <Typography sx={{ width: 48, fontSize: 12, fontWeight: 600 }}>IF</Typography>
               <FormControl fullWidth size="small">
                 <InputLabel>Client column</InputLabel>
                 <Select
@@ -18425,7 +19237,7 @@ const BomNormalizer = () => {
               />
             )}
             <Stack direction={{ xs: 'column', sm: 'row' }} gap={1} alignItems={{ sm: 'center' }}>
-              <Typography sx={{ width: 48, fontSize: 12, fontWeight: 900 }}>THEN</Typography>
+              <Typography sx={{ width: 48, fontSize: 12, fontWeight: 600 }}>THEN</Typography>
               <FormControl fullWidth size="small">
                 <InputLabel>Use client column</InputLabel>
                 <Select
@@ -18438,7 +19250,7 @@ const BomNormalizer = () => {
               </FormControl>
             </Stack>
             <Stack direction={{ xs: 'column', sm: 'row' }} gap={1} alignItems={{ sm: 'center' }}>
-              <Typography sx={{ width: 48, fontSize: 12, fontWeight: 900 }}>ELSE</Typography>
+              <Typography sx={{ width: 48, fontSize: 12, fontWeight: 600 }}>ELSE</Typography>
               <FormControl fullWidth size="small">
                 <InputLabel>Use client column</InputLabel>
                 <Select
@@ -18457,7 +19269,7 @@ const BomNormalizer = () => {
             <Button color="error" onClick={removeConditionalFieldMapping}>Remove rule</Button>
           )}
           <Box sx={{ flex: 1 }} />
-          <Button onClick={closeConditionalFieldMapping}>Cancel</Button>
+          <Button onClick={closeConditionalFieldMapping} sx={cancelButtonSx}>Cancel</Button>
           <Button variant="contained" onClick={saveConditionalFieldMapping}>Save rule</Button>
         </DialogActions>
       </Dialog>
@@ -18469,24 +19281,47 @@ const BomNormalizer = () => {
         fullWidth
         PaperProps={{
           sx: {
-            width: 'min(1480px, calc(100vw - 32px))',
-            maxWidth: '1480px',
+            width: 'min(1440px, calc(100vw - 32px))',
+            maxWidth: '1440px',
             height: 'calc(100dvh - 32px)',
             maxHeight: 'calc(100vh - 32px)',
             overflow: 'hidden',
-            borderRadius: '8px',
-            bgcolor: isDarkMode ? normalizerTheme.page : '#f5f6f8',
-            boxShadow: '0 24px 70px rgba(15, 23, 42, 0.24)',
+            borderRadius: '14px',
+            bgcolor: isDarkMode ? normalizerTheme.page : '#f4f7ff',
+            boxShadow: isDarkMode
+              ? '0 30px 84px -34px rgba(0,0,0,0.9)'
+              : '0 24px 70px -34px rgba(15, 23, 42, 0.32)',
+            color: normalizerTheme.text,
+            '& .MuiButton-root': {
+              textTransform: 'none',
+              fontSize: '12.5px',
+              fontWeight: 500,
+              letterSpacing: 0,
+            },
+            '& .MuiChip-root': {
+              fontWeight: 500,
+              letterSpacing: 0,
+            },
+            '& .MuiTableHead-root .MuiTableCell-root': {
+              bgcolor: isDarkMode ? '#1b1d23' : '#eef2f6',
+              color: isDarkMode ? '#d7dee9' : '#111827',
+              fontSize: '12.25px',
+              fontWeight: 550,
+            },
+            '& .MuiTableBody-root .MuiTableCell-root': {
+              fontSize: '12.25px',
+              fontWeight: 400,
+            },
           },
         }}
       >
-        <DialogTitle sx={{ px: 2.5, py: 1.7, borderBottom: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}>
+        <DialogTitle sx={{ px: 2.75, py: 1.7, borderBottom: `1px solid ${normalizerTheme.border}`, bgcolor: isDarkMode ? normalizerTheme.paper : '#ffffff' }}>
           <Stack direction="row" justifyContent="space-between" alignItems="center" gap={2}>
             <Box sx={{ minWidth: 0 }}>
-              <Typography sx={{ fontSize: 18, fontWeight: 780, color: normalizerTheme.text }}>
+              <Typography sx={{ fontSize: 18, fontWeight: 550, color: normalizerTheme.text }}>
                 {fieldPatternReviewStage === 'patterns' ? 'Confirm patterns' : 'Review all rows'}
               </Typography>
-              <Typography sx={{ mt: 0.35, fontSize: 12.5, color: normalizerTheme.muted }}>
+              <Typography sx={{ mt: 0.4, fontSize: 12.75, fontWeight: 400, color: normalizerTheme.muted }}>
                 {fieldPatternReviewStage === 'patterns'
                   ? 'Review each unique backend-detected pattern before checking the complete normalized output.'
                   : 'Compare every customer row with the backend-owned FactWise interpretation.'}
@@ -18494,23 +19329,60 @@ const BomNormalizer = () => {
             </Box>
           </Stack>
         </DialogTitle>
-        <DialogContent ref={fieldPatternReviewContentRef} sx={{ flex: 1, minHeight: 0, overflow: 'auto', p: 2 }}>
+        <DialogContent
+          ref={fieldPatternReviewContentRef}
+          sx={{
+            flex: 1,
+            minHeight: 0,
+            overflow: 'auto',
+            p: 2,
+            pb: 1.25,
+            bgcolor: isDarkMode ? normalizerTheme.page : '#f4f7ff',
+          }}
+        >
           {fieldPatternReviewStage === 'patterns' && (
             <Stack gap={1.25}>
-              <Paper elevation={0} sx={{ p: 1.5, border: `1px solid ${normalizerTheme.border}`, borderRadius: '8px', bgcolor: normalizerTheme.paper }}>
+              <Paper
+                elevation={0}
+                sx={{
+                  p: 1.5,
+                  border: `1px solid ${isDarkMode ? normalizerTheme.border : '#d9e2ef'}`,
+                  borderRadius: '10px',
+                  bgcolor: isDarkMode ? normalizerTheme.paper : '#ffffff',
+                  boxShadow: isDarkMode ? 'none' : '0 14px 34px -30px rgba(15,23,42,0.32)',
+                }}
+              >
                 <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" alignItems={{ xs: 'stretch', md: 'flex-end' }} gap={1.25}>
                   <Box sx={{ flex: 1 }}>
-                    <Typography sx={{ fontSize: 14, fontWeight: 850, color: normalizerTheme.text }}>Detection summary</Typography>
-                    <Box sx={{ mt: 1, display: 'grid', gridTemplateColumns: { xs: 'repeat(2, minmax(0, 1fr))', md: 'repeat(4, minmax(0, 1fr))' }, border: `1px solid ${normalizerTheme.border}`, borderRadius: '7px', overflow: 'hidden' }}>
+                    <Typography sx={{ fontSize: 13.5, fontWeight: 550, color: normalizerTheme.text }}>Detection summary</Typography>
+                    <Box
+                      sx={{
+                        mt: 1,
+                        display: 'grid',
+                        gridTemplateColumns: { xs: 'repeat(2, minmax(0, 1fr))', md: 'repeat(4, minmax(0, 1fr))' },
+                        border: `1px solid ${isDarkMode ? normalizerTheme.border : '#d9e2ef'}`,
+                        borderRadius: '8px',
+                        overflow: 'hidden',
+                        bgcolor: normalizerTheme.paperSoft,
+                      }}
+                    >
                       {[
                         ['Items detected', fieldPatternReviewSummary.itemCount, normalizerTheme.text],
-                        ['Patterns detected', fieldPatternReviewSummary.patternCount, '#1d4ed8'],
-                        ['Recognized', fieldPatternReviewSummary.recognizedPatternCount, '#0f766e'],
-                        ['Need review', fieldPatternReviewSummary.unrecognizedPatternCount, '#b45309'],
+                        ['Patterns detected', fieldPatternReviewSummary.patternCount, isDarkMode ? '#66b3ff' : '#005ecb'],
+                        ['Recognized', fieldPatternReviewSummary.recognizedPatternCount, isDarkMode ? '#99f6e4' : '#047c70'],
+                        ['Need review', fieldPatternReviewSummary.unrecognizedPatternCount, isDarkMode ? '#fbbf24' : '#b45309'],
                       ].map(([label, value, color], index) => (
-                        <Box key={label} sx={{ px: 1.4, py: 1.05, borderRight: index < 3 ? `1px solid ${normalizerTheme.border}` : 'none', bgcolor: normalizerTheme.paperSoft }}>
-                          <Typography sx={{ fontSize: 11.5, fontWeight: 750, color: normalizerTheme.muted }}>{label}</Typography>
-                          <Typography sx={{ mt: 0.15, fontSize: 22, fontWeight: 900, color }}>{Number(value || 0)}</Typography>
+                        <Box
+                          key={label}
+                          sx={{
+                            px: 1.4,
+                            py: 1.05,
+                            borderRight: index < 3 ? `1px solid ${isDarkMode ? normalizerTheme.border : '#d9e2ef'}` : 'none',
+                            bgcolor: isDarkMode ? normalizerTheme.paperSoft : '#fbfdff',
+                          }}
+                        >
+                          <Typography sx={{ fontSize: 11.25, fontWeight: 500, color: normalizerTheme.muted }}>{label}</Typography>
+                          <Typography sx={{ mt: 0.15, fontSize: 20, fontWeight: 550, color }}>{Number(value || 0)}</Typography>
                         </Box>
                       ))}
                     </Box>
@@ -18545,7 +19417,7 @@ const BomNormalizer = () => {
                   elevation={0}
                   sx={{
                     mt: 1.35,
-                    borderTop: `1px solid ${normalizerTheme.border}`,
+                    borderTop: `1px solid ${isDarkMode ? normalizerTheme.border : '#d9e2ef'}`,
                     bgcolor: 'transparent',
                     '&::before': { display: 'none' },
                   }}
@@ -18561,10 +19433,10 @@ const BomNormalizer = () => {
                     }}
                   >
                     <Box>
-                      <Typography sx={{ fontSize: 13.5, fontWeight: 850, color: normalizerTheme.text }}>
+                      <Typography sx={{ fontSize: 13, fontWeight: 550, color: normalizerTheme.text }}>
                         Parsing and cleanup
                       </Typography>
-                      <Typography sx={{ fontSize: 11.5, color: normalizerTheme.muted }}>
+                      <Typography sx={{ fontSize: 11.25, fontWeight: 400, color: normalizerTheme.muted }}>
                         Apply one backend parsing rule to every detected pattern for the selected field.
                       </Typography>
                     </Box>
@@ -18781,26 +19653,67 @@ const BomNormalizer = () => {
                   {filteredFieldPatternReviewPatterns.map((pattern, index) => {
                     const expanded = fieldPatternExpandedPatternKey === pattern.patternKey;
                     return (
-                      <Paper key={pattern.patternKey || index} elevation={0} sx={{ border: `1px solid ${expanded ? '#7db8ad' : normalizerTheme.border}`, overflow: 'hidden', bgcolor: normalizerTheme.paper }}>
+                      <Paper
+                        key={pattern.patternKey || index}
+                        elevation={0}
+                        sx={{
+                          border: `1px solid ${expanded ? (isDarkMode ? 'rgba(45, 212, 191, 0.34)' : '#6bbfb3') : (isDarkMode ? normalizerTheme.border : '#d9e2ef')}`,
+                          overflow: 'hidden',
+                          bgcolor: isDarkMode ? normalizerTheme.paper : '#ffffff',
+                          borderRadius: '10px',
+                          boxShadow: isDarkMode
+                            ? 'none'
+                            : expanded
+                              ? '0 14px 32px -24px rgba(15,118,110,0.26)'
+                              : '0 10px 26px -24px rgba(15,23,42,0.26)',
+                        }}
+                      >
                         <Box
                           component="button"
                           type="button"
                           onClick={() => handleReviewUnrecognizedPattern(pattern)}
                           aria-expanded={expanded}
-                          sx={{ width: '100%', p: 1.1, border: 0, bgcolor: expanded ? '#eef8f6' : normalizerTheme.paperSoft, color: 'inherit', cursor: 'pointer', textAlign: 'left' }}
+                          sx={{
+                            width: '100%',
+                            p: 1.05,
+                            border: 0,
+                            bgcolor: expanded
+                              ? (isDarkMode ? 'rgba(20, 83, 75, 0.20)' : '#f0fbf8')
+                              : (isDarkMode ? normalizerTheme.paperSoft : '#fbfdff'),
+                            color: 'inherit',
+                            cursor: 'pointer',
+                            textAlign: 'left',
+                          }}
                         >
                           <Stack direction="row" alignItems="center" justifyContent="space-between" gap={1}>
                             <Box sx={{ minWidth: 0 }}>
-                              <Typography sx={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace', fontSize: 12.5, fontWeight: 800, overflowWrap: 'anywhere' }}>
+                              <Typography sx={{ fontFamily: 'var(--fw-font-stack)', fontSize: 12.25, fontWeight: 550, color: normalizerTheme.text, overflowWrap: 'anywhere' }}>
                                 {index + 1}. {pattern.pattern}
                               </Typography>
-                              <Typography sx={{ mt: 0.25, fontSize: 11.5, color: normalizerTheme.muted }}>
+                              <Typography sx={{ mt: 0.25, fontSize: 11.25, fontWeight: 400, color: normalizerTheme.muted }}>
                                 {[pattern.sourceColumn, pattern.mappedFieldsLabel].filter(Boolean).join(' - ')}
                                 {pattern.occurrenceCount ? ` - ${pattern.occurrenceCount} occurrences` : ''}
                               </Typography>
                             </Box>
                             <Stack direction="row" alignItems="center" gap={0.65} sx={{ flexShrink: 0 }}>
-                              <Chip size="small" label={pattern.statusLabel} sx={{ bgcolor: pattern.recognized ? '#e4f3f0' : '#fff7e6', color: pattern.recognized ? '#0f6e63' : '#9a5b00', fontWeight: 850 }} />
+                              <Chip
+                                size="small"
+                                label={pattern.statusLabel}
+                                sx={{
+                                  height: 23,
+                                  fontSize: 11,
+                                  bgcolor: pattern.recognized
+                                    ? (isDarkMode ? 'rgba(45, 212, 191, 0.16)' : '#dff7f1')
+                                    : (isDarkMode ? 'rgba(245, 158, 11, 0.16)' : '#fff7e6'),
+                                  color: pattern.recognized
+                                    ? (isDarkMode ? '#99f6e4' : '#047c70')
+                                    : (isDarkMode ? '#fcd34d' : '#9a5b00'),
+                                  border: pattern.recognized
+                                    ? `1px solid ${isDarkMode ? 'rgba(45, 212, 191, 0.24)' : 'rgba(4, 124, 112, 0.20)'}`
+                                    : `1px solid ${isDarkMode ? 'rgba(245, 158, 11, 0.24)' : 'rgba(154, 91, 0, 0.16)'}`,
+                                  fontWeight: 500,
+                                }}
+                              />
                               {expanded ? <ExpandLessIcon /> : <ExpandMoreIcon />}
                             </Stack>
                           </Stack>
@@ -18911,12 +19824,12 @@ const BomNormalizer = () => {
                         gap={1.2}
                         sx={{ px: 1.6, py: 1.15, borderBottom: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paperSoft }}
                       >
-                        <Typography sx={{ fontSize: 14, fontWeight: 850, color: normalizerTheme.text }}>
+                        <Typography sx={{ fontSize: 14, fontWeight: 600, color: normalizerTheme.text }}>
                           All detected rows
                         </Typography>
                         <Stack direction="row" alignItems="center" gap={0.75} flexWrap="wrap">
-                          <Chip size="small" label={reviewModeLabel} sx={{ height: 25, fontSize: 11, fontWeight: 800, bgcolor: '#e4f3f0', color: '#0f6e63' }} />
-                          <Chip size="small" variant="outlined" label={`${groupSamples.length} source rows`} sx={{ height: 25, fontSize: 11, fontWeight: 800, bgcolor: normalizerTheme.paper }} />
+                          <Chip size="small" label={reviewModeLabel} sx={{ height: 25, fontSize: 11, fontWeight: 600, bgcolor: '#e4f3f0', color: '#0f6e63' }} />
+                          <Chip size="small" variant="outlined" label={`${groupSamples.length} source rows`} sx={{ height: 25, fontSize: 11, fontWeight: 600, bgcolor: normalizerTheme.paper }} />
                         </Stack>
                       </Stack>
                       <Box sx={{ p: 1.5 }}>
@@ -18930,7 +19843,7 @@ const BomNormalizer = () => {
                             alignItems: 'start',
                           }}
                         >
-                          <Typography sx={{ gridColumn: 1, gridRow: 1, fontSize: 14, fontWeight: 800, color: normalizerTheme.text }}>
+                          <Typography sx={{ gridColumn: 1, gridRow: 1, fontSize: 14, fontWeight: 600, color: normalizerTheme.text }}>
                             Client file and FactWise preview
                           </Typography>
                         </Box>
@@ -18968,14 +19881,14 @@ const BomNormalizer = () => {
                             >
                               <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ xs: 'flex-start', sm: 'center' }} gap={0.75} sx={{ mb: 0.9 }}>
                                 <Stack direction="row" alignItems="center" gap={0.65} flexWrap="wrap">
-                                  <Typography sx={{ fontSize: 12, fontWeight: 800, color: normalizerTheme.muted }}>
+                                  <Typography sx={{ fontSize: 12, fontWeight: 600, color: normalizerTheme.muted }}>
                                     Source row {sample.sourceRow}
                                   </Typography>
                                   {visibleEntries.length > 1 && (
                                     <Chip
                                       size="small"
                                       label={`${visibleEntries.length - 1} generated alternate rows`}
-                                      sx={{ height: 22, bgcolor: '#f1eafe', color: '#6d28d9', fontSize: 11, fontWeight: 800 }}
+                                      sx={{ height: 22, bgcolor: '#f1eafe', color: '#6d28d9', fontSize: 11, fontWeight: 600 }}
                                     />
                                   )}
                                 </Stack>
@@ -19036,7 +19949,7 @@ const BomNormalizer = () => {
                                   }}
                                 >
                                   <Stack direction="row" alignItems="center" sx={{ mb: 0.7, minHeight: 32 }}>
-                                    <Typography sx={{ fontSize: 12.5, fontWeight: 800, color: normalizerTheme.text }}>
+                                    <Typography sx={{ fontSize: 12.5, fontWeight: 600, color: normalizerTheme.text }}>
                                       Client file row
                                     </Typography>
                                   </Stack>
@@ -19053,7 +19966,7 @@ const BomNormalizer = () => {
 
                                 <Box sx={{ minWidth: 0 }}>
                                   <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 0.7, minHeight: 32 }} gap={1}>
-                                    <Typography sx={{ fontSize: 12.5, fontWeight: 800, color: normalizerTheme.text }}>
+                                    <Typography sx={{ fontSize: 12.5, fontWeight: 600, color: normalizerTheme.text }}>
                                       FactWise interpretation
                                     </Typography>
                                     <Stack direction="row" gap={0.75} flexWrap="wrap" justifyContent="flex-end">
@@ -19071,23 +19984,19 @@ const BomNormalizer = () => {
                                     </Stack>
                                   </Stack>
                                   <TableContainer
-                                    sx={{
+                                    sx={factWiseTableContainerSx(normalizerTableTone, {
                                       border: `1px solid ${normalizerTheme.border}`,
-                                      bgcolor: '#fff',
                                       height: 360,
                                       maxHeight: 360,
-                                      overflow: 'auto',
-                                    }}
+                                    })}
                                   >
                                     <Table
                                       stickyHeader
                                       size="small"
-                                      sx={{
+                                      sx={factWiseTableSx(normalizerTableTone, {
                                         minWidth: 128 + (visibleFactwiseFields.length * 150),
                                         tableLayout: 'fixed',
-                                        borderCollapse: 'separate',
-                                        borderSpacing: 0,
-                                      }}
+                                      })}
                                     >
                                       <TableHead>
                                         <TableRow>
@@ -19095,17 +20004,13 @@ const BomNormalizer = () => {
                                             sx={{
                                               width: 104,
                                               minWidth: 104,
+                                              ...factWiseTableHeaderCellSx(normalizerTableTone),
                                               px: 1,
-                                              py: 0.7,
+                                              py: 1.15,
                                               position: 'sticky',
                                               left: 0,
                                               zIndex: 4,
-                                              bgcolor: '#f3f6fb',
-                                              borderRight: `1px solid ${normalizerTheme.border}`,
-                                              borderBottom: `1px solid ${normalizerTheme.border}`,
-                                              color: '#475569',
-                                              fontSize: 11,
-                                              fontWeight: 850,
+                                              fontSize: 12.5,
                                             }}
                                           >
                                             Type
@@ -19117,17 +20022,10 @@ const BomNormalizer = () => {
                                               sx={{
                                                 width: 150,
                                                 minWidth: 150,
+                                                ...factWiseTableHeaderCellSx(normalizerTableTone),
                                                 px: 1,
-                                                py: 0.7,
-                                                bgcolor: '#f3f6fb',
-                                                borderRight: `1px solid ${normalizerTheme.border}`,
-                                                borderBottom: `1px solid ${normalizerTheme.border}`,
-                                                color: '#475569',
-                                                fontSize: 11,
-                                                fontWeight: 850,
-                                                whiteSpace: 'nowrap',
-                                                overflow: 'hidden',
-                                                textOverflow: 'ellipsis',
+                                                py: 1.15,
+                                                fontSize: 12.5,
                                               }}
                                             >
                                               {field.label}{field.required ? ' *' : ''}
@@ -19139,8 +20037,9 @@ const BomNormalizer = () => {
                                               width: 40,
                                               minWidth: 40,
                                               p: 0,
-                                              bgcolor: '#f3f6fb',
-                                              borderBottom: `1px solid ${normalizerTheme.border}`,
+                                              ...factWiseTableHeaderCellSx(normalizerTableTone, {
+                                                borderRight: 0,
+                                              }),
                                             }}
                                           />
                                         </TableRow>
@@ -19149,22 +20048,22 @@ const BomNormalizer = () => {
                                         {visibleEntries.map((entry, entryIndex) => {
                                           const relation = entryIndex === 0 ? 'Primary' : `Alternate ${entryIndex}`;
                                           return (
-                                            <TableRow key={`${sample.sourceRow}-entry-${entryIndex}`} hover>
+                                            <TableRow key={`${sample.sourceRow}-entry-${entryIndex}`} hover sx={factWiseTableRowSx(normalizerTableTone)}>
                                               <TableCell
                                                 sx={{
                                                   width: 104,
                                                   minWidth: 104,
                                                   px: 1,
-                                                  py: 0.85,
+                                                  py: 1.2,
                                                   position: 'sticky',
                                                   left: 0,
                                                   zIndex: 2,
-                                                  bgcolor: entryIndex === 0 ? '#f8fafc' : '#eff6ff',
-                                                  borderRight: `1px solid ${normalizerTheme.border}`,
-                                                  borderBottom: `1px solid ${normalizerTheme.border}`,
-                                                  color: entryIndex === 0 ? normalizerTheme.text : '#2563eb',
-                                                  fontSize: 11.5,
-                                                  fontWeight: 850,
+                                                  bgcolor: entryIndex === 0 ? normalizerTableTone.row : normalizerTableTone.activeRow,
+                                                  borderRight: `1px solid ${normalizerTableTone.verticalDivider}`,
+                                                  borderBottom: `1px dashed ${normalizerTableTone.border}`,
+                                                  color: entryIndex === 0 ? normalizerTableTone.text : normalizerTheme.pageTokens.primaryText,
+                                                  fontSize: 12,
+                                                  fontWeight: 500,
                                                   whiteSpace: 'nowrap',
                                                 }}
                                               >
@@ -19177,9 +20076,9 @@ const BomNormalizer = () => {
                                                     width: 150,
                                                     minWidth: 150,
                                                     p: 0,
-                                                    bgcolor: '#fff',
-                                                    borderRight: `1px solid ${normalizerTheme.border}`,
-                                                    borderBottom: `1px solid ${normalizerTheme.border}`,
+                                                    bgcolor: normalizerTableTone.row,
+                                                    borderRight: `1px solid ${normalizerTableTone.verticalDivider}`,
+                                                    borderBottom: `1px dashed ${normalizerTableTone.border}`,
                                                     verticalAlign: 'top',
                                                   }}
                                                 >
@@ -19210,10 +20109,14 @@ const BomNormalizer = () => {
                                                       bgcolor: 'transparent',
                                                       color: normalizerTheme.text,
                                                       font: 'inherit',
-                                                      fontSize: 12,
+                                                      fontSize: 13,
+                                                      fontWeight: 400,
                                                       lineHeight: 1.35,
                                                       boxSizing: 'border-box',
-                                                      '&:focus': { boxShadow: 'inset 0 0 0 2px #60a5fa' },
+                                                      '&:focus': {
+                                                        bgcolor: normalizerTableTone.focusBg,
+                                                        boxShadow: 'inset 0 0 0 2px rgba(0, 122, 255, 0.16)',
+                                                      },
                                                     }}
                                                   />
                                                 </TableCell>
@@ -19224,8 +20127,8 @@ const BomNormalizer = () => {
                                                   width: 40,
                                                   minWidth: 40,
                                                   p: 0.25,
-                                                  bgcolor: '#fff',
-                                                  borderBottom: `1px solid ${normalizerTheme.border}`,
+                                                  bgcolor: normalizerTableTone.row,
+                                                  borderBottom: `1px dashed ${normalizerTableTone.border}`,
                                                 }}
                                               >
                                                 {entryIndex > 0 && (
@@ -19275,7 +20178,7 @@ const BomNormalizer = () => {
                               size="small"
                               variant="outlined"
                               label={`Rows ${reviewPageStart + 1}-${Math.min(reviewPageStart + samples.length, groupSamples.length)} of ${groupSamples.length}`}
-                              sx={{ height: 30, fontSize: 11.5, fontWeight: 800 }}
+                              sx={{ height: 30, fontSize: 11.5, fontWeight: 600 }}
                             />
                             <ShadcnButton
                               size="sm"
@@ -19300,7 +20203,7 @@ const BomNormalizer = () => {
             </Grid>
           ))}
         </DialogContent>
-        <DialogActions sx={{ px: 2.5, py: 1.35, justifyContent: 'space-between', gap: 1, flexWrap: 'wrap', borderTop: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}>
+        <DialogActions sx={{ px: 2.75, py: 1.45, justifyContent: 'space-between', gap: 1, flexWrap: 'wrap', borderTop: `1px solid ${normalizerTheme.border}`, bgcolor: isDarkMode ? '#17181d' : normalizerTheme.paperSoft }}>
           {fieldPatternReviewStage === 'patterns' ? (
             <>
               <Button color="inherit" onClick={() => setFieldPatternReviewOpen(false)}>Close</Button>
@@ -19320,12 +20223,24 @@ const BomNormalizer = () => {
             </>
           ) : (
             <>
-              <Button color="inherit" startIcon={<ChevronLeftIcon />} onClick={() => setFieldPatternReviewStage('patterns')}>Back</Button>
+              <Button
+                color="inherit"
+                startIcon={<ChevronLeftIcon />}
+                onClick={() => setFieldPatternReviewStage('patterns')}
+                sx={{ minWidth: 86 }}
+              >
+                Back
+              </Button>
               <Button
                 variant="contained"
                 disabled={fieldPatternLoading}
                 onClick={handleApplyFieldPatternReview}
-                sx={{ bgcolor: '#0f6e63', boxShadow: 'none', '&:hover': { bgcolor: '#0b5b53', boxShadow: 'none' } }}
+                sx={{
+                  minWidth: 138,
+                  bgcolor: normalizerTheme.pageTokens.primary,
+                  boxShadow: '0 12px 22px -16px rgba(0, 122, 255, 0.9)',
+                  '&:hover': { bgcolor: normalizerTheme.pageTokens.primaryHover, boxShadow: '0 12px 22px -16px rgba(0, 122, 255, 0.9)' },
+                }}
               >
                 Apply patterns
               </Button>
@@ -19349,6 +20264,27 @@ const BomNormalizer = () => {
             display: 'flex',
             flexDirection: 'column',
             overflow: 'hidden',
+            bgcolor: isDarkMode ? normalizerTheme.paper : '#ffffff',
+            backgroundImage: 'none',
+            border: `1px solid ${isDarkMode ? normalizerTheme.borderStrong : '#d8e2ef'}`,
+            boxShadow: isDarkMode
+              ? '0 30px 84px -34px rgba(0,0,0,0.9)'
+              : '0 28px 76px -42px rgba(15, 23, 42, 0.34)',
+            '& .MuiDialogTitle-root': {
+              bgcolor: isDarkMode ? normalizerTheme.paper : '#ffffff',
+              borderBottom: `1px solid ${isDarkMode ? normalizerTheme.border : '#e4ebf3'}`,
+              px: 2.6,
+              py: 1.7,
+            },
+            '& .MuiDialogContent-root': {
+              bgcolor: isDarkMode ? normalizerTheme.page : '#f5f8ff',
+              px: 2.6,
+              py: 1.5,
+            },
+            '& .MuiDialogActions-root': {
+              bgcolor: isDarkMode ? '#17181d' : '#f8fbff',
+              borderTop: `1px solid ${isDarkMode ? normalizerTheme.border : '#e4ebf3'}`,
+            },
           },
         }}
       >
@@ -19356,9 +20292,9 @@ const BomNormalizer = () => {
           <Box>
             <Stack direction="row" justifyContent="space-between" alignItems="flex-start" gap={2}>
               <Box sx={{ minWidth: 0, flex: 1 }}>
-                <Typography sx={{ fontSize: 19, fontWeight: 780 }}>{visualTeachDialogTitle}</Typography>
+                <Typography sx={{ fontSize: 18.5, fontWeight: 600, color: normalizerTheme.text }}>{visualTeachDialogTitle}</Typography>
                 {(visualTeachBackendPreview?.pattern || visualTeachContext?.workflowStep?.pattern) && (
-                  <Typography sx={{ mt: 0.45, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace', fontSize: 12.5, fontWeight: 750, color: '#0f6e63', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', wordBreak: 'break-word' }}>
+                  <Typography sx={{ mt: 0.45, fontFamily: 'var(--fw-font-stack)', fontSize: 12.5, fontWeight: 550, color: isDarkMode ? '#99f6e4' : '#087265', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', wordBreak: 'break-word' }}>
                     {visualTeachBackendPreview?.pattern || visualTeachContext.workflowStep.pattern}
                   </Typography>
                 )}
@@ -19382,14 +20318,14 @@ const BomNormalizer = () => {
                   size="small"
                   variant="outlined"
                   label={`Pattern group ${visualTeachContext.workflowStep.patternNumberForColumn} of ${visualTeachContext.workflowStep.patternCountForColumn}`}
-                  sx={{ height: 27, flexShrink: 0, fontSize: 11, fontWeight: 800 }}
+                  sx={{ height: 27, flexShrink: 0, fontSize: 11, fontWeight: 600 }}
                 />
                 {(visualTeachContext.workflowStep.occurrenceCount || visualTeachContext.group?.occurrenceCount) > 0 && (
                   <Chip
                     size="small"
                     variant="outlined"
                     label={`${visualTeachContext.workflowStep.occurrenceCount || visualTeachContext.group?.occurrenceCount} matching fragments`}
-                    sx={{ height: 27, flexShrink: 0, fontSize: 11, fontWeight: 800 }}
+                    sx={{ height: 27, flexShrink: 0, fontSize: 11, fontWeight: 600 }}
                   />
                 )}
                 <Tooltip title="Next pattern group">
@@ -19415,9 +20351,9 @@ const BomNormalizer = () => {
         </DialogTitle>
         <DialogContent sx={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
           {visualTeachContext ? (
-            <Grid container spacing={1.5}>
+            <Grid container spacing={1.35}>
               <Grid item xs={12}>
-                <Paper elevation={0} sx={{ p: 1.2, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paperSoft }}>
+                <Paper elevation={0} sx={{ p: 1.2, ...visualTeachSoftCardSx }}>
                   <Stack direction="row" alignItems="center" gap={0.35}>
                     <Tooltip title={visualTeachSourceRowExpanded ? 'Hide source row' : 'Show source row'}>
                       <IconButton
@@ -19430,7 +20366,7 @@ const BomNormalizer = () => {
                         {visualTeachSourceRowExpanded ? <ExpandLessIcon /> : <ExpandMoreIcon />}
                       </IconButton>
                     </Tooltip>
-                    <Typography sx={{ fontSize: 12.5, fontWeight: 850, color: normalizerTheme.text }}>
+                    <Typography sx={{ fontSize: 12.5, fontWeight: 500, color: normalizerTheme.text }}>
                       Source row {visualTeachContext.sample?.sourceRow || '-'}
                     </Typography>
                   </Stack>
@@ -19450,10 +20386,10 @@ const BomNormalizer = () => {
               </Grid>
               <Grid item xs={12}>
                 <Stack gap={1.1}>
-                  <Paper elevation={0} sx={{ p: 1.2, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}>
+                  <Paper elevation={0} sx={{ p: 1.2, ...visualTeachLightCardSx }}>
                     <Stack direction="row" justifyContent="space-between" alignItems="center" gap={1} sx={{ mb: 0.8 }}>
                       <Box sx={{ minWidth: 0 }}>
-                        <Typography sx={{ fontSize: 12.5, fontWeight: 850, color: normalizerTheme.text }}>
+                        <Typography sx={{ fontSize: 12.5, fontWeight: 500, color: normalizerTheme.text }}>
                           Tag cell spans
                         </Typography>
                         <Typography
@@ -19470,30 +20406,18 @@ const BomNormalizer = () => {
                           disabled={!visualTeachSelection}
                           startIcon={<DeleteOutlineIcon />}
                           onClick={handleClearVisualTeachSelection}
+                          sx={{ color: visualTeachSelection ? normalizerTheme.pageTokens.primary : normalizerTheme.disabled }}
                         >
                           Clear selected
                         </Button>
-                        <Button size="small" variant="text" onClick={handleClearVisualTeachTags}>
+                        <Button size="small" variant="text" onClick={handleClearVisualTeachTags} sx={{ color: normalizerTheme.pageTokens.primary }}>
                           Clear all
                         </Button>
                       </Stack>
                     </Stack>
                     <Box
                       onMouseUp={handleVisualTeachMouseUp}
-                      sx={{
-                        p: 1.25,
-                        minHeight: 96,
-                        borderRadius: '8px',
-                        border: `1px solid ${normalizerTheme.border}`,
-                        bgcolor: normalizerTheme.paperSoft,
-                        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
-                        fontSize: 13,
-                        lineHeight: 2.25,
-                        whiteSpace: 'pre-wrap',
-                        overflowWrap: 'anywhere',
-                        cursor: 'text',
-                        userSelect: 'none',
-                      }}
+                      sx={visualTeachSpanSurfaceSx}
                     >
                       {(visualTeachContext.sourceValue || '').split('').map((char, index) => {
                         const role = visualTeachPreparedTags[index];
@@ -19505,23 +20429,16 @@ const BomNormalizer = () => {
                           <Box
                             key={`${index}-${char}`}
                             component="span"
+                            role="button"
+                            aria-label={char === ' ' ? `Select space at position ${index + 1}` : `Select ${char} at position ${index + 1}`}
                             onMouseDown={(event) => {
                               event.preventDefault();
                               handleVisualTeachMouseDown(index);
                             }}
                             onMouseEnter={() => handleVisualTeachMouseEnter(index)}
-                            sx={{
-                              px: role ? 0.1 : 0,
-                              py: 0.1,
-                              borderRadius: role ? '3px' : 0,
-                              bgcolor: roleStyle.bg || 'transparent',
-                              color: roleStyle.color || normalizerTheme.text,
-                              fontWeight: role ? 850 : 600,
-                              outline: selected ? '2px dashed #0f172a' : 'none',
-                              outlineOffset: '-1px',
-                            }}
+                            sx={visualTeachCharacterSx(role, roleStyle, selected)}
                           >
-                            {char}
+                            {char === ' ' ? '\u00A0' : char}
                           </Box>
                         );
                       })}
@@ -19534,13 +20451,7 @@ const BomNormalizer = () => {
                           variant="outlined"
                           disabled={!visualTeachSelection}
                           onClick={() => handleApplyVisualTeachRole(role.key)}
-                          sx={{
-                            borderColor: role.color,
-                            color: role.color,
-                            bgcolor: role.bg,
-                            fontWeight: 800,
-                            '&:hover': { borderColor: role.color, bgcolor: role.bg },
-                          }}
+                          sx={visualTeachRoleButtonSx(role)}
                         >
                           {role.label}
                         </Button>
@@ -19551,7 +20462,7 @@ const BomNormalizer = () => {
                     </Typography>
                   </Paper>
 
-                  <Paper elevation={0} sx={{ p: 1.2, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}>
+                  <Paper elevation={0} sx={{ p: 1.2, ...visualTeachLightCardSx }}>
                     <Stack direction={{ xs: 'column', sm: 'row' }} gap={1} alignItems={{ xs: 'stretch', sm: 'center' }}>
                       <FormControl size="small" sx={{ minWidth: 190 }}>
                         <InputLabel>Alternate separator</InputLabel>
@@ -19610,9 +20521,9 @@ const BomNormalizer = () => {
                     </Stack>
                   </Paper>
 
-                  <Paper elevation={0} sx={{ p: 1.2, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}>
+                  <Paper elevation={0} sx={{ p: 1.2, ...visualTeachLightCardSx }}>
                     <Stack direction="row" justifyContent="space-between" alignItems="center" gap={1} sx={{ mb: 0.8 }}>
-                      <Typography sx={{ fontSize: 12.5, fontWeight: 850, color: normalizerTheme.text }}>
+                      <Typography sx={{ fontSize: 12.5, fontWeight: 500, color: normalizerTheme.text }}>
                         Generated FactWise rows
                       </Typography>
                       <Stack direction="row" alignItems="center" gap={0.75}>
@@ -19625,7 +20536,7 @@ const BomNormalizer = () => {
                             !visualTeachPreparedTags.some((role) => role && role !== 'groupSeparator')
                           }
                           onClick={handlePreviewVisualTeachPattern}
-                          sx={{ minHeight: 26, py: 0.2, fontSize: 11.5, fontWeight: 800 }}
+                          sx={{ minHeight: 26, py: 0.2, fontSize: 11.5, fontWeight: 500 }}
                         >
                           Preview
                         </Button>
@@ -19635,18 +20546,18 @@ const BomNormalizer = () => {
                           label={visualTeachPreviewLoading
                             ? 'Backend preview...'
                             : `${visualTeachPreviewEntries.length} row${visualTeachPreviewEntries.length === 1 ? '' : 's'}`}
-                          sx={{ height: 22, fontSize: 11, fontWeight: 800 }}
+                          sx={{ height: 22, fontSize: 11, fontWeight: 500, bgcolor: isDarkMode ? normalizerTheme.paperSoft : '#ffffff' }}
                         />
                       </Stack>
                     </Stack>
                     {visualTeachPreviewEntries.length ? (
-                      <TableContainer sx={{ border: `1px solid ${normalizerTheme.border}`, maxHeight: 260 }}>
-                        <Table stickyHeader size="small">
+                      <TableContainer sx={factWiseTableContainerSx(normalizerTableTone, { maxHeight: 260, borderRadius: '10px', boxShadow: 'none' })}>
+                        <Table stickyHeader size="small" sx={factWiseTableSx(normalizerTableTone)}>
                           <TableHead>
                             <TableRow>
-                              <TableCell sx={{ fontWeight: 850, bgcolor: normalizerTheme.tableHeader }}>Row</TableCell>
+                              <TableCell sx={factWiseTableHeaderCellSx(normalizerTableTone)}>Row</TableCell>
                               {visualTeachMappedFields.map((field) => (
-                                <TableCell key={field.key} sx={{ fontWeight: 850, bgcolor: normalizerTheme.tableHeader }}>
+                                <TableCell key={field.key} sx={factWiseTableHeaderCellSx(normalizerTableTone)}>
                                   {field.label}
                                 </TableCell>
                               ))}
@@ -19655,9 +20566,9 @@ const BomNormalizer = () => {
                           <TableBody>
                             {visualTeachPreviewEntries.map((entry, index) => (
                               <TableRow key={`${entry.relation}-${index}`}>
-                                <TableCell sx={{ fontSize: 12.5, fontWeight: 800 }}>{entry.relation}</TableCell>
+                                <TableCell sx={factWiseTableBodyCellSx(normalizerTableTone, { fontSize: 12.5, fontWeight: 500 })}>{entry.relation}</TableCell>
                                 {visualTeachMappedFields.map((field) => (
-                                  <TableCell key={field.key} sx={{ minWidth: field.key === 'description' ? 240 : 160 }}>
+                                  <TableCell key={field.key} sx={factWiseTableBodyCellSx(normalizerTableTone, { minWidth: field.key === 'description' ? 240 : 160 })}>
                                     <TextField
                                       fullWidth
                                       size="small"
@@ -19678,7 +20589,7 @@ const BomNormalizer = () => {
                                         '& .MuiInputBase-input': {
                                           py: 0.8,
                                           fontSize: 12.5,
-                                          fontWeight: ['mpn', 'manufacturer'].includes(field.key) ? 750 : 500,
+                                          fontWeight: 500,
                                           color: VISUAL_TEACH_FIELD_STYLES[field.key]?.color || normalizerTheme.text,
                                         },
                                       }}
@@ -19704,7 +20615,7 @@ const BomNormalizer = () => {
           )}
         </DialogContent>
         <DialogActions sx={{ px: 3, pb: 2, justifyContent: 'space-between', gap: 1 }}>
-          <Button onClick={() => setVisualTeachOpen(false)}>Cancel</Button>
+          <Button onClick={() => setVisualTeachOpen(false)} sx={cancelButtonSx}>Cancel</Button>
           <Button
             variant="contained"
             disabled={
@@ -19718,6 +20629,16 @@ const BomNormalizer = () => {
             }
             onClick={handleApplyVisualTeachPattern}
             endIcon={<ChevronRightIcon />}
+            sx={{
+              minWidth: 176,
+              '&.Mui-disabled': {
+                opacity: 1,
+                bgcolor: isDarkMode ? 'rgba(148, 163, 184, 0.12)' : '#e9eef5',
+                color: isDarkMode ? 'rgba(226, 232, 240, 0.48)' : '#9aa5b5',
+                border: `1px solid ${isDarkMode ? 'rgba(148, 163, 184, 0.16)' : '#d5deea'}`,
+                boxShadow: 'none',
+              },
+            }}
           >
             Use this interpretation
           </Button>
@@ -19735,7 +20656,7 @@ const BomNormalizer = () => {
       >
         <DialogTitle>
           <Box>
-            <Typography sx={{ fontSize: 19, fontWeight: 760, letterSpacing: 0 }}>Review parsing setup</Typography>
+            <Typography sx={{ fontSize: 19, fontWeight: 600, letterSpacing: 0 }}>Review parsing setup</Typography>
             <Typography sx={{ mt: 0.45, fontSize: 13, lineHeight: 1.45, color: normalizerTheme.muted }}>
               Review the selected columns and parser rules before normalization runs.
             </Typography>
@@ -19756,7 +20677,7 @@ const BomNormalizer = () => {
                 height: 28,
                 px: 0.35,
                 fontSize: 12.5,
-                fontWeight: 800,
+                fontWeight: 600,
                 color: '#1e3a8a',
                 bgcolor: '#eff6ff',
                 borderColor: '#bfdbfe',
@@ -19771,7 +20692,7 @@ const BomNormalizer = () => {
                 height: 28,
                 px: 0.35,
                 fontSize: 12.5,
-                fontWeight: 800,
+                fontWeight: 600,
                 color: '#5b21b6',
                 bgcolor: '#f5f3ff',
                 borderColor: '#ddd6fe',
@@ -19786,7 +20707,7 @@ const BomNormalizer = () => {
                 height: 28,
                 px: 0.35,
                 fontSize: 12.5,
-                fontWeight: 800,
+                fontWeight: 600,
                 color: '#166534',
                 bgcolor: '#f0fdf4',
                 borderColor: '#bbf7d0',
@@ -19794,14 +20715,14 @@ const BomNormalizer = () => {
               }}
             />
             {selectedParsingPattern?.section?.unmatched?.count > 0 && (
-              <Chip size="small" color="warning" variant="outlined" label={`${selectedParsingPattern.section.unmatched.count} unmatched`} sx={{ fontWeight: 650 }} />
+              <Chip size="small" color="warning" variant="outlined" label={`${selectedParsingPattern.section.unmatched.count} unmatched`} sx={{ fontWeight: 500 }} />
             )}
           </Stack>
 
           <Paper elevation={0} sx={{ mb: 1.5, p: 1.35, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}>
             <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" gap={1} alignItems={{ xs: 'stretch', sm: 'center' }}>
               <Box>
-                <Typography sx={{ fontSize: 14, fontWeight: 760, color: normalizerTheme.text }}>
+                <Typography sx={{ fontSize: 14, fontWeight: 600, color: normalizerTheme.text }}>
                   FactWise columns
                 </Typography>
                 <Typography sx={{ mt: 0.25, fontSize: 12.5, color: normalizerTheme.muted }}>
@@ -19812,17 +20733,17 @@ const BomNormalizer = () => {
                 size="small"
                 variant="outlined"
                 label={`${detectedParsingLogic?.matchingRows || 0} parsed source value${detectedParsingLogic?.matchingRows === 1 ? '' : 's'}`}
-                sx={{ fontWeight: 700 }}
+                sx={{ fontWeight: 600 }}
               />
             </Stack>
             <TableContainer sx={{ mt: 1, maxHeight: 280, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paperSoft }}>
               <Table stickyHeader size="small">
                 <TableHead>
                   <TableRow>
-                    <TableCell sx={{ minWidth: 145, fontWeight: 800, bgcolor: normalizerTheme.tableHeader, color: normalizerTheme.text, borderColor: normalizerTheme.border }}>FactWise field</TableCell>
-                    <TableCell sx={{ minWidth: 185, fontWeight: 800, bgcolor: normalizerTheme.tableHeader, color: normalizerTheme.text, borderColor: normalizerTheme.border }}>Source</TableCell>
-                    <TableCell sx={{ minWidth: 245, fontWeight: 800, bgcolor: normalizerTheme.tableHeader, color: normalizerTheme.text, borderColor: normalizerTheme.border }}>How it is parsed</TableCell>
-                    <TableCell sx={{ minWidth: 180, fontWeight: 800, bgcolor: normalizerTheme.tableHeader, color: normalizerTheme.text, borderColor: normalizerTheme.border }}>Sample parsed value</TableCell>
+                    <TableCell sx={{ minWidth: 145, fontWeight: 600, bgcolor: normalizerTheme.tableHeader, color: normalizerTheme.text, borderColor: normalizerTheme.border }}>FactWise field</TableCell>
+                    <TableCell sx={{ minWidth: 185, fontWeight: 600, bgcolor: normalizerTheme.tableHeader, color: normalizerTheme.text, borderColor: normalizerTheme.border }}>Source</TableCell>
+                    <TableCell sx={{ minWidth: 245, fontWeight: 600, bgcolor: normalizerTheme.tableHeader, color: normalizerTheme.text, borderColor: normalizerTheme.border }}>How it is parsed</TableCell>
+                    <TableCell sx={{ minWidth: 180, fontWeight: 600, bgcolor: normalizerTheme.tableHeader, color: normalizerTheme.text, borderColor: normalizerTheme.border }}>Sample parsed value</TableCell>
                   </TableRow>
                 </TableHead>
                 <TableBody>
@@ -19830,9 +20751,9 @@ const BomNormalizer = () => {
                     <TableRow key={field.key} hover sx={{ opacity: field.status === 'not_mapped' ? 0.68 : 1 }}>
                       <TableCell sx={{ borderColor: normalizerTheme.border, color: normalizerTheme.text }}>
                         <Stack direction="row" alignItems="center" gap={0.75} flexWrap="wrap">
-                          <Typography sx={{ fontSize: 12.5, fontWeight: 780 }}>{field.label}</Typography>
-                          {field.status === 'default' && <Chip size="small" label="Default" sx={{ height: 20, fontSize: 10.5, fontWeight: 800 }} />}
-                          {field.status === 'not_mapped' && <Chip size="small" variant="outlined" label="Not mapped" sx={{ height: 20, fontSize: 10.5, fontWeight: 750 }} />}
+                          <Typography sx={{ fontSize: 12.5, fontWeight: 600 }}>{field.label}</Typography>
+                          {field.status === 'default' && <Chip size="small" label="Default" sx={{ height: 20, fontSize: 10.5, fontWeight: 600 }} />}
+                          {field.status === 'not_mapped' && <Chip size="small" variant="outlined" label="Not mapped" sx={{ height: 20, fontSize: 10.5, fontWeight: 550 }} />}
                         </Stack>
                       </TableCell>
                       <TableCell sx={{ borderColor: normalizerTheme.border, color: field.status === 'not_mapped' ? normalizerTheme.muted : normalizerTheme.text, fontSize: 12.5, wordBreak: 'break-word' }}>
@@ -19864,11 +20785,11 @@ const BomNormalizer = () => {
                     <Chip
                       size="small"
                       label="Edited"
-                      sx={{ height: 19, fontSize: 10.5, fontWeight: 800, bgcolor: '#f5f3ff', color: '#5b21b6', border: '1px solid #ddd6fe' }}
+                      sx={{ height: 19, fontSize: 10.5, fontWeight: 600, bgcolor: '#f5f3ff', color: '#5b21b6', border: '1px solid #ddd6fe' }}
                     />
                   )}
                 </Stack>
-                <Typography sx={{ mt: 0.2, fontSize: 15, fontWeight: 760, lineHeight: 1.35, color: normalizerTheme.text }} noWrap>
+                <Typography sx={{ mt: 0.2, fontSize: 15, fontWeight: 600, lineHeight: 1.35, color: normalizerTheme.text }} noWrap>
                   {selectedParsingPattern
                     ? `${selectedParsingPatternNumber}. ${selectedParsingPattern.pattern?.shape || 'No pattern detected'}`
                     : (selectedStructureOption?.label || 'Selected identity layout')}
@@ -19889,7 +20810,7 @@ const BomNormalizer = () => {
                       width: { xs: '77%', sm: 119 },
                       minWidth: 0,
                       px: 2,
-                      fontWeight: 700,
+                      fontWeight: 600,
                       bgcolor: '#2563eb',
                       color: '#ffffff',
                       boxShadow: 'none',
@@ -19929,7 +20850,7 @@ const BomNormalizer = () => {
 
           {!selectedParsingPattern && (
             <Paper elevation={0} sx={{ mt: 1.5, p: 1.6, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}>
-              <Typography sx={{ fontSize: 14, fontWeight: 700, color: normalizerTheme.text }}>
+              <Typography sx={{ fontSize: 14, fontWeight: 600, color: normalizerTheme.text }}>
                 Rules to apply
               </Typography>
               <Stack gap={0.85} sx={{ mt: 1 }}>
@@ -19940,16 +20861,16 @@ const BomNormalizer = () => {
                 ))}
               </Stack>
               <Stack direction="row" gap={0.75} flexWrap="wrap" sx={{ mt: 1.4 }}>
-                <Chip size="small" variant="outlined" label={`Identity: ${selectedStructureOption?.label || currentIdentityLayout}`} sx={{ fontWeight: 650 }} />
-                <Chip size="small" variant="outlined" label={`Rows: ${selectedRowPlacementOption?.label || config.rowPlacement || 'Same row'}`} sx={{ fontWeight: 650 }} />
-                <Chip size="small" variant="outlined" label={`BOM layout: ${selectedBomLayoutOption?.label || 'None'}`} sx={{ fontWeight: 650 }} />
-                <Chip size="small" variant="outlined" label={`Alternates: ${selectedAlternateOption?.label || config.alternateLayout}`} sx={{ fontWeight: 650 }} />
+                <Chip size="small" variant="outlined" label={`Identity: ${selectedStructureOption?.label || currentIdentityLayout}`} sx={{ fontWeight: 500 }} />
+                <Chip size="small" variant="outlined" label={`Rows: ${selectedRowPlacementOption?.label || config.rowPlacement || 'Same row'}`} sx={{ fontWeight: 500 }} />
+                <Chip size="small" variant="outlined" label={`BOM layout: ${selectedBomLayoutOption?.label || 'None'}`} sx={{ fontWeight: 500 }} />
+                <Chip size="small" variant="outlined" label={`Alternates: ${selectedAlternateOption?.label || config.alternateLayout}`} sx={{ fontWeight: 500 }} />
                 {config.alternateLayout !== 'already_separate_rows' && (
                   <Chip
                     size="small"
                     variant="outlined"
                     label={`Autofill: ${selectedAlternateInheritLabels.length ? selectedAlternateInheritLabels.join(', ') : 'None'}`}
-                    sx={{ fontWeight: 650 }}
+                    sx={{ fontWeight: 500 }}
                   />
                 )}
               </Stack>
@@ -19968,7 +20889,7 @@ const BomNormalizer = () => {
                   </Typography>
                 </Box>
                 <Stack direction="row" gap={0.75} flexWrap="wrap" alignItems="center" justifyContent={{ xs: 'flex-start', sm: 'flex-end' }}>
-                  <Chip size="small" variant="outlined" label={`${selectedParsingPattern.pattern.count} rows`} sx={{ fontWeight: 650 }} />
+                  <Chip size="small" variant="outlined" label={`${selectedParsingPattern.pattern.count} rows`} sx={{ fontWeight: 500 }} />
                 </Stack>
               </Stack>
 
@@ -19983,15 +20904,15 @@ const BomNormalizer = () => {
                       bgcolor: normalizerTheme.paperSoft,
                     }}
                   >
-                    <Typography sx={{ mb: 0.75, fontSize: 12.5, fontWeight: 780, color: normalizerTheme.text }}>
+                    <Typography sx={{ mb: 0.75, fontSize: 12.5, fontWeight: 600, color: normalizerTheme.text }}>
                       Example used for this pattern
                     </Typography>
-                    <Typography sx={{ fontSize: 11.5, fontWeight: 650, color: normalizerTheme.muted }}>
+                    <Typography sx={{ fontSize: 11.5, fontWeight: 500, color: normalizerTheme.muted }}>
                       {example.sourceRow
                         ? `Source row ${example.sourceRow}`
                         : `Representative entry ${index + 1}`}
                     </Typography>
-                    <Typography sx={{ mt: 0.35, fontSize: 13, fontWeight: 650, lineHeight: 1.4, color: normalizerTheme.text, wordBreak: 'break-word' }}>
+                    <Typography sx={{ mt: 0.35, fontSize: 13, fontWeight: 500, lineHeight: 1.4, color: normalizerTheme.text, wordBreak: 'break-word' }}>
                       {example.source}
                     </Typography>
                     {showSelectedSlashVariantExpansion && selectedSlashVariantExpansion?.example && (
@@ -20006,7 +20927,7 @@ const BomNormalizer = () => {
                       >
                         <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ xs: 'stretch', sm: 'center' }} gap={1}>
                           <Box sx={{ minWidth: 0 }}>
-                            <Typography sx={{ fontSize: 12.5, fontWeight: 800, color: normalizerTheme.text }}>
+                            <Typography sx={{ fontSize: 12.5, fontWeight: 600, color: normalizerTheme.text }}>
                               Slash variant expansion
                             </Typography>
                             <Stack direction="row" gap={0.65} flexWrap="wrap" sx={{ mt: 0.65 }}>
@@ -20017,14 +20938,14 @@ const BomNormalizer = () => {
                                   color={pairIndex === 0 ? 'success' : undefined}
                                   variant={pairIndex === 0 ? 'filled' : 'outlined'}
                                   label={`${pairIndex === 0 ? 'Primary' : `Alt ${pairIndex}`}: ${pair.mpn}`}
-                                  sx={{ fontWeight: 700 }}
+                                  sx={{ fontWeight: 600 }}
                                 />
                               ))}
                               <Chip
                                 size="small"
                                 color="info"
                                 label={`MFR: ${selectedSlashVariantExpansion.example.manufacturer}`}
-                                sx={{ fontWeight: 700 }}
+                                sx={{ fontWeight: 600 }}
                               />
                             </Stack>
                           </Box>
@@ -20033,7 +20954,7 @@ const BomNormalizer = () => {
                             variant={selectedSlashVariantStaged ? 'outlined' : 'contained'}
                             disabled={!selectedParsingPattern || configureParserPreparing}
                             onClick={handleExpandSlashVariantsForPattern}
-                            sx={{ minWidth: 154, fontWeight: 800, textTransform: 'none' }}
+                            sx={{ minWidth: 154, fontWeight: 600, textTransform: 'none' }}
                           >
                             {selectedSlashVariantStaged ? 'Expansion staged' : 'Use expansion'}
                           </Button>
@@ -20049,7 +20970,7 @@ const BomNormalizer = () => {
                           variant={item.type === 'discard' ? 'outlined' : 'filled'}
                           label={item.label}
                           sx={{
-                            fontWeight: item.type === 'discard' ? 600 : 700,
+                            fontWeight: item.type === 'discard' ? 500 : 600,
                             color: item.type === 'discard' ? normalizerTheme.muted : undefined,
                             borderColor: item.type === 'discard' ? normalizerTheme.borderStrong : undefined,
                             bgcolor: item.type === 'tag' ? '#7c3aed' : item.type === 'spec' ? '#f59e0b' : item.type === 'custom' ? '#6366f1' : item.type === 'direct' ? '#0f766e' : undefined,
@@ -20062,9 +20983,9 @@ const BomNormalizer = () => {
                             size="small"
                             color="success"
                             label={`${pairIndex === 0 ? 'Primary MPN' : `Alt ${pairIndex}`}: ${pair.mpn}`}
-                            sx={{ fontWeight: 650 }}
+                            sx={{ fontWeight: 500 }}
                           />
-                          <Chip size="small" color="info" label={`MFR: ${pair.manufacturer}`} sx={{ fontWeight: 650 }} />
+                          <Chip size="small" color="info" label={`MFR: ${pair.manufacturer}`} sx={{ fontWeight: 500 }} />
                           {pair.discarded && <Chip size="small" variant="outlined" label={`Ignore: ${pair.discarded}`} sx={{ fontWeight: 600, color: normalizerTheme.muted }} />}
                         </React.Fragment>
                       ))}
@@ -20079,7 +21000,7 @@ const BomNormalizer = () => {
                   variant="outlined"
                   onClick={() => setSelectedParsingDetailsOpen(open => !open)}
                   endIcon={selectedParsingDetailsOpen ? <ExpandLessIcon fontSize="small" /> : <ExpandMoreIcon fontSize="small" />}
-                  sx={{ minHeight: 28, fontSize: 11.5, fontWeight: 750, textTransform: 'none' }}
+                  sx={{ minHeight: 28, fontSize: 11.5, fontWeight: 550, textTransform: 'none' }}
                 >
                   {selectedParsingDetailsOpen ? 'Hide raw matched rows' : 'View raw matched rows'}
                 </Button>
@@ -20087,7 +21008,7 @@ const BomNormalizer = () => {
 
               {selectedParsingDetailsOpen && (
                 <Box sx={{ mt: 1.25 }}>
-                  <Typography sx={{ fontSize: 12.5, fontWeight: 750, color: normalizerTheme.text }}>
+                  <Typography sx={{ fontSize: 12.5, fontWeight: 550, color: normalizerTheme.text }}>
                     Raw matched source rows
                   </Typography>
                   <Stack
@@ -20109,7 +21030,7 @@ const BomNormalizer = () => {
                           bgcolor: normalizerTheme.paperSoft,
                         }}
                       >
-                        <Typography sx={{ fontSize: 11.25, fontWeight: 700, color: normalizerTheme.muted }}>
+                        <Typography sx={{ fontSize: 11.25, fontWeight: 600, color: normalizerTheme.muted }}>
                           {matchedRow.sourceRow
                             ? `Source row ${matchedRow.sourceRow}${matchedRow.entryCount > 1 ? ` - ${matchedRow.entryCount} entries in source cell` : ''}`
                             : `Matched row ${rowIndex + 1}`}
@@ -20154,7 +21075,7 @@ const BomNormalizer = () => {
       <Dialog open={confirmOpen} onClose={() => setConfirmOpen(false)} maxWidth="sm" fullWidth>
         <DialogTitle>Review normalization summary</DialogTitle>
         <DialogContent>
-          <Typography sx={{ fontSize: 14, color: '#536171', mb: 1.5 }}>
+          <Typography sx={{ fontSize: 14, color: normalizerTheme.muted, mb: 1.5 }}>
             FactWise parsed the sheet using your selected columns and parser settings. Confirm before opening the editable output sheet.
           </Typography>
           <Stack direction="row" gap={1} flexWrap="wrap">
@@ -20182,7 +21103,7 @@ const BomNormalizer = () => {
                 userSelect: 'none',
               }}
             >
-              <Typography sx={{ fontSize: 13, fontWeight: 750, color: normalizerTheme.text }}>
+              <Typography sx={{ fontSize: 13, fontWeight: 550, color: normalizerTheme.text }}>
                 Parser settings and rules
               </Typography>
               <IconButton
@@ -20199,7 +21120,7 @@ const BomNormalizer = () => {
             </Stack>
             {summaryParserDetailsOpen && (
               <Box sx={{ mt: 0.85 }}>
-                <Typography sx={{ fontSize: 12.5, fontWeight: 800, color: normalizerTheme.text }}>
+                <Typography sx={{ fontSize: 12.5, fontWeight: 600, color: normalizerTheme.text }}>
                   Parser settings used
                 </Typography>
                 <Stack direction="row" gap={0.8} flexWrap="wrap" sx={{ mt: 0.75 }}>
@@ -20214,7 +21135,7 @@ const BomNormalizer = () => {
                   )}
                   <Chip size="small" label="Blank BOM level: 1" />
                 </Stack>
-                <Typography sx={{ mt: 1.1, fontSize: 12.5, fontWeight: 800, color: normalizerTheme.text }}>
+                <Typography sx={{ mt: 1.1, fontSize: 12.5, fontWeight: 600, color: normalizerTheme.text }}>
                   Logic rules applied
                 </Typography>
                 <Stack direction="row" gap={0.8} flexWrap="wrap" sx={{ mt: 0.7 }}>
@@ -20225,7 +21146,7 @@ const BomNormalizer = () => {
               </Box>
             )}
           </Box>
-          <Typography sx={{ mt: 2, fontSize: 13, color: '#66717f' }}>
+          <Typography sx={{ mt: 2, fontSize: 13, color: normalizerTheme.muted }}>
             If these numbers look off, go back and adjust the columns, teach a field pattern, or change cleanup options.
           </Typography>
         </DialogContent>
@@ -20270,12 +21191,13 @@ const BomNormalizer = () => {
           ) : (
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, py: 3 }}>
               <CircularProgress size={18} />
-              <Typography sx={{ fontSize: 14, color: '#66717f' }}>Preparing...</Typography>
+              <Typography sx={{ fontSize: 14, color: normalizerTheme.muted }}>Preparing...</Typography>
             </Box>
           )}
         </DialogContent>
         <DialogActions>
           <Button
+            sx={cancelButtonSx}
             onClick={() => {
               setConfigureSplitColsOpen(false);
               setConfigureParserSessionId('');

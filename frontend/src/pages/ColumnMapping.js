@@ -49,6 +49,19 @@ import api, { setGlobalLoaderCallback } from '../services/api';
 import ExpandColumnGroupsDialog from '../components/ExpandColumnGroupsDialog';
 import CarryForwardDialog from '../components/CarryForwardDialog';
 import { useThemeContext } from '../utils/ThemeContext';
+import {
+  buildFactWisePageTokens,
+  factWiseAlertSx,
+  factWiseCancelButtonSx,
+  factWiseInputLabelSx,
+  factWiseGlowSx,
+  factWiseGridOverlaySx,
+  factWisePrimaryButtonSx,
+  factWiseSelectFieldSx,
+  factWiseSelectMenuProps,
+  factWiseToastAlertSx,
+  factWiseTopShadeSx,
+} from '../utils/factwisePageStyles';
 // Optional: lightweight import of synchronizer helpers later if needed
 // import { getDataSynchronizer } from '../utils/DataSynchronizer';
 // Inline helper functions to avoid module initialization issues
@@ -112,6 +125,27 @@ const CustomNode = ({ data, id }) => {
   const onDelete = data.onDelete;
   const isDynamic = data.isDynamic || false;  // true for dynamically added columns (Tag_1, etc.)
   const isDark = data.isDarkMode || false;
+  const nodeSurfaceClass = isDark
+    ? 'bg-[#171b23] border-white/10 text-[#e6edf7]'
+    : 'bg-white border-[#d7dee8] text-[#111827]';
+  const nodeHoverClass = isDark
+    ? 'hover:border-[#4f9cff]/45 hover:bg-[#1b1d23]'
+    : 'hover:border-[#007aff]/38 hover:bg-[#fbfdff]';
+  const nodeAccentClass = isSource
+    ? isDark
+      ? 'border-l-[#4f9cff]'
+      : 'border-l-[#007aff]'
+    : isDark
+      ? 'border-l-[#34d399]'
+      : 'border-l-[#10b981]';
+  const connectedRingClass = isConnected
+    ? isSource
+      ? 'ring-1 ring-[#007aff]/35 shadow-[0_18px_36px_-30px_rgba(0,122,255,0.65)]'
+      : 'ring-1 ring-emerald-500/32 shadow-[0_18px_36px_-30px_rgba(16,185,129,0.58)]'
+    : '';
+  const mutedBadgeClass = isDark
+    ? 'bg-[#1b1d23] text-[#a8b2c1] border-white/10'
+    : 'bg-[#eef2f6] text-[#687386] border-transparent';
 
   // Header editing state (for source nodes)
   const [isEditing, setIsEditing] = React.useState(false);
@@ -185,37 +219,20 @@ const CustomNode = ({ data, id }) => {
       
       {/* Pair number indicator */}
       {!isSource && pairType !== 'single' && (
-        <div className={`absolute -top-2 -left-2 w-6 h-6 rounded-full ${colorClasses.bg} text-white text-xs font-bold flex items-center justify-center shadow-lg`}>
+        <div className={`absolute -top-2 -left-2 w-6 h-6 rounded-full ${colorClasses.bg} text-white text-xs font-semibold flex items-center justify-center shadow-lg`}>
           {pairIndex}
         </div>
       )}
       
       {/* Main node container */}
       <div className={`
-        relative px-5 py-4 rounded-2xl border transition-all duration-300 shadow-[0_14px_35px_-24px_rgba(15,23,42,0.55)]
-        w-[280px] text-center font-semibold text-sm min-h-[76px] flex items-center justify-center
-        ${isSource 
-            ? isDark
-              ? `bg-gradient-to-br from-blue-950/85 via-slate-900 to-sky-950/75 border-blue-700/50 text-blue-50 
-               hover:border-blue-500/70 hover:shadow-[0_20px_42px_-28px_rgba(59,130,246,0.55)]`
-            : `bg-gradient-to-br from-blue-100 via-sky-50 to-cyan-50 border-blue-300 text-blue-950 
-               hover:border-blue-400 hover:shadow-[0_20px_42px_-26px_rgba(37,99,235,0.65)]`
-          : isDark
-            ? `bg-gradient-to-br from-emerald-950/85 via-slate-900 to-teal-950/75 border-emerald-700/50 text-emerald-50 
-               hover:border-emerald-500/70 hover:shadow-[0_20px_42px_-28px_rgba(16,185,129,0.55)]`
-            : `bg-gradient-to-br from-emerald-100 via-teal-50 to-cyan-50 border-emerald-300 text-emerald-950 
-               hover:border-emerald-400 hover:shadow-[0_20px_42px_-26px_rgba(16,185,129,0.65)]`
-        }
-        ${isConnected
-          ? isSource
-            ? isDark
-              ? 'ring-1 ring-blue-400/50 shadow-[0_22px_48px_-32px_rgba(59,130,246,0.55)]'
-              : 'ring-1 ring-blue-300/80 shadow-[0_22px_48px_-30px_rgba(37,99,235,0.42)]'
-            : isDark
-              ? 'ring-1 ring-emerald-400/50 shadow-[0_22px_48px_-32px_rgba(16,185,129,0.55)]'
-              : 'ring-1 ring-emerald-300/80 shadow-[0_22px_48px_-30px_rgba(16,185,129,0.45)]'
-          : ''}
-        ${isSelected ? 'ring-2 ring-purple-500/70 scale-[1.02] shadow-xl' : ''}
+        relative px-5 py-3.5 rounded-xl border border-l-[3px] transition-all duration-200 shadow-[0_12px_28px_-24px_rgba(15,23,42,0.5)]
+        w-[280px] text-center font-medium text-[12.5px] leading-[1.35] min-h-[72px] flex items-center justify-center
+        ${nodeSurfaceClass}
+        ${nodeHoverClass}
+        ${nodeAccentClass}
+        ${connectedRingClass}
+        ${isSelected ? 'ring-2 ring-[#007aff]/55 scale-[1.01] shadow-[0_18px_38px_-28px_rgba(0,122,255,0.72)]' : ''}
         ${isFromTemplate ? 'ring-1 ring-emerald-400/55' : ''}
         ${isSpecificationMapping ? 'ring-1 ring-orange-400/55' : ''}
         ${!isSource && pairType !== 'single' ? 'ml-2' : ''}
@@ -226,14 +243,14 @@ const CustomNode = ({ data, id }) => {
           <Handle
             type="source"
             position={Position.Right}
-            className="w-4 h-4 bg-blue-600 border-3 border-white shadow-lg opacity-70 group-hover:opacity-100 transition-all duration-200 hover:scale-125"
+            className={`w-3.5 h-3.5 bg-[#007aff] border-2 ${isDark ? 'border-[#171b23]' : 'border-white'} shadow-sm opacity-75 group-hover:opacity-100 transition-all duration-200 hover:scale-110`}
           />
         )}
         {!isSource && (
           <Handle
             type="target"
             position={Position.Left}
-            className="w-4 h-4 bg-emerald-600 border-3 border-white shadow-lg opacity-70 group-hover:opacity-100 transition-all duration-200 hover:scale-125"
+            className={`w-3.5 h-3.5 bg-emerald-500 border-2 ${isDark ? 'border-[#171b23]' : 'border-white'} shadow-sm opacity-75 group-hover:opacity-100 transition-all duration-200 hover:scale-110`}
           />
         )}
         
@@ -274,13 +291,13 @@ const CustomNode = ({ data, id }) => {
                 // Display mode for source nodes
                 <div className="flex flex-col items-center gap-1">
                   <div className="flex items-center gap-2">
-                    <span className={isCorrected ? 'font-semibold text-blue-700' : ''}>
+                    <span className={isCorrected ? (isDark ? 'font-medium text-[#9fd0ff]' : 'font-medium text-[#005ecb]') : ''}>
                       {data.originalLabel}
                     </span>
                     {isFromPDF && (
                       <button
                         onClick={handleEditStart}
-                        className="p-1 text-blue-500 hover:text-blue-700 hover:bg-blue-100 rounded transition-colors"
+                        className={`p-1 rounded transition-colors ${isDark ? 'text-[#66b3ff] hover:bg-[#0b355f]/70' : 'text-[#007aff] hover:bg-[#eaf2ff]'}`}
                         title="Edit header"
                       >
                         <Edit3 size={12} />
@@ -291,7 +308,7 @@ const CustomNode = ({ data, id }) => {
                   {/* Confidence score for PDF headers */}
                   {isFromPDF && confidence && (
                     <div className={`
-                      px-2 py-0.5 rounded-full text-xs font-bold
+                      px-2 py-0.5 rounded-full text-xs font-medium
                       ${confidence >= 0.8
                         ? 'bg-green-100 text-green-700 border border-green-300'
                         : confidence >= 0.6
@@ -319,22 +336,22 @@ const CustomNode = ({ data, id }) => {
               {/* Source indicator badge - Template (from Excel) vs Dynamic (added via UI) */}
               <div className="mt-1 flex flex-wrap justify-center gap-1">
                 {isDynamic ? (
-                  <span className="text-[9px] px-1.5 py-0.5 rounded-full font-semibold bg-cyan-100 text-cyan-700 border border-cyan-300">
+                  <span className="text-[9px] px-1.5 py-0.5 rounded-full font-medium bg-cyan-100 text-cyan-700 border border-cyan-300">
                     Dynamic
                   </span>
                 ) : (
-                  <span className="text-[9px] px-1.5 py-0.5 rounded-full font-semibold bg-slate-100 text-slate-600 border border-slate-300">
+                  <span className={`text-[9px] px-1.5 py-0.5 rounded-full font-medium border ${mutedBadgeClass}`}>
                     Template
                   </span>
                 )}
                 {/* AT / FW badges */}
                 {data.atBadge && (
-                  <span className="text-[9px] px-1.5 py-0.5 rounded-full font-bold bg-amber-200 text-amber-800 border border-amber-400">
+                  <span className="text-[9px] px-1.5 py-0.5 rounded-full font-medium bg-amber-100 text-amber-700 border border-amber-200">
                     {data.atBadge}
                   </span>
                 )}
                 {data.fwBadge && (
-                  <span className="text-[9px] px-1.5 py-0.5 rounded-full font-bold bg-purple-200 text-purple-800 border border-purple-400">
+                  <span className="text-[9px] px-1.5 py-0.5 rounded-full font-medium bg-purple-100 text-purple-700 border border-purple-200">
                     {data.fwBadge}
                   </span>
                 )}
@@ -362,35 +379,35 @@ const CustomNode = ({ data, id }) => {
         
         {/* Source node mapping indicator */}
         {isSource && isConnected && mappedFromLabel && mappedFromLabel.trim() !== '' && (
-          <div className="absolute -bottom-3 right-3 max-w-[240px] truncate bg-blue-600 text-white text-xs px-3 py-1.5 rounded-full font-extrabold shadow-lg shadow-blue-500/25">
+            <div className="absolute -bottom-3 right-3 max-w-[240px] truncate bg-[#007aff] text-white text-[10.5px] px-2.5 py-1 rounded-full font-medium shadow-[0_10px_18px_-12px_rgba(0,122,255,0.8)]">
             Map-{mappedFromLabel}
           </div>
         )}
         
         {/* Template indicator - Show Map-{Column Name} for manual/template mappings. A.Map reserved for AI */}
         {!isSource && !isSpecificationMapping && mappedToLabel && mappedToLabel.trim() !== '' && !data.isAiGenerated && (
-          <div className="absolute -bottom-3 right-3 max-w-[240px] truncate bg-emerald-600 text-white text-xs px-3 py-1.5 rounded-full font-extrabold shadow-lg shadow-emerald-500/25">
+          <div className="absolute -bottom-3 right-3 max-w-[240px] truncate bg-emerald-600 text-white text-[10.5px] px-2.5 py-1 rounded-full font-medium shadow-[0_10px_18px_-12px_rgba(16,185,129,0.72)]">
             Map-{mappedToLabel}
           </div>
         )}
         
         {/* AI mapping indicator - Show A.Map-{Column Name} when auto-mapped */}
         {(isSpecificationMapping || data.isAiGenerated) && mappedToLabel && mappedToLabel.trim() !== '' && (
-          <div className="absolute -bottom-3 right-3 max-w-[240px] truncate bg-orange-500 text-white text-xs px-3 py-1.5 rounded-full font-extrabold shadow-lg shadow-orange-500/25">
+          <div className="absolute -bottom-3 right-3 max-w-[240px] truncate bg-orange-500 text-white text-[10.5px] px-2.5 py-1 rounded-full font-medium shadow-[0_10px_18px_-12px_rgba(249,115,22,0.72)]">
             A.Map-{mappedToLabel}
           </div>
         )}
         
         {/* Default value indicator for template fields */}
         {!isSource && hasDefaultValue && (
-          <div className="absolute -bottom-3 right-3 max-w-[240px] truncate bg-blue-600 text-white text-xs px-3 py-1.5 rounded-full font-extrabold shadow-lg shadow-blue-500/25">
+          <div className="absolute -bottom-3 right-3 max-w-[240px] truncate bg-[#007aff] text-white text-[10.5px] px-2.5 py-1 rounded-full font-medium shadow-[0_10px_18px_-12px_rgba(0,122,255,0.8)]">
             Default: {data.defaultValue}
           </div>
         )}
         
         {/* FactWise ID formula indicator */}
         {!isSource && data.factwiseFormula && (
-          <div className="absolute -bottom-3 right-3 max-w-[240px] truncate bg-purple-600 text-white text-xs px-3 py-1.5 rounded-full font-extrabold shadow-lg shadow-purple-500/25">
+          <div className="absolute -bottom-3 right-3 max-w-[240px] truncate bg-purple-600 text-white text-[10.5px] px-2.5 py-1 rounded-full font-medium shadow-[0_10px_18px_-12px_rgba(147,51,234,0.72)]">
             {data.factwiseFormula}
           </div>
         )}
@@ -398,7 +415,7 @@ const CustomNode = ({ data, id }) => {
         {/* Selection indicator */}
         {isSelected && (
           <div className="absolute inset-0 rounded-xl border-3 border-purple-500 bg-purple-100 bg-opacity-30 pointer-events-none animate-pulse">
-            <div className="absolute -top-2 -right-2 bg-purple-500 text-white text-xs px-2 py-1 rounded-full font-bold shadow-lg">
+            <div className="absolute -top-2 -right-2 bg-[#007aff] text-white text-[10px] px-2 py-1 rounded-full font-medium shadow-lg">
               Selected
             </div>
           </div>
@@ -506,7 +523,33 @@ const getFlowLayout = () => {
 };
 
 export default function ColumnMapping() {
-  const { isDarkMode } = useThemeContext();
+  const { isDarkMode, tokens: themeTokens } = useThemeContext();
+  const fwTokens = buildFactWisePageTokens(isDarkMode, themeTokens);
+  const snackbarAlertSx = (severity = 'info') => factWiseToastAlertSx(fwTokens, severity, {
+    minHeight: 38,
+    maxWidth: 'min(360px, calc(100vw - 40px))',
+    boxShadow: isDarkMode
+      ? '0 18px 44px -24px rgba(0,0,0,0.82)'
+      : '0 18px 42px -28px rgba(15,23,42,0.24)',
+    sx: {
+      width: 'fit-content',
+    },
+  });
+  const inlineDialogAlertSx = (severity = 'info', sx = {}) => factWiseAlertSx(fwTokens, severity, {
+    minHeight: 34,
+    py: 0.45,
+    px: 1.05,
+    borderRadius: '8px',
+    fontSize: '12px',
+    fontWeight: 400,
+    iconSize: 16,
+    sx: {
+      '& .MuiAlert-message': {
+        lineHeight: 1.35,
+      },
+      ...sx,
+    },
+  });
   const { sessionId } = useParams();
   const navigate = useNavigate();
   const location = useLocation();
@@ -4707,10 +4750,10 @@ export default function ColumnMapping() {
       <div className="w-full h-screen bg-gradient-to-br from-slate-50 to-red-50 flex items-center justify-center">
         <div className="text-center bg-white rounded-2xl shadow-2xl p-10">
           <AlertCircle className="w-20 h-20 text-red-500 mx-auto mb-6" />
-          <h2 className="text-xl font-bold text-red-600 mb-4">{error}</h2>
+          <h2 className="text-xl font-medium text-red-600 mb-4">{error}</h2>
           <button 
             onClick={() => window.location.reload()} 
-            className="px-8 py-3 bg-red-600 text-white rounded-xl hover:bg-red-700 transition-colors font-semibold"
+            className="px-8 py-3 bg-red-600 text-white rounded-xl hover:bg-red-700 transition-colors font-medium"
           >
             Retry Loading
           </button>
@@ -4722,40 +4765,65 @@ export default function ColumnMapping() {
   const flowLayout = getFlowLayout();
   const flowRowHeight = flowLayout.nodeHeight + flowLayout.nodeSpacing;
   const appHeaderOffset = '54px';
-  const sidebarButtonBase = 'w-full h-11 px-4 rounded-full flex items-center gap-3 text-sm font-medium transition-all disabled:opacity-50';
-  const sidePanelClass = `rounded-2xl border p-4 ${
-    isDarkMode ? 'bg-slate-900/70 border-slate-800' : 'bg-slate-50 border-slate-200'
+  const sidebarButtonBase = 'group w-full h-10 px-2.5 rounded-xl flex items-center gap-2.5 text-[13px] font-medium transition-all disabled:opacity-45 disabled:pointer-events-none';
+  const drawerIconClass = `h-8 w-8 shrink-0 rounded-lg border flex items-center justify-center transition-colors ${
+    isDarkMode
+      ? 'border-white/10 bg-[#1b1d23] text-[#a8b2c1] group-hover:border-[#007aff]/28 group-hover:bg-[#0b355f]/42 group-hover:text-[#9fd0ff]'
+      : 'border-[#d7dee8] bg-white text-[#687386] group-hover:border-[#007aff]/28 group-hover:bg-[#eaf2ff] group-hover:text-[#007aff]'
+  }`;
+  const dangerDrawerIconClass = `h-8 w-8 shrink-0 rounded-lg border flex items-center justify-center transition-colors ${
+    isDarkMode
+      ? 'border-red-400/16 bg-red-500/10 text-red-300 group-hover:bg-red-500/14'
+      : 'border-red-200 bg-red-50 text-red-600 group-hover:bg-red-100'
+  }`;
+  const sidePanelClass = `rounded-xl border p-3.5 shadow-[0_16px_34px_-30px_rgba(15,23,42,0.36)] ${
+    isDarkMode ? 'bg-[#171b23] border-white/10' : 'bg-white border-[#d7dee8]'
   }`;
   const sideSectionLabelClass = `text-[11px] font-medium uppercase tracking-[0.06em] mb-2.5 ${
-    isDarkMode ? 'text-slate-400' : 'text-slate-500'
+    isDarkMode ? 'text-[#a8b2c1]' : 'text-[#687386]'
   }`;
-  const primaryBluePillClass = `rounded-full bg-blue-600 text-white shadow-[0_14px_28px_-16px_rgba(37,99,235,0.9)] hover:bg-blue-700 hover:shadow-[0_18px_34px_-18px_rgba(37,99,235,0.95)] hover:-translate-y-0.5 ${
-    isDarkMode ? 'disabled:bg-slate-800 disabled:text-slate-500' : 'disabled:bg-slate-200 disabled:text-slate-400'
+  const primaryBluePillClass = `rounded-full border border-[#007aff] bg-[linear-gradient(180deg,#0d80ff_0%,#007aff_100%)] text-white shadow-[0_12px_20px_-10px_rgba(0,122,255,0.72),inset_0_1px_0_rgba(255,255,255,0.28)] hover:brightness-105 active:brightness-95 active:scale-[0.98] transition-[filter,transform,box-shadow] ${
+    isDarkMode ? 'disabled:bg-[#1b1d23] disabled:text-[#818b9a]' : 'disabled:bg-slate-200 disabled:text-slate-400'
+  }`;
+  const secondaryPillClass = `rounded-full border px-3 text-[12px] font-medium transition-colors ${
+    isDarkMode
+      ? 'border-white/10 bg-[#171b23] text-[#c8d1dd] hover:border-[#007aff]/45 hover:bg-[#1b1d23]'
+      : 'border-[#d7dee8] bg-white text-[#475569] hover:border-[#007aff]/45 hover:bg-[#f7f9fb]'
+  }`;
+  const cancelPillClass = `rounded-full border px-5 text-[13px] font-medium transition-colors ${
+    isDarkMode
+      ? 'border-red-400/20 bg-red-950/20 text-red-300 hover:border-red-300/35 hover:bg-red-500/18 hover:text-red-200'
+      : 'border-red-200 bg-red-50 text-red-600 hover:border-red-300 hover:bg-rose-100 hover:text-red-600'
+  }`;
+  const stepButtonClass = `h-7 w-7 rounded-md border flex items-center justify-center text-[13px] font-medium transition-colors ${
+    isDarkMode ? 'bg-[#1b1d23] border-white/10 text-[#c8d1dd] hover:bg-[#232832]' : 'bg-white border-[#d7dee8] text-[#475569] hover:bg-[#f7f9fb]'
+  }`;
+  const statCardBaseClass = `rounded-lg border p-2.5 ${
+    isDarkMode ? 'bg-[#1b1d23] border-white/10' : 'bg-[#f7f9fb] border-[#d7dee8]'
+  }`;
+  const lanePillClass = `max-w-full rounded-full border px-3.5 py-2 text-[13px] font-medium flex items-center gap-2.5 whitespace-nowrap transition-colors ${
+    isDarkMode ? 'bg-[#171b23] border-white/10 text-[#e6edf7]' : 'bg-white border-[#d7dee8] text-[#111827]'
   }`;
   const muiPillButtonSx = {
     borderRadius: '999px',
     px: 2.5,
     py: 0.85,
-    fontWeight: 700,
+    fontWeight: 500,
     textTransform: 'none',
     boxShadow: 'none'
   };
   const muiPrimaryPillSx = {
     ...muiPillButtonSx,
-    bgcolor: '#2563eb',
+    ...factWisePrimaryButtonSx,
     color: '#ffffff',
-    boxShadow: '0 14px 28px -16px rgba(37, 99, 235, 0.9)',
-    '&:hover': {
-      bgcolor: '#1d4ed8',
-      boxShadow: '0 18px 34px -18px rgba(37, 99, 235, 0.95)'
-    }
   };
+  const muiCancelPillSx = factWiseCancelButtonSx(fwTokens);
   const mappingDialogPaperSx = {
     borderRadius: '18px',
     overflow: 'hidden',
-    bgcolor: isDarkMode ? '#111827' : '#ffffff',
+    bgcolor: fwTokens.surface,
     color: isDarkMode ? '#f8fafc' : '#0f172a',
-    border: isDarkMode ? '1px solid rgba(148, 163, 184, 0.18)' : '1px solid #e2e8f0',
+    border: `1px solid ${fwTokens.border}`,
     boxShadow: isDarkMode
       ? '0 28px 80px rgba(0, 0, 0, 0.72)'
       : '0 24px 70px rgba(15, 23, 42, 0.18)'
@@ -4764,52 +4832,66 @@ export default function ColumnMapping() {
     px: 3,
     pt: 2.5,
     pb: 1.25,
-    bgcolor: isDarkMode ? '#111827' : '#ffffff'
+    bgcolor: fwTokens.surface
   };
   const mappingDialogBodySx = {
     px: 3,
     py: 1.5,
-    bgcolor: isDarkMode ? '#111827' : '#ffffff'
+    bgcolor: fwTokens.surface
   };
   const mappingDialogFooterSx = {
     px: 3,
     py: 2,
     gap: 1,
-    bgcolor: isDarkMode ? '#111827' : '#f8fafc',
-    borderTop: isDarkMode ? '1px solid rgba(148, 163, 184, 0.12)' : '1px solid #e2e8f0'
+    bgcolor: isDarkMode ? fwTokens.surface : fwTokens.rail,
+    borderTop: `1px solid ${fwTokens.border}`
   };
-  const dialogInputClass = `w-full rounded-xl border px-4 py-3 text-sm outline-none transition-colors focus:ring-2 focus:ring-blue-500 ${
+  const dialogInputClass = `w-full rounded-lg border px-3 py-2 text-[13px] font-normal outline-none transition-colors focus:ring-2 focus:ring-[#007aff]/20 ${
     isDarkMode
-      ? 'bg-slate-950/60 border-slate-700 text-slate-100 placeholder:text-slate-500'
-      : 'bg-slate-50 border-slate-200 text-slate-900 placeholder:text-slate-400'
+      ? 'bg-[#1b1d23] border-white/10 text-[#e6edf7] placeholder:text-[#818b9a]'
+      : 'bg-white border-[#d7dee8] text-[#111827] placeholder:text-[#94a3b8]'
   }`;
-  const dialogSelectClass = `rounded-xl border px-3 py-2 text-sm outline-none transition-colors focus:ring-2 focus:ring-blue-500 ${
+  const dialogSelectClass = `rounded-lg border px-3 py-2 text-[13px] font-normal outline-none transition-colors focus:ring-2 focus:ring-[#007aff]/20 ${
     isDarkMode
-      ? 'bg-slate-950/60 border-slate-700 text-slate-100'
-      : 'bg-slate-50 border-slate-200 text-slate-900'
+      ? 'bg-[#1b1d23] border-white/10 text-[#e6edf7]'
+      : 'bg-white border-[#d7dee8] text-[#111827]'
   }`;
-  const dialogLabelClass = `block text-sm font-medium mb-2 ${isDarkMode ? 'text-slate-300' : 'text-slate-700'}`;
+  const dialogLabelClass = `block text-[12.5px] font-medium mb-1.5 ${isDarkMode ? 'text-[#a8b2c1]' : 'text-[#687386]'}`;
+  const primaryDialogSelectSx = factWiseSelectFieldSx(fwTokens, { height: 36 });
+  const primaryDialogInputLabelSx = factWiseInputLabelSx(fwTokens);
+  const primaryDialogMenuProps = factWiseSelectMenuProps(fwTokens, {
+    width: { xs: 'calc(100vw - 64px)', sm: 420 },
+    maxHeight: 240,
+  });
 
   return (
-    <div className="w-full h-screen bg-gradient-to-br from-slate-50 to-blue-50 flex flex-col">
+    <div
+      className="w-full h-screen flex flex-col font-sans relative overflow-hidden isolate"
+      style={{
+        background: fwTokens.pageBackground,
+        color: fwTokens.text,
+        fontFamily: '"Inter Variable", Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
+      }}
+    >
+      <Box sx={factWiseTopShadeSx(isDarkMode)} />
+      <Box sx={factWiseGlowSx(fwTokens)} />
+      <Box sx={factWiseGridOverlaySx(fwTokens)} />
 
 
-      {/* Clean Top Header - Theme Adaptive & Premium */}
-      <div className={`px-6 py-4 border-b shadow-md transition-colors ${
-        isDarkMode ? 'bg-[#0b101b] border-slate-800 text-white' : 'bg-white/95 backdrop-blur-md border-slate-200 text-slate-800'
-      }`}>
-        <div className="flex min-h-[44px] flex-wrap justify-between items-center gap-3">
+      {/* Page header sits on the canvas, below the shared app top bar. */}
+      <div className="relative z-[1] px-7 pt-7 pb-3">
+        <div className="flex min-h-[40px] flex-wrap justify-between items-center gap-3">
           {/* Left side - Logo and Template Status */}
           <div className="flex items-center gap-3.5">
-            <div className={`text-lg font-extrabold tracking-tight leading-none ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>
+            <div className={`text-[20.4px] font-semibold tracking-normal leading-[1.43] ${isDarkMode ? 'text-[#f4f7fb]' : 'text-[#111827]'}`}>
               Column Mapping
             </div>
 
-            <div className="ml-2 flex items-center gap-2">
-              <span className={`px-3 py-1 text-xs font-bold leading-none rounded-full transition-all ${
+            <div className="flex items-center gap-2">
+              <span className={`px-2.5 py-1 text-[11px] font-medium leading-none rounded-full transition-all ${
                 syncNotice.visible
-                  ? 'bg-amber-500/15 text-amber-500 border border-amber-500/30'
-                  : 'bg-emerald-500/15 text-emerald-500 border border-emerald-500/30'
+                  ? 'bg-amber-500/12 text-amber-500 ring-1 ring-amber-500/28'
+                  : 'bg-emerald-500/12 text-emerald-500 ring-1 ring-emerald-500/28'
               }`}>
                 {syncNotice.visible ? 'Cache' : 'Fresh'}
               </span>
@@ -4825,7 +4907,7 @@ export default function ColumnMapping() {
                 onClick={handleReview}
                 disabled={edges.length === 0 || isReviewing || isRebuildingRef.current || !isReady || isProcessingMappings || applyingTemplate}
                 className={`
-                  h-10 px-5 text-sm font-bold flex items-center gap-2 transition-all disabled:pointer-events-none
+                  h-9 px-4 text-[13px] font-medium flex items-center gap-2 transition-all disabled:pointer-events-none
                   ${edges.length > 0 && !isReviewing && !isProcessingMappings
                     ? primaryBluePillClass
                     : `${primaryBluePillClass} opacity-60`
@@ -4853,11 +4935,7 @@ export default function ColumnMapping() {
                   setRulesOpen(false);
                   setSideMenuOpen(true);
                 }}
-                className={`h-10 w-10 rounded-full border shadow-sm transition-all flex items-center justify-center ${
-                  isDarkMode
-                    ? 'bg-blue-600 hover:bg-blue-500 border-blue-500 text-white shadow-blue-950/25'
-                    : 'bg-blue-600 hover:bg-blue-700 border-blue-600 text-white shadow-blue-500/25'
-                }`}
+                className="h-9 w-9 rounded-full border border-[#007aff] bg-[linear-gradient(180deg,#0d80ff_0%,#007aff_100%)] text-white shadow-[0_12px_20px_-10px_rgba(0,122,255,0.72),inset_0_1px_0_rgba(255,255,255,0.28)] transition-[filter,transform,box-shadow] hover:brightness-105 active:brightness-95 active:scale-[0.98] flex items-center justify-center"
                 aria-label="Open mapping menu"
               >
                 <AnimatedMenuGlyph open={sideMenuOpen} stroke="currentColor" />
@@ -4881,35 +4959,35 @@ export default function ColumnMapping() {
               isDarkMode ? 'bg-slate-950/70' : 'bg-slate-900/25'
             }`}
           />
-          <aside className={`relative h-full w-full max-w-[400px] border-l shadow-2xl flex flex-col font-sans transition-colors ${
+          <aside className={`relative h-full w-full max-w-[360px] border-l shadow-2xl flex flex-col font-sans transition-colors ${
             isDarkMode
-              ? 'bg-[#0b101b] border-slate-800 text-white'
-              : 'bg-white border-slate-200 text-slate-900'
+              ? 'bg-[#171b23] border-[#94a3b82e] text-[#e6edf7]'
+              : 'bg-white border-[#d7dee8] text-[#111827]'
           }`}>
-            <div className={`px-5 py-4 border-b flex items-center justify-between ${
-              isDarkMode ? 'border-slate-800' : 'border-slate-200'
+            <div className={`px-5 py-3.5 border-b flex items-center justify-between ${
+              isDarkMode ? 'border-[#94a3b82e]' : 'border-[#d7dee8]'
             }`}>
               <div className="min-w-0 pr-3">
-                <div className={`text-[11px] font-medium uppercase tracking-[0.06em] ${
-                  isDarkMode ? 'text-slate-400' : 'text-slate-500'
+                <div className={`text-[10.5px] font-medium uppercase tracking-[0.08em] ${
+                  isDarkMode ? 'text-[#a8b2c1]' : 'text-[#687386]'
                 }`}>
                   Tools
                 </div>
-                <div className="text-base font-semibold mt-1 truncate">Column Mapping</div>
+                <div className="text-[15px] font-medium mt-1 truncate">Column Mapping</div>
               </div>
               <button
                 type="button"
                 onClick={() => setSideMenuOpen(false)}
-                className={`h-9 w-9 rounded-full flex items-center justify-center transition-colors ${
-                  isDarkMode ? 'hover:bg-slate-800 text-slate-300' : 'hover:bg-slate-100 text-slate-600'
+                className={`h-8 w-8 rounded-full flex items-center justify-center transition-colors ${
+                  isDarkMode ? 'hover:bg-[#1b1d23] text-[#a8b2c1] hover:text-[#e6edf7]' : 'hover:bg-[#f7f9fb] text-[#687386] hover:text-[#111827]'
                 }`}
                 aria-label="Close mapping menu"
               >
-                <X size={18} />
+                <X size={17} />
               </button>
             </div>
 
-            <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5">
+            <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4">
               <section>
                 <h3 className={sideSectionLabelClass}>
                   Data
@@ -4919,10 +4997,10 @@ export default function ColumnMapping() {
                     type="button"
                     onClick={() => { try { if (loadDataRef.current) loadDataRef.current(); } catch(_) {} }}
                     className={`${sidebarButtonBase} ${
-                      isDarkMode ? 'hover:bg-slate-800 text-slate-200' : 'hover:bg-slate-100 text-slate-700'
+                      isDarkMode ? 'hover:bg-[#1b1d23] text-[#c8d1dd]' : 'hover:bg-[#f7f9fb] text-[#475569]'
                     } ${statusPolling ? 'opacity-70' : ''}`}
                   >
-                    <RefreshCw size={18} />
+                    <span className={drawerIconClass}><RefreshCw size={16} /></span>
                     <span>{statusPolling ? 'Syncing...' : 'Refresh'}</span>
                   </button>
 
@@ -4931,10 +5009,10 @@ export default function ColumnMapping() {
                     onClick={handleRebuildColumns}
                     disabled={rebuildingColumns || isRebuildingRef.current}
                     className={`${sidebarButtonBase} ${
-                      isDarkMode ? 'hover:bg-slate-800 text-slate-200' : 'hover:bg-slate-100 text-slate-700'
+                      isDarkMode ? 'hover:bg-[#1b1d23] text-[#c8d1dd]' : 'hover:bg-[#f7f9fb] text-[#475569]'
                     }`}
                   >
-                    <Settings size={18} />
+                    <span className={drawerIconClass}><Settings size={16} /></span>
                     <span>{rebuildingColumns ? 'Rebuilding...' : 'Rebuild Columns'}</span>
                   </button>
                 </div>
@@ -4950,10 +5028,10 @@ export default function ColumnMapping() {
                     onClick={handleAutoMap}
                     disabled={isAutoMapping || isRebuildingRef.current}
                     className={`${sidebarButtonBase} ${
-                      isDarkMode ? 'hover:bg-slate-800 text-slate-200' : 'hover:bg-slate-100 text-slate-700'
+                      isDarkMode ? 'hover:bg-[#1b1d23] text-[#c8d1dd]' : 'hover:bg-[#f7f9fb] text-[#475569]'
                     } ${isAutoMapping ? 'opacity-70' : ''}`}
                   >
-                    <Brain size={18} />
+                    <span className={drawerIconClass}><Brain size={16} /></span>
                     <span>{isAutoMapping ? 'Mapping...' : 'Auto Map'}</span>
                   </button>
 
@@ -4965,10 +5043,10 @@ export default function ColumnMapping() {
                     }}
                     disabled={applyingTemplate || templatesLoading}
                     className={`${sidebarButtonBase} ${
-                      isDarkMode ? 'hover:bg-slate-800 text-slate-200' : 'hover:bg-slate-100 text-slate-700'
+                      isDarkMode ? 'hover:bg-[#1b1d23] text-[#c8d1dd]' : 'hover:bg-[#f7f9fb] text-[#475569]'
                     }`}
                   >
-                    <Library size={18} />
+                    <span className={drawerIconClass}><Library size={16} /></span>
                     <span>{applyingTemplate || templatesLoading ? 'Loading...' : 'Apply Template'}</span>
                   </button>
 
@@ -4979,10 +5057,10 @@ export default function ColumnMapping() {
                       setRulesOpen(true);
                     }}
                     className={`${sidebarButtonBase} ${
-                      isDarkMode ? 'hover:bg-slate-800 text-slate-200' : 'hover:bg-slate-100 text-slate-700'
+                      isDarkMode ? 'hover:bg-[#1b1d23] text-[#c8d1dd]' : 'hover:bg-[#f7f9fb] text-[#475569]'
                     }`}
                   >
-                    <FileText size={18} />
+                    <span className={drawerIconClass}><FileText size={16} /></span>
                     <span>Tag Rules</span>
                   </button>
                 </div>
@@ -5001,10 +5079,10 @@ export default function ColumnMapping() {
                       isReviewing || isRebuildingRef.current || isProcessingMappings
                     }
                     className={`${sidebarButtonBase} disabled:opacity-45 ${
-                      isDarkMode ? 'hover:bg-slate-800 text-slate-200' : 'hover:bg-slate-100 text-slate-700'
+                      isDarkMode ? 'hover:bg-[#1b1d23] text-[#c8d1dd]' : 'hover:bg-[#f7f9fb] text-[#475569]'
                     }`}
                   >
-                    <RotateCcw size={17} />
+                    <span className={drawerIconClass}><RotateCcw size={16} /></span>
                     <span>Undo</span>
                   </button>
 
@@ -5015,7 +5093,7 @@ export default function ColumnMapping() {
                       isDarkMode ? 'hover:bg-red-500/10 text-red-300' : 'hover:bg-red-50 text-red-600'
                     }`}
                   >
-                    <Trash2 size={17} />
+                    <span className={dangerDrawerIconClass}><Trash2 size={16} /></span>
                     <span>Clear All</span>
                   </button>
                 </div>
@@ -5023,14 +5101,14 @@ export default function ColumnMapping() {
 
             </div>
 
-            <div className={`p-5 border-t ${
-              isDarkMode ? 'border-slate-800' : 'border-slate-200'
+            <div className={`p-4 border-t ${
+              isDarkMode ? 'border-[#94a3b82e]' : 'border-[#d7dee8]'
             }`}>
               <button
                 type="button"
                 onClick={handleReview}
                 disabled={edges.length === 0 || isReviewing || isRebuildingRef.current || !isReady || isProcessingMappings || applyingTemplate}
-                className={`w-full h-12 text-sm font-bold flex items-center justify-center gap-2 transition-all disabled:opacity-60 disabled:pointer-events-none ${
+                className={`w-full h-10 text-[13px] font-medium flex items-center justify-center gap-2 transition-all disabled:opacity-60 disabled:pointer-events-none ${
                   edges.length > 0 && !isReviewing && !isProcessingMappings
                     ? primaryBluePillClass
                     : `${primaryBluePillClass} opacity-60`
@@ -5039,7 +5117,7 @@ export default function ColumnMapping() {
                 {isReviewing ? (
                   <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
                 ) : (
-                  <ArrowRight size={17} />
+                  <ArrowRight size={16} />
                 )}
                 <span>{isReviewing ? 'Preparing...' : 'Review'}</span>
               </button>
@@ -5063,24 +5141,24 @@ export default function ColumnMapping() {
             }`}
           />
           <div className={`relative h-full w-full max-w-[420px] shadow-2xl border-l flex flex-col font-sans transition-colors ${
-            isDarkMode ? 'bg-[#0b101b] border-slate-800 text-white' : 'bg-white border-slate-200 text-slate-900'
+            isDarkMode ? 'bg-[#171b23] border-white/10 text-[#e6edf7]' : 'bg-white border-[#d7dee8] text-[#111827]'
           }`}>
           <div className={`px-5 py-4 border-b flex items-center justify-between ${
-            isDarkMode ? 'border-slate-800' : 'border-slate-200'
+            isDarkMode ? 'border-white/10' : 'border-[#d7dee8]'
           }`}>
             <div className="min-w-0 pr-3">
               <div className={`text-[11px] font-medium uppercase tracking-[0.06em] ${
-                isDarkMode ? 'text-slate-400' : 'text-slate-500'
+                isDarkMode ? 'text-[#a8b2c1]' : 'text-[#687386]'
               }`}>
                 Rules
               </div>
-              <div className="text-base font-semibold mt-1 truncate">Active Tag Rules</div>
+              <div className="text-[15px] font-semibold mt-1 truncate">Active Tag Rules</div>
             </div>
             <button
               type="button"
               onClick={() => setRulesOpen(false)}
               className={`h-9 w-9 rounded-full flex items-center justify-center transition-colors ${
-                isDarkMode ? 'hover:bg-slate-800 text-slate-300' : 'hover:bg-slate-100 text-slate-600'
+                isDarkMode ? 'hover:bg-[#1b1d23] text-[#a8b2c1]' : 'hover:bg-[#f7f9fb] text-[#687386]'
               }`}
               aria-label="Close tag rules"
             >
@@ -5091,16 +5169,16 @@ export default function ColumnMapping() {
             {Array.isArray(sessionMetadata?.formula_rules) && sessionMetadata.formula_rules.length > 0 ? (
               sessionMetadata.formula_rules.map((rule, idx) => (
                 <div key={idx} className={`mb-4 p-4 rounded-xl border ${
-                  isDarkMode ? 'bg-slate-900/80 border-slate-800' : 'bg-slate-50 border-slate-200'
+                  isDarkMode ? 'bg-[#1b1d23] border-white/10' : 'bg-[#f7f9fb] border-[#d7dee8]'
                 }`}>
                   <div className="flex items-center justify-between mb-2">
-                    <div className="text-sm font-semibold">Rule {idx + 1}</div>
+                    <div className="text-[13px] font-semibold">Rule {idx + 1}</div>
                     <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
                       isDarkMode ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/25' : 'bg-emerald-100 text-emerald-700 border border-emerald-200'
                     }`}>{rule.column_type || 'Tag'}</span>
                   </div>
-                  <div className={`text-xs mb-1 ${isDarkMode ? 'text-slate-400' : 'text-slate-600'}`}>Source: <span className="font-mono">{rule.source_column || '-'}</span></div>
-                  <div className={`text-xs mb-1 ${isDarkMode ? 'text-slate-400' : 'text-slate-600'}`}>Target: <span className="font-mono">{rule.target_column || 'Tag'}</span></div>
+                  <div className={`text-xs mb-1 ${isDarkMode ? 'text-[#a8b2c1]' : 'text-[#687386]'}`}>Source: <span className="font-mono">{rule.source_column || '-'}</span></div>
+                  <div className={`text-xs mb-1 ${isDarkMode ? 'text-[#a8b2c1]' : 'text-[#687386]'}`}>Target: <span className="font-mono">{rule.target_column || 'Tag'}</span></div>
                   {rule.column_type === 'Specification Value' && (
                     <div className={`text-xs mb-1 ${isDarkMode ? 'text-slate-400' : 'text-slate-600'}`}>Spec Name: <span className="font-mono">{rule.specification_name || '-'}</span></div>
                   )}
@@ -5135,7 +5213,7 @@ export default function ColumnMapping() {
             <div className="flex items-center gap-3">
               <AlertTriangle className="w-6 h-6" />
               <div>
-                <div className="font-bold text-lg">Specification Overflow Detected!</div>
+                <div className="font-medium text-lg">Specification Overflow Detected!</div>
                 <div className="text-orange-100">
                   {specificationOverflow.message}
                 </div>
@@ -5170,7 +5248,7 @@ export default function ColumnMapping() {
             <div className="flex items-center gap-3">
               <Library className="w-6 h-6" />
               <div>
-                <div className="font-bold text-lg">Template Applied Successfully!</div>
+                <div className="font-medium text-lg">Template Applied Successfully!</div>
                 <div className="text-green-100">
                   {templateMappingCount} column mappings from "{appliedTemplateName}" have been applied. You can modify them or add more mappings below.
                 </div>
@@ -5202,7 +5280,7 @@ export default function ColumnMapping() {
             <div className="flex items-center gap-3">
               <Settings className="w-6 h-6" />
               <div>
-                <div className="font-bold text-lg">Specification Parsing Applied!</div>
+                <div className="font-medium text-lg">Specification Parsing Applied!</div>
                 <div className="text-orange-100">
                   Description columns have been automatically mapped to specification fields. When you review the data, descriptions will be parsed into structured specifications.
                 </div>
@@ -5243,13 +5321,20 @@ export default function ColumnMapping() {
       )}
 
       {/* Main Flow Area */}
-      <div className={`flex-1 relative overflow-hidden flex transition-colors ${
-        isDarkMode ? 'bg-[#070d18]' : 'bg-slate-50'
-      }`} data-layout-tick={flowLayoutTick}>
-        <aside className={`hidden xl:flex w-[340px] shrink-0 border-r flex-col overflow-y-auto px-5 py-5 space-y-5 ${
+      <div className="flex-1 relative z-[1] min-h-0 overflow-hidden px-6 pb-6 pt-1" data-layout-tick={flowLayoutTick}>
+        <div
+          className={`h-full min-h-0 overflow-hidden rounded-[18px] border flex transition-colors ${
           isDarkMode
-            ? 'bg-[#0b101b]/92 border-slate-800 text-white'
-            : 'bg-white/88 border-slate-200 text-slate-900'
+            ? 'bg-[#171b23]/72 border-[#94a3b82e] shadow-[0_24px_70px_-48px_rgba(0,0,0,0.86)]'
+            : 'border-[#cfd9e6]'
+        }`}
+          style={!isDarkMode ? {
+            background: 'linear-gradient(135deg, rgba(255,255,255,0.98) 0%, rgba(248,251,255,0.96) 46%, rgba(235,246,255,0.92) 100%)',
+            boxShadow: '0 28px 70px -42px rgba(15, 23, 42, 0.40), 0 12px 34px -26px rgba(0, 122, 255, 0.28), inset 0 1px 0 rgba(255,255,255,0.92)'
+          } : undefined}
+        >
+        <aside className={`hidden xl:flex w-[300px] shrink-0 flex-col overflow-y-auto px-4 py-4 space-y-4 ${
+          isDarkMode ? 'text-[#e6edf7]' : 'text-[#111827]'
         }`}>
           <section className={sidePanelClass}>
             <h3 className={`${sideSectionLabelClass} mb-4`}>
@@ -5257,7 +5342,7 @@ export default function ColumnMapping() {
             </h3>
             <div className="space-y-3.5">
               <div className="flex items-center justify-between gap-3">
-                <span className="text-sm font-medium">Tags</span>
+                <span className="text-[13px] font-medium">Tags</span>
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
@@ -5266,14 +5351,12 @@ export default function ColumnMapping() {
                       spec_pairs_count: columnCounts.spec_pairs_count || 3,
                       customer_id_pairs_count: columnCounts.customer_id_pairs_count || 1
                     })}
-                    className={`h-7 w-7 rounded-md border flex items-center justify-center text-sm font-bold transition-colors ${
-                      isDarkMode ? 'bg-slate-950/60 border-slate-700 text-slate-300 hover:bg-slate-800' : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-100'
-                    }`}
+                    className={stepButtonClass}
                     disabled={columnCounts.tags_count <= 1 || columnCountLoading}
                   >
                     -
                   </button>
-                  <span className="w-7 text-center text-sm font-semibold">{columnCounts.tags_count}</span>
+                  <span className="w-7 text-center text-[13px] font-medium">{columnCounts.tags_count}</span>
                   <button
                     type="button"
                     onClick={() => updateColumnCounts({
@@ -5281,9 +5364,7 @@ export default function ColumnMapping() {
                       spec_pairs_count: columnCounts.spec_pairs_count || 3,
                       customer_id_pairs_count: columnCounts.customer_id_pairs_count || 1
                     })}
-                    className={`h-7 w-7 rounded-md border flex items-center justify-center text-sm font-bold transition-colors ${
-                      isDarkMode ? 'bg-slate-950/60 border-slate-700 text-slate-300 hover:bg-slate-800' : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-100'
-                    }`}
+                    className={stepButtonClass}
                     disabled={columnCountLoading}
                   >
                     +
@@ -5292,7 +5373,7 @@ export default function ColumnMapping() {
               </div>
 
               <div className="flex items-center justify-between gap-3">
-                <span className="text-sm font-medium">Spec Pairs</span>
+                <span className="text-[13px] font-medium">Spec Pairs</span>
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
@@ -5301,14 +5382,12 @@ export default function ColumnMapping() {
                       spec_pairs_count: Math.max(1, columnCounts.spec_pairs_count - 1),
                       customer_id_pairs_count: columnCounts.customer_id_pairs_count || 0
                     })}
-                    className={`h-7 w-7 rounded-md border flex items-center justify-center text-sm font-bold transition-colors ${
-                      isDarkMode ? 'bg-slate-950/60 border-slate-700 text-slate-300 hover:bg-slate-800' : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-100'
-                    }`}
+                    className={stepButtonClass}
                     disabled={columnCounts.spec_pairs_count <= 1 || columnCountLoading}
                   >
                     -
                   </button>
-                  <span className="w-7 text-center text-sm font-semibold">{columnCounts.spec_pairs_count}</span>
+                  <span className="w-7 text-center text-[13px] font-medium">{columnCounts.spec_pairs_count}</span>
                   <button
                     type="button"
                     onClick={() => updateColumnCounts({
@@ -5316,9 +5395,7 @@ export default function ColumnMapping() {
                       spec_pairs_count: columnCounts.spec_pairs_count + 1,
                       customer_id_pairs_count: columnCounts.customer_id_pairs_count || 0
                     })}
-                    className={`h-7 w-7 rounded-md border flex items-center justify-center text-sm font-bold transition-colors ${
-                      isDarkMode ? 'bg-slate-950/60 border-slate-700 text-slate-300 hover:bg-slate-800' : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-100'
-                    }`}
+                    className={stepButtonClass}
                     disabled={columnCountLoading}
                   >
                     +
@@ -5327,7 +5404,7 @@ export default function ColumnMapping() {
               </div>
 
               <div className="flex items-center justify-between gap-3">
-                <span className="text-sm font-medium">Customer ID Pairs</span>
+                <span className="text-[13px] font-medium">Customer ID Pairs</span>
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
@@ -5336,14 +5413,12 @@ export default function ColumnMapping() {
                       spec_pairs_count: columnCounts.spec_pairs_count || 0,
                       customer_id_pairs_count: Math.max(1, columnCounts.customer_id_pairs_count - 1)
                     })}
-                    className={`h-7 w-7 rounded-md border flex items-center justify-center text-sm font-bold transition-colors ${
-                      isDarkMode ? 'bg-slate-950/60 border-slate-700 text-slate-300 hover:bg-slate-800' : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-100'
-                    }`}
+                    className={stepButtonClass}
                     disabled={columnCounts.customer_id_pairs_count <= 1 || columnCountLoading}
                   >
                     -
                   </button>
-                  <span className="w-7 text-center text-sm font-semibold">{columnCounts.customer_id_pairs_count}</span>
+                  <span className="w-7 text-center text-[13px] font-medium">{columnCounts.customer_id_pairs_count}</span>
                   <button
                     type="button"
                     onClick={() => updateColumnCounts({
@@ -5351,9 +5426,7 @@ export default function ColumnMapping() {
                       spec_pairs_count: columnCounts.spec_pairs_count || 0,
                       customer_id_pairs_count: columnCounts.customer_id_pairs_count + 1
                     })}
-                    className={`h-7 w-7 rounded-md border flex items-center justify-center text-sm font-bold transition-colors ${
-                      isDarkMode ? 'bg-slate-950/60 border-slate-700 text-slate-300 hover:bg-slate-800' : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-100'
-                    }`}
+                    className={stepButtonClass}
                     disabled={columnCountLoading}
                   >
                     +
@@ -5365,7 +5438,7 @@ export default function ColumnMapping() {
               isDarkMode ? 'border-slate-800 text-slate-400' : 'border-slate-200 text-slate-500'
             }`}>
               <span>Total columns</span>
-              <span className={`font-semibold ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>{templateHeaders.length}</span>
+              <span className={`font-medium ${isDarkMode ? 'text-[#e6edf7]' : 'text-[#111827]'}`}>{templateHeaders.length}</span>
             </div>
           </section>
 
@@ -5374,41 +5447,33 @@ export default function ColumnMapping() {
               Mapping Statistics
             </h3>
             <div className="grid grid-cols-2 gap-3">
-              <div className={`rounded-lg border p-3 ${
-                isDarkMode ? 'bg-blue-950/30 border-blue-800/40 text-blue-200' : 'bg-blue-50 border-blue-200 text-blue-800'
-              }`}>
+              <div className={`${statCardBaseClass} ${isDarkMode ? 'text-[#9fd0ff]' : 'text-[#005ecb]'}`}>
                 <div className="text-xl font-semibold">{mappingStats.total}</div>
                 <div className="text-xs font-medium mt-1">Total Mapped</div>
               </div>
-              <div className={`rounded-lg border p-3 ${
-                isDarkMode ? 'bg-emerald-950/30 border-emerald-800/40 text-emerald-200' : 'bg-emerald-50 border-emerald-200 text-emerald-800'
-              }`}>
+              <div className={`${statCardBaseClass} ${isDarkMode ? 'text-emerald-300' : 'text-emerald-700'}`}>
                 <div className="text-xl font-semibold">{mappingStats.template}</div>
                 <div className="text-xs font-medium mt-1">From Template</div>
               </div>
-              <div className={`rounded-lg border p-3 ${
-                isDarkMode ? 'bg-teal-950/30 border-teal-800/40 text-teal-200' : 'bg-teal-50 border-teal-200 text-teal-800'
-              }`}>
+              <div className={`${statCardBaseClass} ${isDarkMode ? 'text-teal-300' : 'text-teal-700'}`}>
                 <div className="text-xl font-semibold">{mappingStats.ai}</div>
                 <div className="text-xs font-medium mt-1">AI Suggested</div>
               </div>
-              <div className={`rounded-lg border p-3 ${
-                isDarkMode ? 'bg-purple-950/30 border-purple-800/40 text-purple-200' : 'bg-purple-50 border-purple-200 text-purple-800'
-              }`}>
+              <div className={`${statCardBaseClass} ${isDarkMode ? 'text-purple-300' : 'text-purple-700'}`}>
                 <div className="text-xl font-semibold">{mappingStats.manual}</div>
                 <div className="text-xs font-medium mt-1">Manual</div>
               </div>
             </div>
-            <div className={`mt-4 rounded-full h-2 overflow-hidden ${isDarkMode ? 'bg-slate-800' : 'bg-slate-200'}`}>
+            <div className={`mt-4 rounded-full h-1.5 overflow-hidden ${isDarkMode ? 'bg-[#1b1d23]' : 'bg-[#eef2f6]'}`}>
               <div
-                className="h-2 rounded-full bg-gradient-to-r from-blue-600 to-indigo-600 transition-all duration-300"
+                className="h-1.5 rounded-full bg-[#007aff] transition-all duration-300"
                 style={{
                   width: `${templateHeaders.length > 0 ? Math.min(100, (mappingStats.total / templateHeaders.length) * 100) : 0}%`
                 }}
               />
             </div>
-            <div className={`mt-2 text-xs font-semibold ${
-              isDarkMode ? 'text-slate-400' : 'text-slate-500'
+            <div className={`mt-2 text-xs font-medium ${
+              isDarkMode ? 'text-[#a8b2c1]' : 'text-[#687386]'
             }`}>
               {mappingStats.total} of {templateHeaders.length} columns mapped
             </div>
@@ -5417,16 +5482,16 @@ export default function ColumnMapping() {
           {selectedSourceNode && (
             <section className={`${sidePanelClass} ${
               isDarkMode
-                ? 'bg-purple-950/30 border-purple-800/45 text-purple-100'
-                : 'bg-purple-50/95 border-purple-200 text-purple-800'
+                ? 'bg-[#1b1d23] border-[#007aff]/28 text-[#cfe6ff]'
+                : 'bg-[#eaf2ff] border-[#007aff]/18 text-[#005ecb]'
             }`}>
               <div className="flex items-start gap-3">
                 <div className="mt-1 h-2.5 w-2.5 shrink-0 rounded-full bg-purple-500 animate-pulse" />
                 <div className="min-w-0">
-                  <div className="text-xs font-extrabold uppercase tracking-wide opacity-75">
+                  <div className="text-[11px] font-medium uppercase tracking-[0.06em] opacity-75">
                     Source selected
                   </div>
-                  <div className="mt-1 text-sm font-semibold leading-snug">
+                  <div className="mt-1 text-[13px] font-medium leading-snug">
                     Click a FW Item Template column to create mapping.
                   </div>
                 </div>
@@ -5436,22 +5501,14 @@ export default function ColumnMapping() {
         </aside>
         
         {/* Main mapping area */}
-        <div className="flex-1 relative">
+        <div className="flex-1 min-w-0 relative">
           {/* Fixed section headers aligned to the centered node lanes. */}
-          <div className={`sticky top-0 z-30 h-[78px] backdrop-blur-xl ${
-            isDarkMode
-              ? 'bg-[#070d18]/94'
-              : 'bg-white/88'
-          }`}>
+          <div className="sticky top-0 z-30 h-[78px]">
             <div className="h-full w-full grid grid-cols-2 items-center gap-8 px-10">
               <div className="flex justify-center min-w-0">
-                <div className={`max-w-full rounded-xl border px-4 py-2.5 font-extrabold flex items-center gap-2.5 whitespace-nowrap transition-colors ${
-                  isDarkMode
-                    ? 'bg-blue-500/10 border-blue-400/25 text-blue-100 shadow-[0_14px_30px_-24px_rgba(59,130,246,0.8)]'
-                    : 'bg-gradient-to-r from-blue-50 to-cyan-50 border-blue-300 text-blue-800 shadow-[0_14px_30px_-24px_rgba(37,99,235,0.7)]'
-                }`}>
+                <div className={lanePillClass}>
                   <span className={`h-7 w-7 rounded-lg flex items-center justify-center ${
-                    isDarkMode ? 'bg-blue-400/15 text-blue-200' : 'bg-blue-50 text-blue-600'
+                    isDarkMode ? 'bg-[#0b355f] text-[#9fd0ff]' : 'bg-[#eaf2ff] text-[#007aff]'
                   }`}>
                     <FileText size={16} />
                   </span>
@@ -5463,13 +5520,9 @@ export default function ColumnMapping() {
               </div>
 
               <div className="flex justify-center min-w-0">
-                <div className={`max-w-full rounded-xl border px-4 py-2.5 font-extrabold flex items-center gap-2.5 whitespace-nowrap transition-colors ${
-                  isDarkMode
-                    ? 'bg-emerald-500/10 border-emerald-400/25 text-emerald-100 shadow-[0_14px_30px_-24px_rgba(16,185,129,0.8)]'
-                    : 'bg-gradient-to-r from-emerald-50 to-teal-50 border-emerald-300 text-emerald-800 shadow-[0_14px_30px_-24px_rgba(5,150,105,0.65)]'
-                }`}>
+                <div className={lanePillClass}>
                   <span className={`h-7 w-7 rounded-lg flex items-center justify-center ${
-                    isDarkMode ? 'bg-emerald-400/15 text-emerald-200' : 'bg-emerald-50 text-emerald-600'
+                    isDarkMode ? 'bg-emerald-500/12 text-emerald-300' : 'bg-emerald-50 text-emerald-600'
                   }`}>
                     <Library size={16} />
                   </span>
@@ -5489,11 +5542,11 @@ export default function ColumnMapping() {
                 : 'bg-red-50/98 border-red-200 text-red-800'
             }`}>
               <div className="flex items-center gap-2.5">
-                <span className="text-xs font-extrabold whitespace-nowrap">Connection selected</span>
-                <span className={`text-[11px] font-semibold whitespace-nowrap ${isDarkMode ? 'text-red-300' : 'text-red-600'}`}>Esc to cancel</span>
+                <span className="text-xs font-medium whitespace-nowrap">Connection selected</span>
+                <span className={`text-[11px] font-medium whitespace-nowrap ${isDarkMode ? 'text-red-300' : 'text-red-600'}`}>Esc to cancel</span>
                 <button
                   onClick={deleteSelectedEdge}
-                  className="px-2.5 py-1 bg-red-500 hover:bg-red-600 text-white rounded-lg text-xs font-extrabold transition-colors"
+                  className="px-2.5 py-1 bg-red-500 hover:bg-red-600 text-white rounded-lg text-xs font-medium transition-colors"
                 >
                   Delete
                 </button>
@@ -5543,7 +5596,7 @@ export default function ColumnMapping() {
                   onNodeClick={onNodeClick}
                   onPaneClick={onPaneClick}
                   nodeTypes={nodeTypes}
-                  connectionLineStyle={{ stroke: isDarkMode ? '#60a5fa' : '#2563eb', strokeWidth: 2.5, strokeOpacity: 0.85 }}
+                  connectionLineStyle={{ stroke: isDarkMode ? '#66b3ff' : '#007aff', strokeWidth: 2.5, strokeOpacity: 0.85 }}
                   connectionLineType="bezier"
                   defaultViewport={{ x: 0, y: 0, zoom: flowLayout.defaultZoom }}
                   minZoom={0.4}
@@ -5558,18 +5611,22 @@ export default function ColumnMapping() {
                   nodesConnectable={true}
                   elementsSelectable={true}
                   fitView={false}
-                  className={isDarkMode ? 'bg-[#070d18]' : 'bg-slate-50'}
+                  className="bg-transparent"
+                  style={{ background: 'transparent' }}
                 >
-                  <Background 
-                    gap={24} 
-                    size={1.2} 
-                    color={isDarkMode ? '#1e293b' : '#dbeafe'} 
-                    style={{ opacity: isDarkMode ? 0.35 : 0.55 }}
-                  />
+                  {!isDarkMode && (
+                    <Background
+                      gap={24}
+                      size={1}
+                      color="#d7dee8"
+                      style={{ opacity: 0.22 }}
+                    />
+                  )}
                 </ReactFlow>
               </ReactFlowProvider>
             </div>
           </div>
+        </div>
         </div>
       </div>
 
@@ -5579,33 +5636,22 @@ export default function ColumnMapping() {
         onClose={handleCancelDefaultValue}
         maxWidth="sm"
         fullWidth
-        PaperProps={{
-          sx: {
-            borderRadius: '18px',
-            overflow: 'hidden',
-            bgcolor: isDarkMode ? '#111827' : '#ffffff',
-            color: isDarkMode ? '#f8fafc' : '#0f172a',
-            border: isDarkMode ? '1px solid rgba(148, 163, 184, 0.18)' : '1px solid #e2e8f0',
-            boxShadow: isDarkMode
-              ? '0 28px 80px rgba(0, 0, 0, 0.72)'
-              : '0 24px 70px rgba(15, 23, 42, 0.18)'
-          }
-        }}
+        PaperProps={{ sx: mappingDialogPaperSx }}
       >
-        <DialogContent sx={{ p: 3, bgcolor: isDarkMode ? '#111827' : '#ffffff' }}>
-          <div className="space-y-6">
+        <DialogContent sx={{ p: 3, bgcolor: fwTokens.surface }}>
+          <div className="space-y-5">
             <div className="text-center">
-              <div className={`w-14 h-14 rounded-full flex items-center justify-center mx-auto mb-4 ${
-                isDarkMode ? 'bg-blue-500/15 text-blue-300' : 'bg-blue-50 text-blue-600'
+              <div className={`w-12 h-12 rounded-2xl flex items-center justify-center mx-auto mb-4 ${
+                isDarkMode ? 'bg-[#0b355f] text-[#9fd0ff]' : 'bg-[#eaf2ff] text-[#007aff]'
               }`}>
-                <FileText className="w-7 h-7" />
+                <FileText className="w-6 h-6" />
               </div>
-              <h2 className={`text-xl font-semibold mb-2 ${isDarkMode ? 'text-slate-50' : 'text-slate-900'}`}>
+              <h2 className={`text-[18px] font-semibold mb-2 ${isDarkMode ? 'text-[#f4f7fb]' : 'text-[#111827]'}`}>
                 Set Default Value
               </h2>
-              <p className={isDarkMode ? 'text-slate-400' : 'text-slate-600'}>
+              <p className={`text-[13px] ${isDarkMode ? 'text-[#a8b2c1]' : 'text-[#687386]'}`}>
                 Set the value for:{' '}
-                <span className={isDarkMode ? 'font-semibold text-blue-300' : 'font-semibold text-blue-600'}>
+                <span className={isDarkMode ? 'font-medium text-[#9fd0ff]' : 'font-medium text-[#005ecb]'}>
                   {selectedTemplateField?.name}
                 </span>
               </p>
@@ -5617,14 +5663,14 @@ export default function ColumnMapping() {
                 <button
                   type="button"
                   onClick={() => setDvMode('always')}
-                  className={`flex-1 px-3 py-2 rounded-full text-sm font-medium border transition-colors ${dvMode === 'always' ? 'bg-blue-600 text-white border-blue-600 shadow-[0_12px_24px_-16px_rgba(37,99,235,0.9)]' : isDarkMode ? 'bg-slate-950/60 text-slate-300 border-slate-700 hover:bg-slate-800' : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'}`}
+                  className={`flex-1 px-3 py-2 rounded-full text-[13px] font-medium border transition-colors ${dvMode === 'always' ? 'bg-[#007aff] text-white border-[#007aff] shadow-[0_12px_24px_-16px_rgba(0,122,255,0.9)]' : secondaryPillClass}`}
                 >
                   Same value for every row
                 </button>
                 <button
                   type="button"
                   onClick={() => setDvMode('conditional')}
-                  className={`flex-1 px-3 py-2 rounded-full text-sm font-medium border transition-colors ${dvMode === 'conditional' ? 'bg-blue-600 text-white border-blue-600 shadow-[0_12px_24px_-16px_rgba(37,99,235,0.9)]' : isDarkMode ? 'bg-slate-950/60 text-slate-300 border-slate-700 hover:bg-slate-800' : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'}`}
+                  className={`flex-1 px-3 py-2 rounded-full text-[13px] font-medium border transition-colors ${dvMode === 'conditional' ? 'bg-[#007aff] text-white border-[#007aff] shadow-[0_12px_24px_-16px_rgba(0,122,255,0.9)]' : secondaryPillClass}`}
                 >
                   If / else rule
                 </button>
@@ -5643,11 +5689,11 @@ export default function ColumnMapping() {
                   />
                 </div>
               ) : (
-                <div className={`space-y-3 border rounded-2xl p-3 ${
-                  isDarkMode ? 'border-slate-700 bg-slate-950/25' : 'border-slate-200 bg-slate-50/70'
+                <div className={`space-y-3 border rounded-xl p-3 ${
+                  isDarkMode ? 'border-white/10 bg-[#1b1d23]' : 'border-[#d7dee8] bg-[#f7f9fb]'
                 }`}>
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className={`text-sm font-semibold ${isDarkMode ? 'text-slate-300' : 'text-slate-700'}`}>If</span>
+                    <span className={`text-[13px] font-medium ${isDarkMode ? 'text-[#c8d1dd]' : 'text-[#475569]'}`}>If</span>
                     <select
                       value={dvCondCol}
                       onChange={(e) => setDvCondCol(e.target.value)}
@@ -5680,13 +5726,13 @@ export default function ColumnMapping() {
                     )}
                   </div>
                   <div>
-                    <label className={`block text-xs font-medium mb-1 ${isDarkMode ? 'text-slate-400' : 'text-slate-600'}`}>then set the value to</label>
+                    <label className={`block text-xs font-medium mb-1 ${isDarkMode ? 'text-[#a8b2c1]' : 'text-[#687386]'}`}>then set the value to</label>
                     <input type="text" value={dvThen} onChange={(e) => setDvThen(e.target.value)}
                       placeholder='e.g. "Finished good"'
                       className={dialogInputClass} />
                   </div>
                   <div>
-                    <label className={`block text-xs font-medium mb-1 ${isDarkMode ? 'text-slate-400' : 'text-slate-600'}`}>otherwise set the value to</label>
+                    <label className={`block text-xs font-medium mb-1 ${isDarkMode ? 'text-[#a8b2c1]' : 'text-[#687386]'}`}>otherwise set the value to</label>
                     <input type="text" value={dvElse} onChange={(e) => setDvElse(e.target.value)}
                       placeholder="leave empty to keep existing value"
                       className={dialogInputClass} />
@@ -5694,12 +5740,12 @@ export default function ColumnMapping() {
                 </div>
               )}
 
-              <div className={`border rounded-2xl p-4 ${
-                isDarkMode ? 'bg-blue-500/10 border-blue-500/25' : 'bg-blue-50 border-blue-200'
+              <div className={`border rounded-xl p-3 ${
+                isDarkMode ? 'bg-[#1b1d23] border-[#007aff]/25' : 'bg-[#eaf2ff] border-[#007aff]/18'
               }`}>
                 <div className="flex items-start gap-3">
-                  <Info className={`w-5 h-5 flex-shrink-0 mt-0.5 ${isDarkMode ? 'text-blue-300' : 'text-blue-600'}`} />
-                  <div className={`text-sm ${isDarkMode ? 'text-blue-100' : 'text-blue-800'}`}>
+                  <Info className={`w-4 h-4 flex-shrink-0 mt-0.5 ${isDarkMode ? 'text-[#9fd0ff]' : 'text-[#007aff]'}`} />
+                  <div className={`text-[12.5px] ${isDarkMode ? 'text-[#cfe6ff]' : 'text-[#005ecb]'}`}>
                     <p className="font-medium mb-1">How this works:</p>
                     <p>
                       Fills the "{selectedTemplateField?.name}" column when the data is processed —
@@ -5711,12 +5757,10 @@ export default function ColumnMapping() {
               </div>
             </div>
 
-              <div className={`flex justify-end gap-3 pt-4 border-t ${isDarkMode ? 'border-slate-800' : 'border-slate-200'}`}>
+              <div className={`flex justify-end gap-3 pt-4 border-t ${isDarkMode ? 'border-white/10' : 'border-[#d7dee8]'}`}>
                 <button
                   onClick={handleCancelDefaultValue}
-                  className={`px-5 py-2 rounded-full font-medium transition-colors ${
-                    isDarkMode ? 'text-slate-300 hover:bg-slate-800 hover:text-white' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
-                  }`}
+                  className={`${cancelPillClass} h-9`}
                 >
                   Cancel
                 </button>
@@ -5727,7 +5771,7 @@ export default function ColumnMapping() {
                   <button
                     onClick={handleClearDefaultValue}
                     disabled={defaultValueLoading}
-                    className={`px-5 py-2 rounded-full font-medium transition-colors flex items-center gap-2 disabled:opacity-50 ${
+                    className={`h-9 px-5 rounded-full text-[13px] font-medium transition-colors flex items-center gap-2 disabled:opacity-50 ${
                       isDarkMode ? 'bg-red-500/10 text-red-300 hover:bg-red-500/15' : 'bg-red-50 text-red-600 hover:bg-red-100'
                     }`}
                   >
@@ -5740,7 +5784,7 @@ export default function ColumnMapping() {
                 <button
                   onClick={handleSaveDefaultValue}
                   disabled={defaultValueLoading || (dvMode === 'always' ? !defaultValueText.trim() : !dvCondCol)}
-                  className="px-5 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:bg-slate-400 text-white rounded-full font-medium transition-colors flex items-center gap-2 shadow-[0_14px_28px_-16px_rgba(37,99,235,0.9)]"
+                  className={`${primaryBluePillClass} h-9 px-5 text-[13px] font-medium disabled:opacity-50 flex items-center gap-2`}
                 >
                   {defaultValueLoading && (
                     <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
@@ -5758,29 +5802,18 @@ export default function ColumnMapping() {
         onClose={() => setShowAutoMapConfirm(false)}
         maxWidth="sm"
         fullWidth
-        PaperProps={{
-          sx: {
-            borderRadius: '18px',
-            overflow: 'hidden',
-            bgcolor: isDarkMode ? '#111827' : '#ffffff',
-            color: isDarkMode ? '#f8fafc' : '#0f172a',
-            border: isDarkMode ? '1px solid rgba(148, 163, 184, 0.18)' : '1px solid #e2e8f0',
-            boxShadow: isDarkMode
-              ? '0 28px 80px rgba(0, 0, 0, 0.72)'
-              : '0 24px 70px rgba(15, 23, 42, 0.18)'
-          }
-        }}
+        PaperProps={{ sx: mappingDialogPaperSx }}
       >
-        <DialogTitle sx={{ px: 3, pt: 2.5, pb: 1.25, fontWeight: 700, color: isDarkMode ? '#f8fafc' : '#0f172a' }}>
+        <DialogTitle sx={{ ...mappingDialogHeaderSx, fontWeight: 600, fontSize: '18px', color: fwTokens.text }}>
           Confirm Auto-Mapping
         </DialogTitle>
-        <DialogContent sx={{ px: 3, py: 1.5, bgcolor: isDarkMode ? '#111827' : '#ffffff' }}>
-          <Typography sx={{ color: isDarkMode ? '#94a3b8' : '#64748b' }}>
+        <DialogContent sx={mappingDialogBodySx}>
+          <Typography sx={{ color: fwTokens.muted, fontSize: '13px' }}>
             This will remove all existing mappings. Are you sure you want to proceed?
           </Typography>
         </DialogContent>
-        <DialogActions sx={{ px: 3, py: 2, gap: 1, bgcolor: isDarkMode ? '#111827' : '#ffffff', borderTop: isDarkMode ? '1px solid rgba(148, 163, 184, 0.12)' : '1px solid #e2e8f0' }}>
-          <Button onClick={() => setShowAutoMapConfirm(false)} sx={{ ...muiPillButtonSx, color: isDarkMode ? '#cbd5e1' : '#475569' }}>Cancel</Button>
+        <DialogActions sx={mappingDialogFooterSx}>
+          <Button onClick={() => setShowAutoMapConfirm(false)} sx={muiCancelPillSx}>Cancel</Button>
           <Button onClick={proceedWithAutoMap} variant="contained" sx={muiPrimaryPillSx}>
             Proceed
           </Button>
@@ -5827,110 +5860,87 @@ export default function ColumnMapping() {
         fullWidth
         PaperProps={{
           sx: {
-            borderRadius: '18px',
+            borderRadius: '16px',
             overflow: 'hidden',
-            bgcolor: isDarkMode ? 'rgba(17, 24, 39, 0.88)' : 'rgba(255, 255, 255, 0.86)',
+            bgcolor: isDarkMode ? 'rgba(23, 26, 33, 0.96)' : 'rgba(255, 255, 255, 0.96)',
             backdropFilter: 'blur(18px)',
-            color: isDarkMode ? '#f8fafc' : '#0f172a',
-            border: isDarkMode ? '1px solid rgba(148, 163, 184, 0.18)' : '1px solid #e2e8f0',
+            color: fwTokens.text,
+            border: `1px solid ${fwTokens.border}`,
             boxShadow: isDarkMode
-              ? '0 28px 80px rgba(0, 0, 0, 0.72)'
-              : '0 24px 70px rgba(15, 23, 42, 0.18)',
-            width: 'min(560px, calc(100vw - 40px))'
+              ? '0 24px 70px rgba(0, 0, 0, 0.64)'
+              : '0 22px 62px rgba(15, 23, 42, 0.16)',
+            width: 'min(520px, calc(100vw - 40px))'
           }
         }}
       >
-        <DialogTitle sx={{ px: 3, pt: 2.5, pb: 1, fontWeight: 800, fontSize: '1.08rem', color: isDarkMode ? '#f8fafc' : '#0f172a' }}>
+        <DialogTitle sx={{ px: 2.75, pt: 2.5, pb: 0.75, fontWeight: 600, fontSize: '17px', lineHeight: 1.3, color: fwTokens.text }}>
           Which column identifies each item?
         </DialogTitle>
-        <DialogContent sx={{ px: 3, py: 1.25, bgcolor: 'transparent' }}>
-          <Typography variant="body2" sx={{ mb: 1.75, color: isDarkMode ? '#94a3b8' : '#64748b', lineHeight: 1.45, maxWidth: 470 }}>
-            Choose a required column to remove rows where it is blank, or keep every row.
+        <DialogContent sx={{ px: 2.75, py: 1.25, bgcolor: 'transparent' }}>
+          <Typography variant="body2" sx={{ mb: 1.5, color: fwTokens.muted, lineHeight: 1.4, maxWidth: 430, fontSize: '12.5px', fontWeight: 400 }}>
+            Select the column that must be present for each item row.
           </Typography>
-          <FormControl fullWidth size="small">
-            <InputLabel sx={{ color: isDarkMode ? '#94a3b8' : '#475569' }}>Key column</InputLabel>
+          <FormControl fullWidth size="small" sx={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
+            <InputLabel sx={primaryDialogInputLabelSx}>Key column</InputLabel>
             <Select
-              label="Key column"
               value={primaryKeyColumn}
               onChange={(e) => setPrimaryKeyColumn(e.target.value)}
-              sx={{
-                borderRadius: '10px',
-                bgcolor: isDarkMode ? '#0f172a' : '#f8fafc',
-                color: isDarkMode ? '#f8fafc' : '#0f172a',
-                '& .MuiOutlinedInput-notchedOutline': {
-                  borderColor: isDarkMode ? 'rgba(148, 163, 184, 0.28)' : '#cbd5e1'
-                },
-                '&:hover .MuiOutlinedInput-notchedOutline': {
-                  borderColor: isDarkMode ? '#60a5fa' : '#2563eb'
-                },
-                '& .MuiSelect-icon': {
-                  color: isDarkMode ? '#94a3b8' : '#64748b'
-                }
-              }}
+              displayEmpty
+              MenuProps={primaryDialogMenuProps}
+              sx={primaryDialogSelectSx}
             >
               {primaryKeyOptions.map(col => (
-                <MenuItem key={col} value={col}>
+                <MenuItem key={col} value={col} sx={{ fontSize: '12.5px', fontWeight: 400 }}>
                   {primaryKeySources[col] ? `${col}  (from ${primaryKeySources[col]})` : col}
                 </MenuItem>
               ))}
             </Select>
           </FormControl>
           {primaryKeyColumn && (
-            <Box sx={{ mt: 2 }}>
+            <Box sx={{ mt: 1.75 }}>
               {primaryEmptyLoading ? (
-                <Typography variant="body2" sx={{ color: isDarkMode ? '#94a3b8' : '#64748b' }}>
+                <Typography variant="body2" sx={{ color: fwTokens.muted, fontSize: '12.5px', fontWeight: 400 }}>
                   Checking how many rows are empty...
                 </Typography>
               ) : primaryEmptyInfo ? (
                 primaryEmptyInfo.empty > 0 ? (
                   <Alert
                     severity="warning"
-                    sx={{
-                      py: 0.75,
-                      borderRadius: '10px',
-                      bgcolor: isDarkMode ? 'rgba(245, 158, 11, 0.12)' : '#fffbeb',
-                      color: isDarkMode ? '#fbbf24' : '#92400e',
-                      border: isDarkMode ? '1px solid rgba(245, 158, 11, 0.24)' : '1px solid #fde68a'
-                    }}
+                    sx={inlineDialogAlertSx('warning', { mt: 0 })}
                   >
-                    <strong>{primaryEmptyInfo.empty}</strong> of <strong>{primaryEmptyInfo.total}</strong> rows are empty
-                    in this column and will be removed. <strong>{primaryEmptyInfo.total - primaryEmptyInfo.empty}</strong> will remain.
+                    {primaryEmptyInfo.empty} of {primaryEmptyInfo.total} rows are empty. {primaryEmptyInfo.total - primaryEmptyInfo.empty} will remain.
                   </Alert>
                 ) : (
                   <Alert
                     severity="success"
-                    sx={{
-                      py: 0.75,
-                      borderRadius: '10px',
-                      bgcolor: isDarkMode ? 'rgba(16, 185, 129, 0.12)' : '#ecfdf5',
-                      color: isDarkMode ? '#a7f3d0' : '#166534',
-                      border: isDarkMode ? '1px solid rgba(16, 185, 129, 0.24)' : '1px solid #bbf7d0'
-                    }}
+                    sx={inlineDialogAlertSx('success', { mt: 0 })}
                   >
-                    No empty rows in this column ({primaryEmptyInfo.total} rows). Nothing will be removed.
+                    {primaryEmptyInfo.total} rows checked. Nothing will be removed.
                   </Alert>
                 )
               ) : null}
             </Box>
           )}
         </DialogContent>
-        <DialogActions sx={{ px: 3, py: 1.75, bgcolor: isDarkMode ? 'rgba(15, 23, 42, 0.42)' : 'rgba(248, 250, 252, 0.68)', borderTop: isDarkMode ? '1px solid rgba(148, 163, 184, 0.12)' : '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', gap: 2 }}>
-          <Button onClick={() => setPrimaryDialogOpen(false)} disabled={primaryCleaning} sx={{ ...muiPillButtonSx, color: isDarkMode ? '#cbd5e1' : '#475569', minWidth: 88 }}>
+        <DialogActions sx={{ px: 2.75, py: 1.5, bgcolor: isDarkMode ? '#171b23' : '#f7f9fb', borderTop: `1px solid ${fwTokens.border}`, display: 'flex', justifyContent: 'space-between', gap: 1.5 }}>
+          <Button onClick={() => setPrimaryDialogOpen(false)} disabled={primaryCleaning} sx={muiCancelPillSx}>
             Cancel
           </Button>
-          <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: 1.25, minWidth: 0 }}>
+          <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: 1, minWidth: 0 }}>
             <Button
               onClick={goToEditor}
               disabled={primaryCleaning}
               variant="outlined"
               sx={{
                 ...muiPillButtonSx,
-                px: 2.25,
-                minWidth: 132,
+                height: 36,
+                px: 2,
+                minWidth: 120,
                 whiteSpace: 'nowrap',
-                color: isDarkMode ? '#93c5fd' : '#2563eb',
-                borderColor: isDarkMode ? 'rgba(96, 165, 250, 0.34)' : '#bfdbfe',
-                bgcolor: isDarkMode ? 'rgba(37, 99, 235, 0.08)' : '#eff6ff',
+                color: isDarkMode ? '#9fd0ff' : '#005ecb',
+                borderColor: isDarkMode ? 'rgba(0, 122, 255, 0.34)' : '#bfdbfe',
+                bgcolor: isDarkMode ? 'rgba(0, 122, 255, 0.10)' : '#eff6ff',
+                fontWeight: 500,
               }}
             >
               Keep all rows
@@ -5941,8 +5951,10 @@ export default function ColumnMapping() {
               variant="contained"
               sx={{
                 ...muiPrimaryPillSx,
-                minWidth: 132,
+                height: 36,
+                minWidth: 116,
                 whiteSpace: 'nowrap',
+                fontWeight: 500,
                 '&.Mui-disabled': {
                   bgcolor: isDarkMode ? 'rgba(30, 41, 59, 0.78)' : '#dbeafe',
                   color: isDarkMode ? 'rgba(226, 232, 240, 0.58)' : 'rgba(30, 64, 175, 0.46)',
@@ -5965,19 +5977,12 @@ export default function ColumnMapping() {
         autoHideDuration={4000}
         onClose={() => setSnackbar(prev => ({ ...prev, open: false }))}
         anchorOrigin={{ vertical: 'top', horizontal: 'right' }}
-        sx={{ mt: 7, maxWidth: 420, zIndex: 1600 }}
+        sx={{ mt: 7, maxWidth: 360, zIndex: 1600 }}
       >
         <Alert
           onClose={() => setSnackbar(prev => ({ ...prev, open: false }))}
           severity={snackbar.severity || 'info'}
-          variant="filled"
-          sx={{
-            width: 'auto',
-            maxWidth: 420,
-            borderRadius: '14px',
-            boxShadow: '0 18px 50px rgba(15,23,42,0.22)',
-            alignItems: 'center'
-          }}
+          sx={snackbarAlertSx(snackbar.severity || 'info')}
         >
           {snackbar.message}
         </Alert>
@@ -6015,7 +6020,7 @@ export default function ColumnMapping() {
         <DialogActions sx={mappingDialogFooterSx}>
           <Button
             onClick={handleNavigationCancel}
-            sx={{ ...muiPillButtonSx, color: isDarkMode ? '#cbd5e1' : '#475569' }}
+            sx={muiCancelPillSx}
           >
             Stay Here
           </Button>
@@ -6039,10 +6044,10 @@ export default function ColumnMapping() {
       >
         <DialogTitle sx={mappingDialogHeaderSx}>
           <div className="flex items-center gap-3">
-            <Library className={`w-6 h-6 ${isDarkMode ? 'text-emerald-300' : 'text-emerald-600'}`} />
+            <Library className={`w-5 h-5 ${isDarkMode ? 'text-emerald-300' : 'text-emerald-600'}`} />
             <div>
-              <div className={`text-xl font-semibold ${isDarkMode ? 'text-slate-50' : 'text-slate-900'}`}>Apply Mapping Template</div>
-              <div className={`text-sm ${isDarkMode ? 'text-slate-400' : 'text-slate-600'}`}>Choose a template to apply to your current data</div>
+              <div className={`text-[18px] font-semibold ${isDarkMode ? 'text-[#f4f7fb]' : 'text-[#111827]'}`}>Apply Mapping Template</div>
+              <div className={`text-[13px] ${isDarkMode ? 'text-[#a8b2c1]' : 'text-[#687386]'}`}>Choose a template to apply to your current data</div>
             </div>
           </div>
         </DialogTitle>
@@ -6066,14 +6071,14 @@ export default function ColumnMapping() {
                 {availableTemplates.map((template) => (
                   <div
                     key={template.id}
-                    className={`border rounded-2xl p-4 transition-all ${
+                    className={`border rounded-xl p-4 transition-all ${
                       applyingTemplate 
                         ? 'cursor-not-allowed opacity-50' 
                         : 'cursor-pointer hover:-translate-y-0.5'
                     } ${
                       isDarkMode
-                        ? 'bg-slate-950/40 border-slate-700 hover:border-blue-500/70 hover:bg-blue-500/10'
-                        : 'bg-white border-slate-200 hover:border-blue-300 hover:bg-blue-50/60'
+                        ? 'bg-[#1b1d23] border-white/10 hover:border-[#007aff]/45 hover:bg-[#232832]'
+                        : 'bg-white border-[#d7dee8] hover:border-[#007aff]/45 hover:bg-[#fbfdff]'
                     }`}
                     onClick={() => {
                       if (!applyingTemplate) {
@@ -6083,18 +6088,18 @@ export default function ColumnMapping() {
                   >
                     <div className="flex items-start justify-between">
                       <div className="flex-1">
-                        <div className={`font-semibold mb-1 ${isDarkMode ? 'text-slate-50' : 'text-slate-900'}`}>
+                        <div className={`text-[14px] font-semibold mb-1 ${isDarkMode ? 'text-[#f4f7fb]' : 'text-[#111827]'}`}>
                           {template.name}
                         </div>
                         {template.description && (
-                          <div className={`text-sm mb-2 ${isDarkMode ? 'text-slate-400' : 'text-slate-600'}`}>
+                          <div className={`text-[13px] mb-2 ${isDarkMode ? 'text-[#a8b2c1]' : 'text-[#687386]'}`}>
                             {template.description}
                           </div>
                         )}
-                        <div className={`text-xs ${isDarkMode ? 'text-slate-500' : 'text-slate-500'}`}>
+                        <div className={`text-xs ${isDarkMode ? 'text-[#818b9a]' : 'text-[#687386]'}`}>
                           Created: {new Date(template.created_at).toLocaleDateString()}
                         </div>
-                        <div className={`text-xs ${isDarkMode ? 'text-slate-500' : 'text-slate-500'}`}>
+                        <div className={`text-xs ${isDarkMode ? 'text-[#818b9a]' : 'text-[#687386]'}`}>
                           Column counts: Tags={template.tags_count}, Spec={template.spec_pairs_count}, Customer={template.customer_id_pairs_count}
                         </div>
                       </div>
@@ -6102,9 +6107,7 @@ export default function ColumnMapping() {
                         <button
                           onClick={(e) => { e.stopPropagation(); handleExportTemplate(template); }}
                           title="Download this template as a file to move to another environment"
-                          className={`px-4 py-2 border rounded-full text-sm font-medium transition-colors ${
-                            isDarkMode ? 'bg-slate-900 border-slate-700 hover:bg-slate-800 text-slate-200' : 'bg-white border-slate-200 hover:bg-slate-100 text-slate-700'
-                          }`}
+                          className={`${secondaryPillClass} h-9 px-4`}
                         >
                           Export
                         </button>
@@ -6114,7 +6117,7 @@ export default function ColumnMapping() {
                             handleApplyTemplate(template);
                           }}
                           disabled={applyingTemplate && applyingTemplateId === template.id}
-                          className="px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-full text-sm font-medium transition-colors disabled:opacity-50 shadow-[0_14px_28px_-16px_rgba(37,99,235,0.9)]"
+                          className={`${primaryBluePillClass} h-9 px-5 text-[13px] font-medium disabled:opacity-50`}
                         >
                           {applyingTemplate && applyingTemplateId === template.id ? 'Applying...' : 'Apply'}
                         </button>
@@ -6136,13 +6139,13 @@ export default function ColumnMapping() {
           />
           <Button
             onClick={() => templateImportInputRef.current && templateImportInputRef.current.click()}
-            sx={{ ...muiPillButtonSx, mr: 'auto', color: '#2563eb' }}
+            sx={{ ...muiPillButtonSx, mr: 'auto', color: fwTokens.primaryText }}
           >
             Import template…
           </Button>
           <Button
             onClick={() => setShowTemplateDialog(false)}
-            sx={{ ...muiPillButtonSx, color: isDarkMode ? '#cbd5e1' : '#475569' }}
+            sx={muiCancelPillSx}
           >
             Cancel
           </Button>

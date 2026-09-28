@@ -1,4 +1,4 @@
-﻿// EnhancedDataEditor.js - DataEditor with comprehensive synchronization
+// EnhancedDataEditor.js - DataEditor with comprehensive synchronization
 // Fixes all refresh issues on Azure deployment
 
 import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
@@ -107,6 +107,22 @@ import { getDataSynchronizer, cleanupSynchronizer } from '../utils/DataSynchroni
 import { useThemeContext } from '../utils/ThemeContext';
 import { loadItemDirectoryDefaultsForEntity, normalizeAutoColumnRules, readItemDirectoryDefaults, writeItemDirectoryColumnOptions } from '../utils/itemDirectoryDefaults';
 import { displayHeaderName } from '../utils/columnHeaderNames';
+import {
+  factWiseAlertSx,
+  buildFactWiseTableTone,
+  buildFactWisePageTokens,
+  factWiseCancelButtonSx,
+  factWiseDialogPaperSx,
+  factWiseFieldSx,
+  factWiseGlowSx,
+  factWiseGridOverlaySx,
+  factWisePageShellSx,
+  factWisePrimaryButtonSx,
+  factWiseSelectFieldSx,
+  factWiseSelectMenuProps,
+  factWiseToastAlertSx,
+  factWiseTopShadeSx,
+} from '../utils/factwisePageStyles';
 
 // Keep the arrangement-specific row expansion implementation dormant while a
 // generic, user-configured row expansion model is designed.
@@ -281,7 +297,7 @@ const ExportLoadingContent = ({ title, message, isDarkMode = false }) => (
         <circle r={20} cy={50} cx={50} />
       </svg>
     </Box>
-    <Typography sx={{ fontSize: 18, lineHeight: 1.25, fontWeight: 680, color: isDarkMode ? '#f8fafc' : '#0f172a', letterSpacing: 0, mb: 0.75 }}>
+    <Typography sx={{ fontSize: 18, lineHeight: 1.25, fontWeight: 600, color: isDarkMode ? '#f8fafc' : '#0f172a', letterSpacing: 0, mb: 0.75 }}>
       {title}
     </Typography>
     <Typography sx={{ fontSize: 14, lineHeight: 1.5, fontWeight: 400, color: isDarkMode ? '#94a3b8' : '#64748b', letterSpacing: 0 }}>
@@ -419,6 +435,8 @@ const EnhancedDataEditor = () => {
   const navigate = useNavigate();
   const location = useLocation();
   const { isDarkMode, tokens: themeTokens } = useThemeContext();
+  const fwPageTokens = buildFactWisePageTokens(isDarkMode, themeTokens);
+  const cancelButtonSx = factWiseCancelButtonSx(fwPageTokens);
   const {
     isEmbedded: isFactwiseEmbedded,
     entityName: factwiseEntityName,
@@ -429,7 +447,6 @@ const EnhancedDataEditor = () => {
   } = useFactwise();
   const synchronizer = useRef(null);
   const scrollContainerRef = useRef(null);
-  const [mousePos, setMousePos] = useState({ x: 50, y: 50 });
   const processingTemplateContext = useMemo(() => {
     if (location.state?.uploadSource) return location.state.uploadSource;
     try {
@@ -1154,17 +1171,6 @@ const EnhancedDataEditor = () => {
   }, []);
 
   // ─── INITIALIZATION AND CLEANUP ─────────────────────────────────────────────
-  useEffect(() => {
-    const handleMouseMove = (event) => {
-      setMousePos({
-        x: (event.clientX / window.innerWidth) * 100,
-        y: (event.clientY / window.innerHeight) * 100
-      });
-    };
-    window.addEventListener('mousemove', handleMouseMove);
-    return () => window.removeEventListener('mousemove', handleMouseMove);
-  }, []);
-
   useEffect(() => {
     if (sessionId) {
       // Initialize synchronizer
@@ -2072,7 +2078,7 @@ const EnhancedDataEditor = () => {
                 borderRight: '1px solid #e9ecef',
                 borderBottom: '1px solid #e9ecef',
                 fontSize: '14px',
-                fontFamily: 'Segoe UI, Arial, sans-serif',
+                fontFamily: 'var(--fw-font-stack)',
                 padding: '12px 16px',
                 lineHeight: '1.4'
               };
@@ -3161,7 +3167,7 @@ const EnhancedDataEditor = () => {
     const ctx = canvas.getContext('2d');
     // Match the table font for better accuracy
     // Header is bold in UI but we keep a single font for simplicity
-    ctx.font = '14px "Segoe UI", Tahoma, Geneva, Verdana, sans-serif';
+    ctx.font = '14px "Inter Variable", Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
     return ctx;
   }, []);
 
@@ -6395,12 +6401,10 @@ const EnhancedDataEditor = () => {
   // ─── MAIN RENDER ────────────────────────────────────────────────────────────
   const t = themeTokens;
   const editorPageSx = {
+    ...factWisePageShellSx(fwPageTokens),
     height: '100vh',
     display: 'flex',
     flexDirection: 'column',
-    position: 'relative',
-    overflow: 'hidden',
-    bgcolor: t.background.app,
     color: t.text.primary,
     '& > :not(.fw-editor-bg-layer)': {
       position: 'relative',
@@ -6433,9 +6437,14 @@ const EnhancedDataEditor = () => {
   const toolbarButtonSx = {
     borderRadius: '999px',
     textTransform: 'none',
-    fontWeight: 700,
-    px: 2.25,
-    minHeight: 36
+    fontWeight: 500,
+    px: 1.3,
+    minHeight: 30,
+    fontSize: '12.5px',
+    lineHeight: 1.25,
+    '& .MuiButton-startIcon': { mr: 0.6 },
+    '& .MuiButton-endIcon': { ml: 0.6 },
+    '& .MuiSvgIcon-root': { fontSize: 16 }
   };
   const outlinedActionSx = {
     ...toolbarButtonSx,
@@ -6449,22 +6458,24 @@ const EnhancedDataEditor = () => {
   };
   const primaryActionSx = {
     ...toolbarButtonSx,
+    ...factWisePrimaryButtonSx,
+    minHeight: 30,
+    height: 30,
+    px: 1.45,
+    fontSize: '12.5px',
+    fontWeight: 500,
     color: '#ffffff !important',
-    border: 'none',
-    background: 'linear-gradient(135deg, #2563eb 0%, #0284c7 100%)',
-    boxShadow: '0 14px 28px -16px rgba(37, 99, 235, 0.9)',
-    '&:hover': {
-      background: 'linear-gradient(135deg, #1d4ed8 0%, #0369a1 100%)',
-      boxShadow: '0 18px 34px -18px rgba(37, 99, 235, 0.95)'
-    },
     '&.Mui-disabled': {
-      background: isDarkMode ? 'rgba(30, 41, 59, 0.78)' : '#dbeafe',
-      color: isDarkMode ? 'rgba(226, 232, 240, 0.58) !important' : 'rgba(30, 64, 175, 0.46) !important',
-      boxShadow: 'none'
+      ...factWisePrimaryButtonSx['&.Mui-disabled'],
+      color: 'rgba(226, 232, 240, 0.58) !important'
     }
   };
   const exportFactwiseActionSx = {
     ...toolbarButtonSx,
+    minHeight: 30,
+    height: 30,
+    px: 1.45,
+    fontWeight: 500,
     color: '#ffffff !important',
     borderColor: '#2563eb',
     backgroundColor: '#2563eb',
@@ -6534,8 +6545,212 @@ const EnhancedDataEditor = () => {
       opacity: 1
     }
   };
+  const compactMenuPaperSx = {
+    mt: 0.75,
+    minWidth: 200,
+    maxWidth: 'min(300px, calc(100vw - 32px))',
+    borderRadius: '12px',
+    bgcolor: isDarkMode ? 'rgba(23, 26, 33, 0.98)' : '#ffffff',
+    color: t.text.primary,
+    border: `1px solid ${t.border.default}`,
+    boxShadow: isDarkMode
+      ? '0 20px 50px -26px rgba(0, 0, 0, 0.88)'
+      : '0 18px 42px -28px rgba(15, 23, 42, 0.22)',
+    overflow: 'hidden',
+    '& .MuiList-root': {
+      py: 0.45,
+    },
+    '& .MuiMenuItem-root': {
+      minHeight: 34,
+      px: 1.25,
+      py: 0.55,
+      gap: 1,
+      color: t.text.primary,
+      fontSize: '13px',
+      fontWeight: 400,
+      lineHeight: 1.25,
+      '&:hover': {
+        bgcolor: isDarkMode ? 'rgba(0, 122, 255, 0.13)' : 'rgba(0, 122, 255, 0.06)',
+      },
+      '&.Mui-disabled': {
+        opacity: isDarkMode ? 0.42 : 0.48,
+      },
+    },
+    '& .MuiListItemIcon-root': {
+      minWidth: 26,
+      color: 'inherit',
+    },
+    '& .MuiListItemIcon-root .MuiSvgIcon-root': {
+      fontSize: 17,
+    },
+    '& .MuiListItemText-primary': {
+      fontSize: '13px',
+      fontWeight: 400,
+      lineHeight: 1.25,
+      letterSpacing: 0,
+    },
+    '& .MuiTypography-caption': {
+      fontSize: '11px',
+      fontWeight: 600,
+      letterSpacing: '0.04em',
+    },
+    '& .MuiDivider-root': {
+      my: 0.45,
+      borderColor: t.border.subtle,
+    },
+  };
+  const compactSelectSx = {
+    height: 30,
+    borderRadius: '8px',
+    bgcolor: isDarkMode ? '#12151d' : '#ffffff',
+    color: t.text.primary,
+    fontSize: '12.5px',
+    fontWeight: 400,
+    '& .MuiSelect-select': {
+      py: 0.6,
+      px: 1.15,
+      fontSize: '12.5px',
+      fontWeight: 400,
+      lineHeight: 1.35,
+    },
+    '& .MuiOutlinedInput-notchedOutline': {
+      borderColor: t.border.default,
+    },
+    '&:hover .MuiOutlinedInput-notchedOutline': {
+      borderColor: t.border.hover,
+    },
+    '&.Mui-focused .MuiOutlinedInput-notchedOutline': {
+      borderColor: t.color.primary,
+    },
+    '& .MuiSvgIcon-root': {
+      fontSize: 17,
+      color: t.text.secondary,
+    },
+  };
+  const compactSelectMenuProps = {
+    PaperProps: {
+      sx: compactMenuPaperSx,
+    },
+  };
+  const dialogSelectMenuProps = factWiseSelectMenuProps(fwPageTokens, {
+    width: { xs: 'calc(100vw - 48px)', sm: 300 },
+    maxHeight: 260,
+  });
+  const createColumnDialogPaperSx = factWiseDialogPaperSx(fwPageTokens, {
+    width: 'min(760px, calc(100vw - 40px))',
+    maxWidth: 760,
+  });
+  const compactDialogPaperSx = factWiseDialogPaperSx(fwPageTokens, {
+    width: 'min(560px, calc(100vw - 40px))',
+    maxWidth: 560,
+  });
+  const splitColumnsDialogPaperSx = factWiseDialogPaperSx(fwPageTokens, {
+    width: 'min(860px, calc(100vw - 40px)) !important',
+    maxWidth: 'min(860px, calc(100vw - 40px)) !important',
+  });
+  const splitRowsDialogPaperSx = factWiseDialogPaperSx(fwPageTokens, {
+    width: 'min(760px, calc(100vw - 40px))',
+    maxWidth: 760,
+  });
+  const saveTemplateDialogPaperSx = factWiseDialogPaperSx(fwPageTokens, {
+    width: 'min(440px, calc(100vw - 40px))',
+    maxWidth: 440,
+  });
+  const mpnSummaryDialogPaperSx = factWiseDialogPaperSx(fwPageTokens, {
+    width: 'min(680px, calc(100vw - 40px))',
+    maxWidth: 680,
+  });
+  const compactInlineAlertSx = (severity = 'info', sx = {}) => factWiseAlertSx(fwPageTokens, severity, {
+    minHeight: 34,
+    py: 0.45,
+    px: 1.05,
+    borderRadius: '8px',
+    fontSize: '12px',
+    fontWeight: 400,
+    iconSize: 16,
+    sx: {
+      '& .MuiAlert-message': {
+        lineHeight: 1.35,
+      },
+      ...sx,
+    },
+  });
+  const selectedValueAutocompleteSx = {
+    '& .MuiAutocomplete-inputRoot': {
+      alignItems: 'center',
+      gap: 0.5,
+      flexWrap: 'wrap',
+      minHeight: '36px !important',
+      height: 'auto !important',
+      py: '3px !important',
+    },
+    '& .MuiAutocomplete-inputRoot .MuiAutocomplete-input': {
+      minWidth: '96px !important',
+      height: '26px !important',
+      py: '0 !important',
+      fontSize: '12.5px',
+    },
+    '& .MuiAutocomplete-tag': {
+      maxWidth: 126,
+      height: 24,
+      borderRadius: '999px',
+      m: '2px',
+      bgcolor: isDarkMode ? 'rgba(148, 163, 184, 0.18)' : '#eef2f7',
+      color: t.text.primary,
+      border: `1px solid ${t.border.default}`,
+      '& .MuiChip-label': {
+        display: 'block',
+        px: 0.9,
+        fontSize: '12px',
+        fontWeight: 500,
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap',
+      },
+      '& .MuiChip-deleteIcon': {
+        width: 16,
+        height: 16,
+        color: t.text.secondary,
+      },
+    },
+  };
+  const snackbarAlertSx = factWiseToastAlertSx(fwPageTokens, snackbar.severity, {
+    boxShadow: isDarkMode ? '0 18px 44px -24px rgba(0,0,0,0.82)' : '0 18px 42px -28px rgba(15,23,42,0.24)',
+  });
+  const dialogFieldSx = factWiseFieldSx(fwPageTokens, { height: 36 });
+  const dialogSelectSx = factWiseSelectFieldSx(fwPageTokens, { height: 36 });
+  const dialogSecondaryButtonSx = {
+    minHeight: 34,
+    height: 34,
+    px: 1.65,
+    borderRadius: '999px',
+    textTransform: 'none',
+    fontSize: '12.5px',
+    fontWeight: 500,
+    color: fwPageTokens.primaryText,
+    borderColor: isDarkMode ? 'rgba(0, 122, 255, 0.34)' : 'rgba(0, 122, 255, 0.22)',
+    bgcolor: isDarkMode ? 'rgba(0, 122, 255, 0.10)' : '#eff6ff',
+    '&:hover': {
+      borderColor: isDarkMode ? 'rgba(0, 122, 255, 0.48)' : 'rgba(0, 122, 255, 0.34)',
+      bgcolor: isDarkMode ? 'rgba(0, 122, 255, 0.16)' : '#eaf4ff',
+    },
+  };
+  const dialogPrimaryButtonSx = {
+    ...factWisePrimaryButtonSx,
+    minHeight: 34,
+    height: 34,
+    px: 1.9,
+    fontSize: '12.5px',
+    fontWeight: 500,
+    '& .MuiButton-startIcon': { mr: 0.65 },
+    '& .MuiSvgIcon-root': { fontSize: 17 },
+  };
   const orangeActionSx = {
     ...toolbarButtonSx,
+    minHeight: 30,
+    height: 30,
+    px: 1.45,
+    fontWeight: 500,
     color: '#ffffff !important',
     border: 'none',
     background: 'linear-gradient(135deg, #f97316 0%, #ea580c 100%)',
@@ -6550,107 +6765,77 @@ const EnhancedDataEditor = () => {
       boxShadow: 'none'
     }
   };
-  const tableTone = isDarkMode
-    ? {
-        panel: 'linear-gradient(180deg, rgba(13, 22, 38, 0.96) 0%, rgba(8, 15, 27, 0.98) 100%)',
-        scroll: 'rgba(7, 13, 24, 0.96)',
-        header: 'linear-gradient(180deg, rgba(24, 35, 56, 0.98) 0%, rgba(17, 27, 44, 0.98) 100%)',
-        headerText: '#f1f5f9',
-        rowEven: 'rgba(18, 27, 42, 0.92)',
-        rowOdd: 'rgba(8, 15, 27, 0.94)',
-        rowHover: 'rgba(37, 99, 235, 0.1)',
-        line: 'rgba(113, 138, 183, 0.14)',
-        rowLine: 'rgba(113, 138, 183, 0.08)',
-        outerLine: 'rgba(125, 154, 205, 0.2)',
-        footer: 'rgba(9, 16, 29, 0.82)',
-        footerBorder: 'rgba(113, 138, 183, 0.16)',
-        text: '#d6deeb'
-      }
-    : {
-        panel: t.table.background,
-        scroll: t.table.background,
-        header: t.table.header,
-        headerText: t.text.primary,
-        rowEven: t.table.rowExpanded,
-        rowOdd: t.table.background,
-        rowHover: t.table.hover,
-        line: t.table.line,
-        rowLine: t.table.rowLine,
-        outerLine: t.table.line,
-        footer: t.surface.elevatedSoft,
-        footerBorder: t.border.subtle,
-        text: t.text.table
-      };
+  const baseTableTone = buildFactWiseTableTone(fwPageTokens);
+  const tableTone = {
+    ...baseTableTone,
+    panel: baseTableTone.bg,
+    scroll: baseTableTone.bg,
+    headerText: baseTableTone.text,
+    rowEven: baseTableTone.row,
+    rowOdd: baseTableTone.row,
+    line: baseTableTone.verticalDivider,
+    rowLine: baseTableTone.border,
+    outerLine: baseTableTone.headerBorder,
+    footer: isDarkMode ? 'rgba(23, 26, 33, 0.92)' : '#ffffff',
+    footerBorder: baseTableTone.headerBorder,
+  };
   const gridPanelSx = {
     height: '100%',
     overflow: 'hidden',
-    borderRadius: '8px',
+    borderRadius: '18px',
     border: `1px solid ${tableTone.outerLine}`,
     background: tableTone.panel,
-    boxShadow: isDarkMode
-      ? '0 24px 70px rgba(0, 0, 0, 0.34), inset 0 1px 0 rgba(255, 255, 255, 0.03)'
-      : t.shadow.card
+    boxShadow: tableTone.shadow,
   };
   const paginationBarSx = {
     display: 'flex',
     justifyContent: 'space-between',
     alignItems: 'center',
-    gap: 2,
+    gap: 1.5,
     flexWrap: 'wrap',
-    p: 1.5,
-    borderRadius: '8px',
-    backgroundColor: tableTone.footer,
-    border: `1px solid ${tableTone.footerBorder}`,
-    color: t.text.secondary
+    px: 1.5,
+    py: 0.95,
+    minHeight: 52,
+    backgroundColor: tableTone.panel,
+    borderTop: `1px solid ${tableTone.outerLine}`,
+    color: t.text.secondary,
+    boxShadow: 'none',
   };
   const tableHeaderStyle = {
     background: tableTone.header,
-    borderBottom: `1px solid ${tableTone.outerLine}`
+    borderBottom: `1px solid ${tableTone.outerLine}`,
+    boxShadow: isDarkMode
+      ? '0 10px 18px -18px rgba(0, 0, 0, 0.95)'
+      : '0 10px 18px -18px rgba(15, 23, 42, 0.38)',
   };
   const tableBaseStyle = {
     width: '100%',
     borderCollapse: 'separate',
     borderSpacing: 0,
     tableLayout: 'fixed',
-    fontSize: '13px',
-    fontFamily: '"Inter", "Roboto", "Helvetica", "Arial", sans-serif',
+    fontSize: '12.5px',
+    fontFamily: 'var(--fw-font-stack)',
     color: tableTone.text
   };
   const tableScrollStyle = {
     overflowX: 'auto',
     overflowY: 'auto',
     maxHeight: 'calc(100vh - 312px)',
-    borderRadius: '8px',
-    border: `1px solid ${tableTone.outerLine}`,
-    backgroundColor: tableTone.scroll
+    minHeight: 0,
+    border: 'none',
+    borderRadius: 0,
+    backgroundColor: 'transparent',
+    flex: '1 1 auto',
+    scrollbarColor: `${isDarkMode ? 'rgba(148, 163, 184, 0.38)' : 'rgba(86, 96, 112, 0.34)'} transparent`,
   };
   // The session id is a UUID that means nothing to the user; the row count
   // is the part worth showing.
   const editorSubtitle = `${totalRows.toLocaleString()} rows`;
   return (
     <Box sx={editorPageSx}>
-      <Box
-        className="fw-editor-bg-layer"
-        sx={{
-          pointerEvents: 'none',
-          position: 'absolute',
-          transition: 'all 0.7s cubic-bezier(0.16, 1, 0.3, 1)',
-          borderRadius: '50%',
-          opacity: isDarkMode ? 0.34 : 0.26,
-          width: '62vw',
-          height: '62vw',
-          left: `${mousePos.x}%`,
-          top: `${mousePos.y}%`,
-          transform: 'translate(-50%, -50%)',
-          filter: 'blur(90px)',
-          background: 'radial-gradient(circle, var(--color-brand, #2383e2) 0%, transparent 70%)',
-          zIndex: 0
-        }}
-      />
-      <Box
-        className="auth-grid-pattern fw-editor-bg-layer"
-        sx={{ position: 'absolute', inset: 0, pointerEvents: 'none', opacity: isDarkMode ? 0.38 : 0.42, zIndex: 0 }}
-      />
+      <Box className="fw-editor-bg-layer" sx={factWiseTopShadeSx(isDarkMode)} />
+      <Box className="fw-editor-bg-layer" sx={factWiseGlowSx(fwPageTokens)} />
+      <Box className="fw-editor-bg-layer" sx={factWiseGridOverlaySx(fwPageTokens)} />
       {/* Sync Status Indicator */}
       {syncStatus.inProgress && (
         <LinearProgress 
@@ -6670,9 +6855,15 @@ const EnhancedDataEditor = () => {
       )}
 
       {/* Unified Fill/Create Column Dialog */}
-      <Dialog open={createColumnDialogOpen} onClose={handleCloseCreateColumnDialog} maxWidth="md" fullWidth>
+      <Dialog
+        open={createColumnDialogOpen}
+        onClose={handleCloseCreateColumnDialog}
+        maxWidth="md"
+        fullWidth
+        PaperProps={{ sx: createColumnDialogPaperSx }}
+      >
         <DialogTitle>Fill or create a column</DialogTitle>
-        <DialogContent sx={{ px: 3, pt: 0, pb: 2 }}>
+        <DialogContent sx={{ pt: 0 }}>
           <Tabs value={createColumnTab} onChange={(_, value) => {
             setCreateColumnTab(value);
             if (value === 0 && createColumnContentType === 'blank') setCreateColumnContentType('fixed');
@@ -6685,7 +6876,7 @@ const EnhancedDataEditor = () => {
               {createColumnTab === 0 ? (
                 <FormControl fullWidth size="small">
                   <InputLabel>Column to fill</InputLabel>
-                  <Select label="Column to fill" value={createColumnTarget} onChange={(e) => setCreateColumnTarget(e.target.value)}>
+                  <Select label="Column to fill" value={createColumnTarget} onChange={(e) => setCreateColumnTarget(e.target.value)} MenuProps={dialogSelectMenuProps}>
                     {columnDefs.filter(c => c.field && c.field !== '__row_number__').map(c => (
                       <MenuItem key={c.field} value={c.field}>{columnLabel(c.field, c.headerName)}</MenuItem>
                     ))}
@@ -6704,7 +6895,7 @@ const EnhancedDataEditor = () => {
             <Grid item xs={12} sm={6}>
               <FormControl fullWidth size="small">
                 <InputLabel>How to set the value</InputLabel>
-                <Select label="How to set the value" value={createColumnContentType} onChange={(e) => setCreateColumnContentType(e.target.value)}>
+                <Select label="How to set the value" value={createColumnContentType} onChange={(e) => setCreateColumnContentType(e.target.value)} MenuProps={dialogSelectMenuProps}>
                   <MenuItem value="fixed">Use a default value</MenuItem>
                   <MenuItem value="copy">Copy from one column</MenuItem>
                   <MenuItem value="concat">Join two columns</MenuItem>
@@ -6725,7 +6916,7 @@ const EnhancedDataEditor = () => {
               <Grid item xs={12} sm={6}>
                 <FormControl fullWidth size="small">
                   <InputLabel>Rows to update</InputLabel>
-                  <Select label="Rows to update" value={createColumnMode} onChange={(e) => setCreateColumnMode(e.target.value)}>
+                  <Select label="Rows to update" value={createColumnMode} onChange={(e) => setCreateColumnMode(e.target.value)} MenuProps={dialogSelectMenuProps}>
                     <MenuItem value="fill_empty">Only rows where this column is empty</MenuItem>
                     <MenuItem value="overwrite">All rows</MenuItem>
                     {/* The first row holding each value keeps it; only the
@@ -6902,7 +7093,7 @@ const EnhancedDataEditor = () => {
                   {conditionalBranches.map((branch, branchIndex) => (
                     <Box key={branchIndex} sx={{ display: 'flex', flexDirection: 'column', gap: 1.25, pb: 1.5, borderBottom: `1px solid ${t.border.subtle}` }}>
                       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <Typography variant="body2" fontWeight={700}>{branchIndex === 0 ? 'If' : 'Else if'} condition {branchIndex + 1}</Typography>
+                        <Typography variant="body2" fontWeight={600}>{branchIndex === 0 ? 'If' : 'Else if'} condition {branchIndex + 1}</Typography>
                         {conditionalBranches.length > 1 && (
                           <IconButton size="small" onClick={() => setConditionalBranches(current => current.filter((_, index) => index !== branchIndex))}>
                             <DeleteIcon fontSize="small" />
@@ -7075,28 +7266,28 @@ const EnhancedDataEditor = () => {
           </Grid>
 
           {createColumnTab === 0 && createColumnTargetExists && createColumnTargetHasData && createColumnMode === 'overwrite' && (
-            <Alert severity="warning" sx={{ mt: 2 }}>Existing values in {createColumnTarget} will be replaced.</Alert>
+            <Alert severity="warning" sx={compactInlineAlertSx('warning', { mt: 1.5 })}>
+              Existing values in {createColumnTarget} will be replaced.
+            </Alert>
           )}
           {createColumnTab === 0 && createColumnMode === 'duplicates' && (
-            <Alert severity="info" sx={{ mt: 2 }}>
+            <Alert severity="info" sx={compactInlineAlertSx('info', { mt: 1.5 })}>
               The first row holding each value keeps it. Only the repeats below it are
               rewritten, so nothing loses its original value.
             </Alert>
           )}
           {createColumnTab === 0 && createColumnContentType === 'conditional' && createColumnMode === 'fill_empty' &&
             (conditionalBranches.some(branch => branch.outputType === 'empty') || condElseSourceType === 'empty') && (
-              <Alert severity="info" sx={{ mt: 2 }}>Leave empty will not clear populated cells in this mode. Choose All rows if matching rows should be cleared.</Alert>
+              <Alert severity="info" sx={compactInlineAlertSx('info', { mt: 1.5 })}>
+                Leave empty will not clear populated cells in this mode. Choose All rows if matching rows should be cleared.
+              </Alert>
             )}
-          <Alert severity="info" sx={{ mt: 2 }}>This operation is saved with the mapping template and runs again when the template is reused.</Alert>
+          <Alert severity="info" sx={compactInlineAlertSx('info', { mt: 1.4 })}>
+            This operation is saved with the mapping template and runs again when the template is reused.
+          </Alert>
         </DialogContent>
-        <DialogActions sx={{
-          px: 3,
-          py: 2,
-          borderTop: `1px solid ${t.border.subtle}`,
-          bgcolor: isDarkMode ? 'rgba(8, 13, 24, 0.72)' : 'rgba(248, 250, 252, 0.9)',
-          gap: 1
-        }}>
-          <Button onClick={handleCloseCreateColumnDialog} disabled={createColumnSaving}>
+        <DialogActions>
+          <Button onClick={handleCloseCreateColumnDialog} disabled={createColumnSaving} sx={cancelButtonSx}>
             Cancel
           </Button>
           <Button
@@ -7117,11 +7308,17 @@ const EnhancedDataEditor = () => {
       </Dialog>
 
       {/* User-driven blank/value cleanup */}
-      <Dialog open={fillMissingOpen} onClose={closeFillMissingDialog} maxWidth="sm" fullWidth>
+      <Dialog
+        open={fillMissingOpen}
+        onClose={closeFillMissingDialog}
+        maxWidth="sm"
+        fullWidth
+        PaperProps={{ sx: compactDialogPaperSx }}
+      >
         <DialogTitle>Fill or replace column values</DialogTitle>
-        <DialogContent dividers sx={{ display: 'grid', gap: 2.25 }}>
+        <DialogContent dividers sx={{ display: 'grid', gap: 2 }}>
           <Box>
-            <Typography variant="overline" sx={{ fontWeight: 800, color: 'primary.main' }}>1. Select a column</Typography>
+            <Typography variant="overline" sx={{ fontWeight: 600, color: 'primary.main' }}>1. Select a column</Typography>
             <Typography variant="body2" color="text.secondary" sx={{ mb: 1.25 }}>
               The app will inspect the actual values and suggest anything that looks invalid.
             </Typography>
@@ -7130,6 +7327,7 @@ const EnhancedDataEditor = () => {
             <Select
               label="Column"
               value={fillMissingColumn}
+              MenuProps={dialogSelectMenuProps}
               onChange={(event) => {
                 setFillMissingColumn(event.target.value);
                 setFillMissingMode('');
@@ -7153,17 +7351,17 @@ const EnhancedDataEditor = () => {
               <Typography variant="body2" color="text.secondary">Inspecting values in this column...</Typography>
             </Box>
           )}
-          {fillMissingAnalysisError && <Alert severity="error">{fillMissingAnalysisError}</Alert>}
+          {fillMissingAnalysisError && <Alert severity="error" sx={compactInlineAlertSx('error')}>{fillMissingAnalysisError}</Alert>}
 
           {fillMissingAnalysis && (
             <>
               {fillMissingAllEmpty ? (
-                <Alert severity="info">
+                <Alert severity="info" sx={compactInlineAlertSx('info')}>
                   All {fillMissingAnalysis.total_rows} cells in this column are empty. Fill them with one default value, or copy them from another column.
                 </Alert>
               ) : (
               <Box>
-                <Typography variant="overline" sx={{ fontWeight: 800, color: 'primary.main' }}>2. Choose what to fix</Typography>
+                <Typography variant="overline" sx={{ fontWeight: 600, color: 'primary.main' }}>2. Choose what to fix</Typography>
                 <RadioGroup
                   row
                   value={fillMissingMode}
@@ -7190,7 +7388,7 @@ const EnhancedDataEditor = () => {
               )}
 
               {fillMissingMode === 'empty' && !fillMissingAllEmpty && (
-                <Alert severity={(fillMissingAnalysis.empty_count || 0) > 0 ? 'info' : 'success'}>
+                <Alert severity={(fillMissingAnalysis.empty_count || 0) > 0 ? 'info' : 'success'} sx={compactInlineAlertSx((fillMissingAnalysis.empty_count || 0) > 0 ? 'info' : 'success')}>
                   {(fillMissingAnalysis.empty_count || 0) > 0
                     ? `${fillMissingAnalysis.empty_count} empty cells will be filled. Populated cells will not change.`
                     : 'This column has no empty cells.'}
@@ -7208,6 +7406,15 @@ const EnhancedDataEditor = () => {
                     onChange={(_, values) => setFillMissingSelectedValues(values)}
                     getOptionLabel={(option) => `${option.value} (${option.count})${option.suggested ? ' - Suggested' : ''}`}
                     isOptionEqualToValue={(option, value) => option.value === value.value}
+                    sx={selectedValueAutocompleteSx}
+                    renderTags={(value, getTagProps) => value.map((option, index) => (
+                      <Chip
+                        {...getTagProps({ index })}
+                        size="small"
+                        label={`${option.value} (${option.count})`}
+                        title={`${option.value} (${option.count})`}
+                      />
+                    ))}
                     renderInput={(params) => (
                       <TextField
                         {...params}
@@ -7218,8 +7425,8 @@ const EnhancedDataEditor = () => {
                     )}
                   />
                   {(fillMissingAnalysis.values || []).some(item => item.suggested) && (
-                    <Alert severity="warning">
-                      <Typography variant="body2" sx={{ fontWeight: 700, mb: 0.5 }}>Suggested values are preselected</Typography>
+                    <Alert severity="warning" sx={compactInlineAlertSx('warning')}>
+                      <Typography variant="body2" sx={{ fontWeight: 600, mb: 0.5 }}>Suggested values are preselected</Typography>
                       {(fillMissingAnalysis.values || []).filter(item => item.suggested).slice(0, 5).map(item => (
                         <Typography key={item.value} variant="caption" sx={{ display: 'block' }}>
                           {item.value} ({item.count}): {item.reason}
@@ -7237,7 +7444,7 @@ const EnhancedDataEditor = () => {
 
               {fillMissingMode && fillMissingTargetCount > 0 && (
                 <FormControl component="fieldset" fullWidth>
-                  <FormLabel component="legend" sx={{ mb: 1, fontWeight: 800, color: 'primary.main' }}>
+                  <FormLabel component="legend" sx={{ mb: 1, fontWeight: 600, color: 'primary.main' }}>
                     3. Choose the replacement
                   </FormLabel>
                   <RadioGroup value={fillMissingStrategy} onChange={(event) => setFillMissingStrategy(event.target.value)}>
@@ -7248,13 +7455,13 @@ const EnhancedDataEditor = () => {
                         <FormControlLabel
                           value="above"
                           control={<Radio />}
-                          label={<Box><Typography variant="body2" fontWeight={700}>Use the filled cell above</Typography><Typography variant="caption" color="text.secondary">Uses the nearest non-target value above each selected cell.</Typography></Box>}
+                          label={<Box><Typography variant="body2" fontWeight={600}>Use the filled cell above</Typography><Typography variant="caption" color="text.secondary">Uses the nearest non-target value above each selected cell.</Typography></Box>}
                           sx={{ alignItems: 'flex-start', mb: 1, '& .MuiRadio-root': { mt: -0.5 } }}
                         />
                         <FormControlLabel
                           value="below"
                           control={<Radio />}
-                          label={<Box><Typography variant="body2" fontWeight={700}>Use the filled cell below</Typography><Typography variant="caption" color="text.secondary">Uses the nearest non-target value below each selected cell.</Typography></Box>}
+                          label={<Box><Typography variant="body2" fontWeight={600}>Use the filled cell below</Typography><Typography variant="caption" color="text.secondary">Uses the nearest non-target value below each selected cell.</Typography></Box>}
                           sx={{ alignItems: 'flex-start', mb: 1, '& .MuiRadio-root': { mt: -0.5 } }}
                         />
                       </>
@@ -7262,13 +7469,13 @@ const EnhancedDataEditor = () => {
                     <FormControlLabel
                       value="default"
                       control={<Radio />}
-                      label={<Box><Typography variant="body2" fontWeight={700}>Add a default value</Typography><Typography variant="caption" color="text.secondary">Uses one value for every targeted cell.</Typography></Box>}
+                      label={<Box><Typography variant="body2" fontWeight={600}>Add a default value</Typography><Typography variant="caption" color="text.secondary">Uses one value for every targeted cell.</Typography></Box>}
                       sx={{ alignItems: 'flex-start', mb: 1, '& .MuiRadio-root': { mt: -0.5 } }}
                     />
                     <FormControlLabel
                       value="source_column"
                       control={<Radio />}
-                      label={<Box><Typography variant="body2" fontWeight={700}>Copy from another column</Typography><Typography variant="caption" color="text.secondary">Takes the value from the same row of the column you pick.</Typography></Box>}
+                      label={<Box><Typography variant="body2" fontWeight={600}>Copy from another column</Typography><Typography variant="caption" color="text.secondary">Takes the value from the same row of the column you pick.</Typography></Box>}
                       sx={{ alignItems: 'flex-start', '& .MuiRadio-root': { mt: -0.5 } }}
                     />
                   </RadioGroup>
@@ -7290,6 +7497,7 @@ const EnhancedDataEditor = () => {
                         <Select
                           label="Copy from"
                           value={fillMissingSourceColumn}
+                          MenuProps={dialogSelectMenuProps}
                           onChange={(event) => setFillMissingSourceColumn(event.target.value)}
                         >
                           {columnDefs
@@ -7301,7 +7509,7 @@ const EnhancedDataEditor = () => {
                             ))}
                         </Select>
                       </FormControl>
-                      <Alert severity="info" sx={{ mt: 1.5 }}>
+                      <Alert severity="info" sx={compactInlineAlertSx('info', { mt: 1.25 })}>
                         Rows where the source column is empty are left untouched.
                       </Alert>
                     </>
@@ -7312,7 +7520,7 @@ const EnhancedDataEditor = () => {
           )}
         </DialogContent>
         <DialogActions>
-          <Button onClick={closeFillMissingDialog} disabled={fillMissingBusy}>Cancel</Button>
+          <Button onClick={closeFillMissingDialog} disabled={fillMissingBusy} sx={cancelButtonSx}>Cancel</Button>
           <Button
             variant="contained"
             onClick={handleFillMissingValues}
@@ -7444,19 +7652,25 @@ const EnhancedDataEditor = () => {
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, minWidth: 0, flex: '1 1 360px' }}>
                 <IconButton
                   onClick={handleBackToPreviousStep}
-                  sx={iconButtonSx}
+                  size="small"
+                  sx={{
+                    ...iconButtonSx,
+                    width: 30,
+                    height: 30,
+                    flex: '0 0 30px',
+                  }}
                   aria-label="Back to previous step"
                 >
-                  <ArrowBackIcon />
+                  <ArrowBackIcon sx={{ fontSize: 17 }} />
                 </IconButton>
                 <Box sx={{ minWidth: 0 }}>
                   <Typography
                     variant="h5"
-                    fontWeight={760}
+                      fontWeight={600}
                     sx={{
                       lineHeight: 1.15,
                       color: t.text.heading,
-                      fontSize: { xs: '1.18rem', md: '1.38rem' },
+                      fontSize: { xs: '1.1rem', md: '1.25rem' },
                       letterSpacing: 0
                     }}
                   >
@@ -7465,9 +7679,10 @@ const EnhancedDataEditor = () => {
                   <Typography
                     variant="body2"
                     sx={{
-                      mt: 0.45,
+                      mt: 0.3,
                       color: t.text.secondary,
-                      fontSize: '0.82rem',
+                      fontSize: '0.78rem',
+                      fontWeight: 400,
                       overflow: 'hidden',
                       textOverflow: 'ellipsis',
                       whiteSpace: 'nowrap',
@@ -7497,8 +7712,8 @@ const EnhancedDataEditor = () => {
                   onClick={handleManualRefresh}
                   disabled={syncStatus.inProgress}
                   sx={{
-                    width: 40,
-                    height: 40,
+                    width: 32,
+                    height: 32,
                     color: '#ffffff',
                     bgcolor: isDarkMode ? '#334155' : '#1e293b',
                     '&:hover': {
@@ -7511,7 +7726,7 @@ const EnhancedDataEditor = () => {
                   }}
                   aria-label="Refresh"
                 >
-                  <RefreshIcon sx={{ fontSize: 20 }} />
+                  <RefreshIcon sx={{ fontSize: 17 }} />
                 </IconButton>
 
                 {/* Layout actions sit behind the overflow menu: useful, but not
@@ -7521,8 +7736,8 @@ const EnhancedDataEditor = () => {
                     onClick={(e) => setMoreActionsAnchor(e.currentTarget)}
                     disabled={syncStatus.inProgress}
                     sx={{
-                      width: 40,
-                      height: 40,
+                      width: 32,
+                      height: 32,
                       color: '#ffffff',
                       bgcolor: isDarkMode ? '#334155' : '#1e293b',
                       '&:hover': { bgcolor: isDarkMode ? '#334155' : '#1e293b' },
@@ -7533,14 +7748,14 @@ const EnhancedDataEditor = () => {
                     }}
                     aria-label="More actions"
                   >
-                    <MoreVertIcon sx={{ fontSize: 20 }} />
+                    <MoreVertIcon sx={{ fontSize: 17 }} />
                   </IconButton>
                 </Tooltip>
                 <Menu
                   anchorEl={moreActionsAnchor}
                   open={Boolean(moreActionsAnchor)}
                   onClose={() => setMoreActionsAnchor(null)}
-                  PaperProps={{ sx: { borderRadius: '8px', mt: 1, minWidth: 230, border: `1px solid ${t.border.default}`, boxShadow: t.shadow.card } }}
+                  PaperProps={{ sx: { ...compactMenuPaperSx, minWidth: 200 } }}
                 >
                   <MenuItem onClick={() => { setMoreActionsAnchor(null); handleAutoFitAll(); }} disabled={syncStatus.inProgress}>
                     <ListItemText>Auto-fit all columns</ListItemText>
@@ -7586,7 +7801,7 @@ const EnhancedDataEditor = () => {
             {/* Second Row - Secondary Tools and Search */}
             <Box sx={{
               display: 'flex',
-              gap: 1.25,
+              gap: 1,
               justifyContent: 'space-between',
               alignItems: 'center',
               flexWrap: 'wrap',
@@ -7627,7 +7842,7 @@ const EnhancedDataEditor = () => {
                 anchorEl={toolsMenuAnchor}
                 open={Boolean(toolsMenuAnchor)}
                 onClose={() => setToolsMenuAnchor(null)}
-                PaperProps={{ sx: { borderRadius: '8px', mt: 1, minWidth: 220, border: `1px solid ${t.border.default}`, boxShadow: t.shadow.card } }}
+                PaperProps={{ sx: { ...compactMenuPaperSx, minWidth: 200 } }}
               >
                 <MenuItem onClick={() => { setToolsMenuAnchor(null); handleOpenCreateColumnDialog(); }} disabled={syncStatus.inProgress}>
                   <ListItemIcon><AddIcon sx={{ color: '#2e7d32' }} /></ListItemIcon>
@@ -7692,7 +7907,7 @@ const EnhancedDataEditor = () => {
                   variant="outlined"
                   label={`Showing rows: ${issueRowFilter.label}`}
                   onDelete={clearIssueRowFilter}
-                  sx={{ fontWeight: 700, borderRadius: '8px' }}
+                  sx={{ fontWeight: 500, borderRadius: '8px', fontSize: '12px' }}
                 />
               )}
               <Button
@@ -7717,7 +7932,7 @@ const EnhancedDataEditor = () => {
                 anchorEl={rowFilterMenuAnchor}
                 open={Boolean(rowFilterMenuAnchor)}
                 onClose={() => setRowFilterMenuAnchor(null)}
-                PaperProps={{ sx: { borderRadius: '8px', mt: 1, minWidth: 210, border: `1px solid ${t.border.default}`, boxShadow: t.shadow.card } }}
+                PaperProps={{ sx: { ...compactMenuPaperSx, minWidth: 232 } }}
               >
                 {/* Column filters sit in a row under the headers; this just shows
                     or hides that row. */}
@@ -7815,7 +8030,8 @@ const EnhancedDataEditor = () => {
                 sx={{
                   width: { xs: '100%', sm: 260, lg: 320 },
                   '& .MuiOutlinedInput-root': {
-                    minHeight: 38,
+                    minHeight: 34,
+                    height: 34,
                     borderRadius: '999px',
                     color: t.text.primary,
                     backgroundColor: t.surface.controlSoft,
@@ -7824,23 +8040,26 @@ const EnhancedDataEditor = () => {
                     '&.Mui-focused fieldset': { borderColor: t.color.primary }
                   },
                   '& .MuiInputBase-input': {
-                    py: 0.9,
-                    fontSize: '0.88rem'
+                    py: 0,
+                    fontSize: '13px',
+                    fontWeight: 400,
+                    height: 34,
+                    boxSizing: 'border-box',
                   }
                 }}
                 InputProps={{
-                  startAdornment: <SearchIcon sx={{ mr: 1, fontSize: 18, color: t.text.secondary }} />
+                  startAdornment: <SearchIcon sx={{ mr: 0.8, fontSize: 17, color: t.text.secondary }} />
                 }}
               />
               <Menu
                 anchorEl={mpnMenuAnchor}
                 open={Boolean(mpnMenuAnchor)}
                 onClose={() => setMpnMenuAnchor(null)}
-                PaperProps={{ sx: { borderRadius: '8px', mt: 1, minWidth: 280, border: `1px solid ${t.border.default}`, boxShadow: t.shadow.card } }}
+                PaperProps={{ sx: { ...compactMenuPaperSx, minWidth: 232, maxWidth: 276 } }}
               >
                 {/* MPN Column selector inline */}
-                <Box sx={{ px: 2, py: 1 }}>
-                  <Typography variant="caption" sx={{ color: 'text.secondary', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                <Box sx={{ px: 1.25, py: 0.75 }}>
+                  <Typography variant="caption" sx={{ color: t.text.secondary, fontWeight: 500, textTransform: 'uppercase', letterSpacing: '0.03em', fontSize: '10.5px' }}>
                     MPN Column
                   </Typography>
                   <FormControl size="small" fullWidth sx={{ mt: 0.5 }}>
@@ -7848,7 +8067,8 @@ const EnhancedDataEditor = () => {
                       value={mpnColumn || ''}
                       onChange={(e) => setMpnColumn(e.target.value || null)}
                       displayEmpty
-                      sx={{ borderRadius: '8px', fontSize: '14px' }}
+                      sx={compactSelectSx}
+                      MenuProps={compactSelectMenuProps}
                     >
                       <MenuItem value=""><em>Auto-detect</em></MenuItem>
                       {columnDefs
@@ -8067,7 +8287,7 @@ const EnhancedDataEditor = () => {
                     anchorEl={moreMenuAnchor}
                     open={Boolean(moreMenuAnchor)}
                     onClose={() => setMoreMenuAnchor(null)}
-                    PaperProps={{ sx: { borderRadius: '8px', mt: 1, minWidth: 220, border: `1px solid ${t.border.default}`, boxShadow: t.shadow.card } }}
+                    PaperProps={{ sx: { ...compactMenuPaperSx, minWidth: 212 } }}
                   >
                     <MenuItem onClick={() => { setMoreMenuAnchor(null); handleExportForCorrection(); }} disabled={downloadLoading || syncStatus.inProgress}>
                       <ListItemIcon><EditIcon sx={{ color: '#7b1fa2' }} /></ListItemIcon>
@@ -8125,7 +8345,7 @@ const EnhancedDataEditor = () => {
             }}
           >
             <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
-              <Typography variant="h6" sx={{ fontWeight: 700, color: t.text.primary }}>
+              <Typography variant="h6" sx={{ fontWeight: 600, color: t.text.primary }}>
                 Column Quality
               </Typography>
               <IconButton
@@ -8279,13 +8499,15 @@ const EnhancedDataEditor = () => {
                           window.addEventListener('mouseup', onUp);
                         }}
                         style={{
-                          padding: '12px 14px',
+                          padding: '11px 14px',
                           textAlign: 'left',
-                          fontWeight: 700,
+                          fontWeight: 500,
                           color: tableTone.headerText,
                           borderRight: `1px solid ${tableTone.line}`,
                           borderBottom: `1px solid ${tableTone.outerLine}`,
                           background: tableTone.header,
+                          fontSize: '12.5px',
+                          lineHeight: 1.25,
                           position: 'sticky',
                           top: 0,
                           zIndex: 3,
@@ -8368,7 +8590,7 @@ const EnhancedDataEditor = () => {
                           <th
                             key={`filter-${col.field}`}
                             style={{
-                              padding: isRowNumber ? '4px 6px' : '4px 8px',
+                              padding: isRowNumber ? '7px 10px' : '7px 12px',
                               borderRight: `1px solid ${tableTone.line}`,
                               borderBottom: `1px solid ${tableTone.outerLine}`,
                               background: tableTone.header,
@@ -8402,11 +8624,11 @@ const EnhancedDataEditor = () => {
                                   width: '100%',
                                   boxSizing: 'border-box',
                                   padding: '4px 8px',
-                                  borderRadius: '6px',
+                                  borderRadius: '999px',
                                   border: `1px solid ${value ? t.color.primary : tableTone.line}`,
-                                  background: t.surface.controlSoft,
+                                  background: tableTone.controlBg,
                                   color: t.text.primary,
-                                  fontSize: '12px',
+                                  fontSize: '12.5px',
                                   fontFamily: 'inherit',
                                   fontWeight: 400,
                                   outline: 'none'
@@ -8421,11 +8643,8 @@ const EnhancedDataEditor = () => {
                 </thead>
                 <tbody>
                   {displayedRows
-                    .map(({ row, rowIndex }, displayIndex) => {
-                    // Neutral zebra striping; no quality-based highlighting
-                    const rowBackgroundColor = displayIndex % 2 === 0
-                      ? tableTone.rowEven
-                      : tableTone.rowOdd;
+                    .map(({ row, rowIndex }) => {
+                    const rowBackgroundColor = tableTone.rowEven;
 
                     return (
                       <tr key={rowIndex} style={{
@@ -8461,12 +8680,12 @@ const EnhancedDataEditor = () => {
                           const isDupHighlighted = matchesDupValue || matchesDupRow;
                           return (
                             <td key={`${col.field}-${rowIndex}`} style={{
-                              padding: '10px 14px',
+                              padding: '11px 14px',
                               borderRight: isDupHighlighted ? '2px solid #f59e0b' : `1px solid ${tableTone.rowLine}`,
-                              borderBottom: isDupHighlighted ? '2px solid #f59e0b' : `1px solid ${tableTone.rowLine}`,
+                              borderBottom: isDupHighlighted ? '2px solid #f59e0b' : `1px dashed ${tableTone.rowLine}`,
                               backgroundColor: isDupHighlighted ? t.state.warningBg : (isUnknown ? t.state.dangerBg : 'inherit'),
                               color: isDupHighlighted ? t.color.warningText : (isInvalidMpn ? t.color.danger : (isUnknown ? t.color.danger : tableTone.text)),
-                              fontWeight: (isDupHighlighted || isInvalidMpn) ? '700' : (isUnknown ? '500' : 'normal'),
+                              fontWeight: (isDupHighlighted || isInvalidMpn) ? 500 : 400,
                               width: `${columnWidths[col.field] || (col.field === '__row_number__' ? 80 : 180)}px`
                             }}>
                               {col.field === '__row_number__' ? (
@@ -8476,7 +8695,7 @@ const EnhancedDataEditor = () => {
                                 // the row's own gutter, so the number and the
                                 // row's delete button both belong here.
                                 <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 0.5 }}>
-                                  <span style={{ color: t.text.secondary, fontWeight: 600 }}>{rowIndex + 1}</span>
+                                  <span style={{ color: t.text.secondary, fontWeight: 400 }}>{rowIndex + 1}</span>
                                   <Tooltip
                                     title={delBusy ? 'Deleting…' : 'Delete this row — permanent, no undo'}
                                     arrow
@@ -8524,7 +8743,7 @@ const EnhancedDataEditor = () => {
                                     fontSize: 'inherit',
                                     fontFamily: 'inherit',
                                     color: 'inherit',
-                                    fontWeight: 'inherit',
+                                    fontWeight: 400,
                                     outline: 'none',
                                     caretColor: t.color.primary
                                   }}
@@ -8544,17 +8763,59 @@ const EnhancedDataEditor = () => {
                 dataset now, so none of these refetch. */}
             <Box sx={paginationBarSx}>
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
-                <Typography variant="body2" color="text.secondary">Rows per page</Typography>
-                <Select size="small" value={pageSize} onChange={(e) => { setPage(1); setPageSize(parseInt(e.target.value, 10)); }}>
+                <Typography variant="body2" sx={{ color: t.text.secondary, fontSize: 12.5, fontWeight: 400 }}>Rows per page</Typography>
+                <Select
+                  size="small"
+                  value={pageSize}
+                  onChange={(e) => { setPage(1); setPageSize(parseInt(e.target.value, 10)); }}
+                  MenuProps={{
+                    PaperProps: {
+                      sx: { ...compactMenuPaperSx, minWidth: 84, maxWidth: 104 },
+                    },
+                  }}
+                  sx={{
+                    ...compactSelectSx,
+                    minWidth: 70,
+                    bgcolor: tableTone.controlBg,
+                    '& .MuiOutlinedInput-notchedOutline': { borderColor: tableTone.outerLine },
+                    '&:hover .MuiOutlinedInput-notchedOutline': { borderColor: t.color.primary },
+                    '&.Mui-focused .MuiOutlinedInput-notchedOutline': { borderColor: t.color.primary },
+                  }}
+                >
                   {[50,100,200,500,1000,2000,3000].map(sz => <MenuItem key={sz} value={sz}>{sz}</MenuItem>)}
                 </Select>
-                <Typography variant="body2" color="text.secondary">
+                <Typography variant="body2" sx={{ color: t.text.secondary, fontSize: 12.5, fontWeight: 400 }}>
                   Page {safePage} of {totalPages} | {isFiltering
                     ? `${filteredRowCount.toLocaleString()} of ${totalRows.toLocaleString()} rows match`
                     : `Total: ${totalRows.toLocaleString()}`}
                 </Typography>
               </Box>
-              <Pagination count={totalPages} page={safePage} onChange={(_, p) => setPage(p)} color="primary" size="small" shape="rounded" />
+              <Pagination
+                count={totalPages}
+                page={safePage}
+                onChange={(_, p) => setPage(p)}
+                color="primary"
+                size="small"
+                shape="rounded"
+                sx={{
+                  '& .MuiPaginationItem-root': {
+                    minWidth: 30,
+                    height: 30,
+                    borderRadius: '999px',
+                    fontSize: 12.5,
+                    fontWeight: 500,
+                    color: t.text.secondary,
+                  },
+                  '& .MuiPaginationItem-root.Mui-selected': {
+                    bgcolor: '#007aff',
+                    color: '#ffffff',
+                    boxShadow: '0 10px 18px -12px rgba(0, 122, 255, 0.8)',
+                    '&:hover': {
+                      bgcolor: '#007aff',
+                    },
+                  },
+                }}
+              />
             </Box>
           </Box>
         </Paper>
@@ -8581,7 +8842,7 @@ const EnhancedDataEditor = () => {
         <DialogTitle sx={{ pb: 0.5 }}>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
             <AutoAwesomeIcon sx={{ color: '#7c3aed' }} />
-            <Typography variant="h6" fontWeight={700}>Expand Alternates into Rows</Typography>
+            <Typography variant="h6" fontWeight={600}>Expand Alternates into Rows</Typography>
           </Box>
           <Typography variant="body2" color="text.secondary">
             {smartPhase === 'plan'
@@ -8637,7 +8898,7 @@ const EnhancedDataEditor = () => {
                     </Select>
                   </FormControl>
                   {smartMpnCol && (
-                    <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5, fontFamily: 'monospace', wordBreak: 'break-word' }}>
+                    <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5, fontFamily: 'var(--fw-font-stack)', wordBreak: 'break-word' }}>
                       {sampleForField(smartMpnCol) || '(empty)'}
                     </Typography>
                   )}
@@ -8654,7 +8915,7 @@ const EnhancedDataEditor = () => {
                     </Select>
                   </FormControl>
                   {smartMfrCol && (
-                    <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5, fontFamily: 'monospace', wordBreak: 'break-word' }}>
+                    <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5, fontFamily: 'var(--fw-font-stack)', wordBreak: 'break-word' }}>
                       {sampleForField(smartMfrCol) || '(empty)'}
                     </Typography>
                   )}
@@ -8686,7 +8947,7 @@ const EnhancedDataEditor = () => {
                   the part number, regardless of what's chosen here. */}
               {smartPlan?.op === 'labelled' && (
                 <Box sx={{ mb: 2, p: 1.5, borderRadius: 2, border: '1px solid #e5e7eb', bgcolor: '#f8fafc' }}>
-                  <Typography variant="subtitle2" fontWeight={700} sx={{ mb: 0.75 }}>
+                  <Typography variant="subtitle2" fontWeight={600} sx={{ mb: 0.75 }}>
                     How should each cell be split?
                   </Typography>
                   <Grid container spacing={1.5} alignItems="center">
@@ -8784,7 +9045,7 @@ const EnhancedDataEditor = () => {
 
               {smartPlan ? (
                 <Box>
-                  <Typography variant="subtitle2" fontWeight={700} sx={{ mb: 1 }}>What I'll do</Typography>
+                  <Typography variant="subtitle2" fontWeight={600} sx={{ mb: 1 }}>What I'll do</Typography>
                   <Box component="ol" sx={{ m: 0, pl: 2.5, display: 'flex', flexDirection: 'column', gap: 0.5 }}>
                     {smartPlan.steps.map((s, i) => (
                       <Typography key={i} component="li" variant="body2" color="text.secondary">{s}</Typography>
@@ -8802,7 +9063,7 @@ const EnhancedDataEditor = () => {
             Configure manually
           </Button>
           <Box sx={{ flex: 1 }} />
-          <Button onClick={() => setSmartExpandOpen(false)} disabled={smartPhase === 'applying'}>Cancel</Button>
+          <Button onClick={() => setSmartExpandOpen(false)} disabled={smartPhase === 'applying'} sx={cancelButtonSx}>Cancel</Button>
           <Button variant="contained" onClick={handleSmartApply}
             disabled={smartPhase !== 'plan' || !smartPlan || mpnSplitting}
             startIcon={smartPhase === 'applying' ? <CircularProgress size={16} sx={{ color: 'white' }} /> : <AutoAwesomeIcon />}
@@ -8832,7 +9093,7 @@ const EnhancedDataEditor = () => {
                 <Box key={rr.row} sx={{ p: 1.5, borderRadius: 2, border: '1px solid', borderColor: ok ? '#c9e7d6' : '#f2d6a8', backgroundColor: ok ? '#f5fbf8' : '#fffdf7' }}>
                   <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1 }}>
                     <Typography variant="caption" color="text.secondary">
-                      Row {rr.row + 1} · {rr.mpnCount} part{rr.mpnCount === 1 ? '' : 's'}: <span style={{ fontFamily: 'monospace' }}>{(rr.mpns || []).join('  ')}</span>
+                      Row {rr.row + 1} · {rr.mpnCount} part{rr.mpnCount === 1 ? '' : 's'}: <span style={{ fontFamily: 'var(--fw-font-stack)' }}>{(rr.mpns || []).join('  ')}</span>
                     </Typography>
                     <Chip
                       size="small"
@@ -8846,7 +9107,7 @@ const EnhancedDataEditor = () => {
                     <Box sx={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', rowGap: 1 }}>
                       {rr.tokens.map((tok, ti) => (
                         <React.Fragment key={ti}>
-                          <Box component="span" sx={{ px: 1, py: 0.5, borderRadius: 1, backgroundColor: '#eef2f7', fontFamily: 'monospace', fontSize: 13, whiteSpace: 'nowrap' }}>
+                          <Box component="span" sx={{ px: 1, py: 0.5, borderRadius: 1, backgroundColor: '#eef2f7', fontFamily: 'var(--fw-font-stack)', fontSize: 13, whiteSpace: 'nowrap' }}>
                             {tok}
                           </Box>
                           {ti < rr.tokens.length - 1 && (
@@ -8856,7 +9117,7 @@ const EnhancedDataEditor = () => {
                                 onClick={() => toggleReviewCut(ri, ti)}
                                 sx={{
                                   mx: 0.25, px: 0.75, cursor: 'pointer', userSelect: 'none',
-                                  fontWeight: 700, lineHeight: 1,
+                                  fontWeight: 600, lineHeight: 1,
                                   color: rr.cuts[ti] ? '#c0392b' : '#94a3b8',
                                   '&:hover': { color: rr.cuts[ti] ? '#e74c3c' : '#475569' },
                                 }}
@@ -8904,7 +9165,7 @@ const EnhancedDataEditor = () => {
           </Box>
         </DialogContent>
         <DialogActions sx={{ px: 3, pb: 2 }}>
-          <Button onClick={() => setReviewOpen(false)} disabled={reviewBusy}>Cancel</Button>
+          <Button onClick={() => setReviewOpen(false)} disabled={reviewBusy} sx={cancelButtonSx}>Cancel</Button>
           <Button
             variant="contained"
             onClick={handleApplyReview}
@@ -8952,7 +9213,7 @@ const EnhancedDataEditor = () => {
           )}
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setCopyColOpen(false)} disabled={copyBusy}>Cancel</Button>
+          <Button onClick={() => setCopyColOpen(false)} disabled={copyBusy} sx={cancelButtonSx}>Cancel</Button>
           <Button variant="contained" onClick={handleCopyColumn}
             disabled={copyBusy || !copySource || !copyTarget || copySource === copyTarget}
             startIcon={copyBusy ? <CircularProgress size={16} /> : <ContentCopyIcon />}>
@@ -9023,7 +9284,7 @@ const EnhancedDataEditor = () => {
           <FormControlLabel control={<Checkbox size="small" checked={defaultOnlyEmpty} onChange={(e) => setDefaultOnlyEmpty(e.target.checked)} />} label="Only fill empty cells (leave existing values alone)" />
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setDefaultColOpen(false)} disabled={defaultBusy}>Cancel</Button>
+          <Button onClick={() => setDefaultColOpen(false)} disabled={defaultBusy} sx={cancelButtonSx}>Cancel</Button>
           <Button variant="contained" onClick={handleSetDefault} disabled={defaultBusy || !defaultCol}
             startIcon={defaultBusy ? <CircularProgress size={16} /> : <EditNoteIcon />}>
             {defaultBusy ? 'Applying…' : 'Apply'}
@@ -9067,7 +9328,7 @@ const EnhancedDataEditor = () => {
           </Alert>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setDeleteRowsOpen(false)} disabled={delBusy}>Cancel</Button>
+          <Button onClick={() => setDeleteRowsOpen(false)} disabled={delBusy} sx={cancelButtonSx}>Cancel</Button>
           <Button variant="contained" color="error" onClick={handleDeleteRows} disabled={delBusy || !delCol}
             startIcon={delBusy ? <CircularProgress size={16} sx={{ color: 'white' }} /> : <DeleteIcon />}>
             {delBusy ? 'Deleting…' : 'Delete rows'}
@@ -9109,7 +9370,7 @@ const EnhancedDataEditor = () => {
           </Box>
         </DialogContent>
         <DialogActions sx={{ px: 3, pb: 2 }}>
-          <Button onClick={() => setExportBomOpen(false)} disabled={exportBomBusy}>Cancel</Button>
+          <Button onClick={() => setExportBomOpen(false)} disabled={exportBomBusy} sx={cancelButtonSx}>Cancel</Button>
           <Box sx={{ flex: 1 }} />
           {/* Export to FactWise — mock (opens the project mock, no item-code check) */}
           <Button variant="contained" onClick={() => { setExportBomOpen(false); handleExportToProject(); }} disabled={exportBomBusy}
@@ -9129,7 +9390,7 @@ const EnhancedDataEditor = () => {
       {/* Manual arrangement chooser — the "Configure manually" fallback for Smart Expand. */}
       <Dialog open={ENABLE_LEGACY_EXPAND_ROWS && alternatesChooserOpen} onClose={() => setAlternatesChooserOpen(false)} maxWidth="sm" fullWidth>
         <DialogTitle sx={{ pb: 0.5 }}>
-          <Typography variant="h6" fontWeight={700}>Expand Alternates into Rows</Typography>
+          <Typography variant="h6" fontWeight={600}>Expand Alternates into Rows</Typography>
           <Typography variant="body2" color="text.secondary">
             Each alternate value becomes its own row. We scanned your columns — the arrangement that fits is highlighted. How are your alternates arranged?
           </Typography>
@@ -9179,9 +9440,9 @@ const EnhancedDataEditor = () => {
                 }}
               >
                 <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1, mb: 0.5 }}>
-                  <Typography fontWeight={700}>{opt.title}</Typography>
+                  <Typography fontWeight={600}>{opt.title}</Typography>
                   {det.matched && (
-                    <Box sx={{ fontSize: 11, fontWeight: 700, color: '#00796b', backgroundColor: 'rgba(0,121,107,0.12)', px: 1, py: 0.25, borderRadius: 5, whiteSpace: 'nowrap' }}>
+                    <Box sx={{ fontSize: 11, fontWeight: 600, color: '#00796b', backgroundColor: 'rgba(0,121,107,0.12)', px: 1, py: 0.25, borderRadius: 5, whiteSpace: 'nowrap' }}>
                       ✓ matches your sheet
                     </Box>
                   )}
@@ -9190,7 +9451,7 @@ const EnhancedDataEditor = () => {
                   m: 0, mb: 1, p: 1, borderRadius: 1,
                   backgroundColor: det.matched ? '#e9f4f1' : '#f5f7fa',
                   color: det.matched ? '#334155' : '#9aa5b1',
-                  fontFamily: 'monospace', fontSize: 12, whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+                  fontFamily: 'var(--fw-font-stack)', fontSize: 12, whiteSpace: 'pre-wrap', wordBreak: 'break-word',
                 }}>{det.matched && Array.isArray(det.lines) ? det.lines.join('\n') : opt.example}</Box>
                 <Typography variant="body2" color="text.secondary">{opt.desc}</Typography>
                 {!det.matched && (
@@ -9204,7 +9465,7 @@ const EnhancedDataEditor = () => {
           </Box>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setAlternatesChooserOpen(false)}>Cancel</Button>
+          <Button onClick={() => setAlternatesChooserOpen(false)} sx={cancelButtonSx}>Cancel</Button>
         </DialogActions>
       </Dialog>
 
@@ -9232,7 +9493,7 @@ const EnhancedDataEditor = () => {
                     ))}
                   </Select>
                 </FormControl>
-                <Box sx={{ color: 'text.secondary', fontWeight: 700 }}>←</Box>
+                <Box sx={{ color: 'text.secondary', fontWeight: 600 }}>←</Box>
                 <FormControl size="small" sx={{ flex: 1 }}>
                   <InputLabel>Alternate source column</InputLabel>
                   <Select
@@ -9268,7 +9529,7 @@ const EnhancedDataEditor = () => {
           </Box>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setAltColsDialogOpen(false)} disabled={altColsRunning}>Cancel</Button>
+          <Button onClick={() => setAltColsDialogOpen(false)} disabled={altColsRunning} sx={cancelButtonSx}>Cancel</Button>
           <Button
             onClick={handleApplyAltCols}
             variant="contained"
@@ -9357,7 +9618,7 @@ const EnhancedDataEditor = () => {
           </Alert>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setProducerParseDialogOpen(false)} disabled={mpnSplitting}>
+          <Button onClick={() => setProducerParseDialogOpen(false)} disabled={mpnSplitting} sx={cancelButtonSx}>
             Cancel
           </Button>
           <Button
@@ -9394,7 +9655,7 @@ const EnhancedDataEditor = () => {
           borderBottom: isDarkMode ? '1px solid rgba(148, 163, 184, 0.16)' : '1px solid #e2e8f0',
           bgcolor: isDarkMode ? 'linear-gradient(180deg, rgba(15, 23, 42, 0.98), rgba(15, 23, 42, 0.92))' : '#ffffff',
         }}>
-          <Typography variant="h6" sx={{ fontWeight: 850, letterSpacing: 0, color: t.text.heading }}>
+          <Typography variant="h6" sx={{ fontWeight: 600, letterSpacing: 0, color: t.text.heading }}>
             Item Directory import warning
           </Typography>
           <Typography variant="body2" sx={{ color: t.text.secondary, mt: 0.25 }}>
@@ -9458,7 +9719,7 @@ const EnhancedDataEditor = () => {
                 >
                   <Box sx={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 1.5, flexWrap: 'wrap' }}>
                     <Box sx={{ minWidth: 0 }}>
-                      <Typography variant="subtitle2" sx={{ fontWeight: 800, color: t.text.heading }}>
+                      <Typography variant="subtitle2" sx={{ fontWeight: 600, color: t.text.heading }}>
                         {g.headerName || g.req || g.field}
                       </Typography>
                       <Typography
@@ -9472,7 +9733,7 @@ const EnhancedDataEditor = () => {
                           color: isDarkMode ? '#fed7aa' : '#c2410c',
                           bgcolor: isDarkMode ? 'rgba(249, 115, 22, 0.14)' : '#fff7ed',
                           border: isDarkMode ? '1px solid rgba(251, 146, 60, 0.22)' : '1px solid #fed7aa',
-                          fontWeight: 700,
+                          fontWeight: 600,
                         }}
                       >
                         {issueParts.join(' | ')}
@@ -9482,7 +9743,7 @@ const EnhancedDataEditor = () => {
                       size="small"
                       label="Required"
                       sx={{
-                        fontWeight: 800,
+                        fontWeight: 600,
                         borderRadius: '999px',
                         color: isDarkMode ? '#fed7aa' : '#9a3412',
                         bgcolor: isDarkMode ? 'rgba(249, 115, 22, 0.16)' : '#ffedd5',
@@ -9534,7 +9795,7 @@ const EnhancedDataEditor = () => {
                         disabled={requiredFilling || !(g.emptyCount > 0) || !inlineDefault.trim()}
                         sx={{
                           textTransform: 'none',
-                          fontWeight: 800,
+                          fontWeight: 600,
                           minHeight: 38,
                           px: 2,
                           bgcolor: '#0ea5e9',
@@ -9561,7 +9822,7 @@ const EnhancedDataEditor = () => {
                         disabled={requiredFilling || !(g.emptyCount > 0)}
                         sx={{
                           textTransform: 'none',
-                          fontWeight: 800,
+                          fontWeight: 600,
                           borderRadius: '999px',
                           bgcolor: '#0ea5e9',
                           '&:hover': { bgcolor: '#0284c7' },
@@ -9579,7 +9840,7 @@ const EnhancedDataEditor = () => {
                         disabled={requiredFilling || !(g.emptyCount > 0)}
                         sx={{
                           textTransform: 'none',
-                          fontWeight: 800,
+                          fontWeight: 600,
                           borderRadius: '999px',
                           bgcolor: '#0ea5e9',
                           '&:hover': { bgcolor: '#0284c7' },
@@ -9597,7 +9858,7 @@ const EnhancedDataEditor = () => {
                         disabled={requiredFilling}
                         sx={{
                           textTransform: 'none',
-                          fontWeight: 800,
+                          fontWeight: 600,
                           borderRadius: '999px',
                           color: isDarkMode ? '#fed7aa' : '#9a3412',
                           borderColor: isDarkMode ? 'rgba(251, 146, 60, 0.34)' : '#fdba74',
@@ -9615,7 +9876,7 @@ const EnhancedDataEditor = () => {
                       disabled={requiredFilling}
                       sx={{
                         textTransform: 'none',
-                        fontWeight: 800,
+                        fontWeight: 600,
                         borderRadius: '999px',
                         color: isDarkMode ? '#cbd5e1' : '#334155',
                         borderColor: isDarkMode ? 'rgba(148, 163, 184, 0.3)' : '#cbd5e1',
@@ -9660,7 +9921,7 @@ const EnhancedDataEditor = () => {
             variant="contained"
             disabled={requiredFilling}
             sx={{
-              fontWeight: 850,
+              fontWeight: 600,
               textTransform: 'none',
               borderRadius: '999px',
               px: 2.5,
@@ -9675,15 +9936,23 @@ const EnhancedDataEditor = () => {
         </DialogActions>
       </Dialog>
       {/* Generic delimiter-based row splitter */}
-      <Dialog open={splitRowsDialogOpen} onClose={() => !splitRowsRunning && setSplitRowsDialogOpen(false)} maxWidth="md" fullWidth>
+      <Dialog
+        open={splitRowsDialogOpen}
+        onClose={() => !splitRowsRunning && setSplitRowsDialogOpen(false)}
+        maxWidth="md"
+        fullWidth
+        PaperProps={{ sx: splitRowsDialogPaperSx }}
+      >
         <DialogTitle>Split into Rows</DialogTitle>
-        <DialogContent>
-          <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap', mt: 1, mb: 2 }}>
+        <DialogContent sx={{ pt: 0 }}>
+          <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'minmax(0, 1fr) 160px' }, gap: 1.25, mb: 1.75 }}>
             <FormControl size="small" sx={{ minWidth: 240, flex: 1 }}>
               <InputLabel>Column to split</InputLabel>
               <Select
                 label="Column to split"
                 value={splitRowsConfig.sourceColumn}
+                MenuProps={dialogSelectMenuProps}
+                sx={dialogSelectSx}
                 onChange={(event) => {
                   setSplitRowsConfig(prev => ({
                     ...prev,
@@ -9706,6 +9975,8 @@ const EnhancedDataEditor = () => {
               <Select
                 label="Delimiter"
                 value={splitRowsConfig.delimiter}
+                MenuProps={dialogSelectMenuProps}
+                sx={dialogSelectSx}
                 onChange={(event) => {
                   setSplitRowsConfig(prev => ({ ...prev, delimiter: event.target.value }));
                   setSplitRowsPreview(null);
@@ -9727,20 +9998,21 @@ const EnhancedDataEditor = () => {
                 size="small"
                 label="Custom delimiter"
                 value={splitRowsConfig.customDelimiter}
+                sx={dialogFieldSx}
                 onChange={(event) => {
                   setSplitRowsConfig(prev => ({ ...prev, customDelimiter: event.target.value }));
                   setSplitRowsPreview(null);
                 }}
-                sx={{ minWidth: 180 }}
               />
             )}
           </Box>
 
-          <Divider sx={{ mb: 1.5 }} />
-          <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 2, mb: 0.5 }}>
-            <Typography variant="subtitle2">Copy to new rows</Typography>
+          <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1.5, mb: 1 }}>
+            <Typography variant="subtitle2" sx={{ fontSize: '13px', fontWeight: 600, color: t.text.heading }}>
+              Copy to new rows
+            </Typography>
             <FormControlLabel
-              sx={{ mr: 0 }}
+              sx={{ mr: 0, '& .MuiFormControlLabel-label': { fontSize: '13px', fontWeight: 400, color: t.text.primary } }}
               control={
                 <Checkbox
                   size="small"
@@ -9761,17 +10033,37 @@ const EnhancedDataEditor = () => {
 
           <Box sx={{
             display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
-            columnGap: 2,
-            maxHeight: 220,
+            gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, minmax(0, 1fr))', md: 'repeat(3, minmax(0, 1fr))' },
+            columnGap: 1.5,
+            rowGap: 0.35,
+            maxHeight: 190,
             overflowY: 'auto',
-            borderTop: '1px solid #e5e7eb',
-            borderBottom: '1px solid #e5e7eb',
-            py: 0.5
+            border: `1px solid ${t.border.subtle}`,
+            bgcolor: isDarkMode ? 'rgba(18, 21, 29, 0.56)' : '#f8fafc',
+            borderRadius: '10px',
+            px: 1.25,
+            py: 0.85,
+            scrollbarColor: `${isDarkMode ? 'rgba(148, 163, 184, 0.38)' : 'rgba(86, 96, 112, 0.34)'} transparent`,
           }}>
             {splitRowsCopyCandidates.map(col => (
               <FormControlLabel
                 key={`${col.field}-${col.index}`}
+                sx={{
+                  m: 0,
+                  minWidth: 0,
+                  alignItems: 'center',
+                  '& .MuiCheckbox-root': { p: 0.55 },
+                  '& .MuiFormControlLabel-label': {
+                    minWidth: 0,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'normal',
+                    fontSize: '13px',
+                    fontWeight: 400,
+                    lineHeight: 1.3,
+                    color: t.text.primary,
+                  },
+                }}
                 control={
                   <Checkbox
                     size="small"
@@ -9792,19 +10084,29 @@ const EnhancedDataEditor = () => {
             ))}
           </Box>
 
-          {splitRowsError && <Alert severity="error" sx={{ mt: 2 }}>{splitRowsError}</Alert>}
+          {splitRowsError && <Alert severity="error" sx={compactInlineAlertSx('error', { mt: 1.5 })}>{splitRowsError}</Alert>}
 
           {splitRowsPreview && (
-            <Box sx={{ mt: 2 }}>
-              <Alert severity="success" sx={{ mb: 1 }}>
+            <Box sx={{ mt: 1.5 }}>
+              <Alert severity="success" sx={compactInlineAlertSx('success', { mb: 1 })}>
                 {splitRowsPreview.rows_added} new row{splitRowsPreview.rows_added === 1 ? '' : 's'} from {splitRowsPreview.rows_split} original row{splitRowsPreview.rows_split === 1 ? '' : 's'}.
               </Alert>
-              <TableContainer sx={{ maxHeight: 240, border: '1px solid #e5e7eb' }}>
+              <TableContainer sx={{ maxHeight: 220, border: `1px solid ${t.border.subtle}`, borderRadius: '8px', bgcolor: isDarkMode ? '#10141c' : '#ffffff' }}>
                 <Table stickyHeader size="small">
                   <TableHead>
                     <TableRow>
                       {splitRowsPreview.headers.map((header, index) => (
-                        <TableCell key={`${header}-${index}`} sx={{ whiteSpace: 'nowrap', fontWeight: 700 }}>
+                        <TableCell
+                          key={`${header}-${index}`}
+                          sx={{
+                            bgcolor: isDarkMode ? '#151b27' : '#f7f9fb',
+                            color: t.text.primary,
+                            borderBottom: `1px solid ${t.border.subtle}`,
+                            whiteSpace: 'nowrap',
+                            fontSize: '12.5px',
+                            fontWeight: 600,
+                          }}
+                        >
                           {deriveDisplayName(header, splitRowsPreview.headers)}
                         </TableCell>
                       ))}
@@ -9814,7 +10116,19 @@ const EnhancedDataEditor = () => {
                     {splitRowsPreview.rows.map((row, rowIndex) => (
                       <TableRow key={rowIndex}>
                         {splitRowsPreview.headers.map((header, columnIndex) => (
-                          <TableCell key={`${header}-${columnIndex}`} sx={{ whiteSpace: 'nowrap' }}>
+                          <TableCell
+                            key={`${header}-${columnIndex}`}
+                            sx={{
+                              color: t.text.primary,
+                              borderBottom: `1px solid ${t.border.subtle}`,
+                              whiteSpace: 'nowrap',
+                              fontSize: '12.5px',
+                              fontWeight: 400,
+                              maxWidth: 220,
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                            }}
+                          >
                             {row[columnIndex]}
                           </TableCell>
                         ))}
@@ -9826,41 +10140,51 @@ const EnhancedDataEditor = () => {
             </Box>
           )}
         </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setSplitRowsDialogOpen(false)} disabled={splitRowsRunning}>Cancel</Button>
-          <Button
-            onClick={handlePreviewSplitRows}
-            disabled={
-              splitRowsPreviewLoading ||
-              splitRowsRunning ||
-              !splitRowsConfig.sourceColumn ||
-              (splitRowsConfig.delimiter === 'custom' && !splitRowsConfig.customDelimiter)
-            }
-          >
-            {splitRowsPreviewLoading ? 'Previewing...' : 'Preview'}
-          </Button>
-          <Button
-            variant="contained"
-            startIcon={splitRowsRunning ? <CircularProgress size={16} /> : <AccountTreeIcon />}
-            onClick={handleApplySplitRows}
-            disabled={
-              splitRowsRunning ||
-              !splitRowsConfig.sourceColumn ||
-              (splitRowsConfig.delimiter === 'custom' && !splitRowsConfig.customDelimiter)
-            }
-          >
-            {splitRowsRunning ? 'Splitting...' : 'Split into Rows'}
-          </Button>
+        <DialogActions sx={{ justifyContent: 'space-between' }}>
+          <Button onClick={() => setSplitRowsDialogOpen(false)} disabled={splitRowsRunning} sx={cancelButtonSx}>Cancel</Button>
+          <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: 1, flexWrap: 'wrap' }}>
+            <Button
+              onClick={handlePreviewSplitRows}
+              disabled={
+                splitRowsPreviewLoading ||
+                splitRowsRunning ||
+                !splitRowsConfig.sourceColumn ||
+                (splitRowsConfig.delimiter === 'custom' && !splitRowsConfig.customDelimiter)
+              }
+              sx={dialogSecondaryButtonSx}
+            >
+              {splitRowsPreviewLoading ? 'Previewing...' : 'Preview'}
+            </Button>
+            <Button
+              variant="contained"
+              startIcon={splitRowsRunning ? <CircularProgress size={16} /> : <AccountTreeIcon />}
+              onClick={handleApplySplitRows}
+              disabled={
+                splitRowsRunning ||
+                !splitRowsConfig.sourceColumn ||
+                (splitRowsConfig.delimiter === 'custom' && !splitRowsConfig.customDelimiter)
+              }
+              sx={dialogPrimaryButtonSx}
+            >
+              {splitRowsRunning ? 'Splitting...' : 'Split into Rows'}
+            </Button>
+          </Box>
         </DialogActions>
       </Dialog>
       {/* Split Values Into Columns */}
-      <Dialog open={splitColsDialogOpen} onClose={() => setSplitColsDialogOpen(false)} maxWidth="md" fullWidth>
+      <Dialog
+        open={splitColsDialogOpen}
+        onClose={() => setSplitColsDialogOpen(false)}
+        maxWidth={false}
+        PaperProps={{ sx: splitColumnsDialogPaperSx }}
+      >
         <DialogTitle>Split into Columns</DialogTitle>
-        <DialogContent>
+        <DialogContent sx={{ pt: 0 }}>
             <ColumnParser
               sessionId={sessionId}
               initialColumn={splitColsConfig.sourceColumn}
               availableColumns={structuredSplitColsCandidates}
+              onCancel={() => setSplitColsDialogOpen(false)}
               onApply={(result) => {
                 setSplitColsDialogOpen(false);
                 showSnackbar(`Structured split applied. Added ${result.new_headers_count || 0} columns.`, 'success');
@@ -9868,9 +10192,6 @@ const EnhancedDataEditor = () => {
               }}
             />
         </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setSplitColsDialogOpen(false)} disabled={splitColsRunning} sx={{ mr: 'auto' }}>Cancel</Button>
-        </DialogActions>
       </Dialog>
 
       {/* MPN Split Dialog */}
@@ -9901,7 +10222,7 @@ const EnhancedDataEditor = () => {
           </Alert>
           <Grid container spacing={2}>
             <Grid item xs={12} md={6}>
-              <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 700 }}>
+              <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 600 }}>
                 MPN Prefix Rules
               </Typography>
               <FormControlLabel
@@ -9957,7 +10278,7 @@ const EnhancedDataEditor = () => {
               />
             </Grid>
             <Grid item xs={12} md={6}>
-              <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 700 }}>
+              <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 600 }}>
                 Manufacturer Rules
               </Typography>
               <TextField
@@ -9983,7 +10304,7 @@ const EnhancedDataEditor = () => {
           </Grid>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setMpnSplitDialogOpen(false)} disabled={mpnSplitting}>
+          <Button onClick={() => setMpnSplitDialogOpen(false)} disabled={mpnSplitting} sx={cancelButtonSx}>
             Cancel
           </Button>
           <Button
@@ -10000,7 +10321,7 @@ const EnhancedDataEditor = () => {
       {/* Manufacturer Match Dialog */}
       <Dialog open={ENABLE_LEGACY_EXPAND_ROWS && manufacturerMatchDialogOpen} onClose={() => setManufacturerMatchDialogOpen(false)} maxWidth="md" fullWidth>
         <DialogTitle sx={{ pb: 1 }}>
-          <Typography variant="h6" fontWeight={700}>Expand Alternates · Two matching lists</Typography>
+          <Typography variant="h6" fontWeight={600}>Expand Alternates · Two matching lists</Typography>
           <Typography variant="body2" color="text.secondary">
             Pair a manufacturer column with an MPN column by position, and expand each pair into its own row.
           </Typography>
@@ -10008,7 +10329,7 @@ const EnhancedDataEditor = () => {
         <DialogContent sx={{ pt: 2 }}>
           <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
             <Box sx={{ border: '1px solid #e5e7eb', borderRadius: 1, p: 2 }}>
-              <Typography variant="subtitle2" fontWeight={700} sx={{ mb: 0.5 }}>
+              <Typography variant="subtitle2" fontWeight={600} sx={{ mb: 0.5 }}>
                 The two lists to pair
               </Typography>
               <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1.5 }}>
@@ -10073,7 +10394,7 @@ const EnhancedDataEditor = () => {
           </Box>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setManufacturerMatchDialogOpen(false)} disabled={mpnSplitting}>
+          <Button onClick={() => setManufacturerMatchDialogOpen(false)} disabled={mpnSplitting} sx={cancelButtonSx}>
             Cancel
           </Button>
           <Button
@@ -10088,26 +10409,49 @@ const EnhancedDataEditor = () => {
       </Dialog>
 
       {/* Save Template Dialog */}
-      <Dialog open={templateSaveDialogOpen} onClose={handleCloseSaveTemplateDialog} maxWidth="sm" fullWidth>
-        <DialogTitle>Save Template</DialogTitle>
-        <DialogContent>
-          <DialogContentText>
-            Enter a name to save the current mapping, tag rules, and defaults as a reusable template.
+      <Dialog
+        open={templateSaveDialogOpen}
+        onClose={handleCloseSaveTemplateDialog}
+        maxWidth={false}
+        PaperProps={{ sx: saveTemplateDialogPaperSx }}
+      >
+        <DialogTitle sx={{ px: 2.5, pt: 2.25, pb: 0.75, fontSize: 18, fontWeight: 600, letterSpacing: 0 }}>
+          Save Template
+        </DialogTitle>
+        <DialogContent sx={{ px: 2.5, pt: 1, pb: 2 }}>
+          <DialogContentText
+            sx={{
+              mb: 1.5,
+              color: fwPageTokens.muted,
+              fontSize: '13px',
+              fontWeight: 400,
+              lineHeight: 1.45,
+              letterSpacing: 0,
+            }}
+          >
+            Name this reusable workflow template.
           </DialogContentText>
           <TextField
             fullWidth
             autoFocus
-            margin="normal"
             label="Template Name"
             value={templateName}
             error={Boolean(templateNameError)}
             helperText={templateNameError}
             onChange={(e) => { setTemplateName(e.target.value); setTemplateNameError(''); }}
+            sx={dialogFieldSx}
           />
         </DialogContent>
-        <DialogActions>
-          <Button onClick={handleCloseSaveTemplateDialog}>Cancel</Button>
-          <Button onClick={() => handleSaveTemplateSynchronized()} variant="contained" disabled={templateSaving}>
+        <DialogActions sx={{ px: 2.5, py: 2, borderTop: `1px solid ${fwPageTokens.subtleBorder}`, gap: 1 }}>
+          <Button onClick={handleCloseSaveTemplateDialog} sx={factWiseCancelButtonSx(fwPageTokens, { height: 34, minWidth: 78, fontSize: '12.5px' })}>
+            Cancel
+          </Button>
+          <Button
+            onClick={() => handleSaveTemplateSynchronized()}
+            variant="contained"
+            disabled={templateSaving}
+            sx={dialogPrimaryButtonSx}
+          >
             {templateSaving ? 'Saving…' : 'Save'}
           </Button>
         </DialogActions>
@@ -10334,7 +10678,7 @@ const EnhancedDataEditor = () => {
           </Alert>
         </DialogContent>
         <DialogActions>
-          <Button onClick={handleCloseFactwiseIdDialog}>Cancel</Button>
+          <Button onClick={handleCloseFactwiseIdDialog} sx={cancelButtonSx}>Cancel</Button>
           <Button 
             onClick={handleCreateFactwiseIdSynchronized}
             variant="contained"
@@ -10370,7 +10714,7 @@ const EnhancedDataEditor = () => {
           </DialogContentText>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setFactwiseStrategyDialogOpen(false)}>
+          <Button onClick={() => setFactwiseStrategyDialogOpen(false)} sx={cancelButtonSx}>
             Cancel
           </Button>
           <Button
@@ -10670,7 +11014,7 @@ const EnhancedDataEditor = () => {
                       sx={{ borderRadius: '10px', '& .MuiAlert-message': { width: '100%' } }}
                       action={<Button size="small" onClick={runFactwiseValidation}>Re-check</Button>}
                     >
-                      <Typography sx={{ fontWeight: 700, fontSize: 13.5, mb: 0.75 }}>
+                      <Typography sx={{ fontWeight: 600, fontSize: 13.5, mb: 0.75 }}>
                         FactWise found {fwValidation.result.error_count} problem
                         {fwValidation.result.error_count === 1 ? '' : 's'} in {fwValidation.result.row_count} rows.
                       </Typography>
@@ -10683,7 +11027,7 @@ const EnhancedDataEditor = () => {
                           <TableHead>
                             <TableRow>
                               {['Row', 'Column', 'Problem'].map(label => (
-                                <TableCell key={label} sx={{ fontWeight: 700, fontSize: 12, bgcolor: exportDialogTone.panel, borderColor: exportDialogTone.borderSoft }}>
+                                <TableCell key={label} sx={{ fontWeight: 600, fontSize: 12, bgcolor: exportDialogTone.panel, borderColor: exportDialogTone.borderSoft }}>
                                   {label}
                                 </TableCell>
                               ))}
@@ -10726,7 +11070,7 @@ const EnhancedDataEditor = () => {
                         .filter(col => col.field && col.field !== '__row_number__')
                         .slice(0, 10)
                         .map(col => (
-                          <TableCell key={col.field} sx={{ fontWeight: 650, bgcolor: exportDialogTone.header, color: exportDialogTone.heading, borderColor: exportDialogTone.border, whiteSpace: 'nowrap' }}>
+                          <TableCell key={col.field} sx={{ fontWeight: 500, bgcolor: exportDialogTone.header, color: exportDialogTone.heading, borderColor: exportDialogTone.border, whiteSpace: 'nowrap' }}>
                             {col.headerName || col.field}
                           </TableCell>
                         ))}
@@ -10779,13 +11123,7 @@ const EnhancedDataEditor = () => {
           <Button
             onClick={() => setFactwisePreviewOpen(false)}
             disabled={Boolean(factwisePreviewDownloading)}
-            sx={{
-              textTransform: 'none',
-              borderRadius: '8px',
-              color: factwisePreviewType === 'bom' ? '#60a5fa' : exportDialogTone.secondary,
-              mr: 'auto',
-              fontWeight: factwisePreviewType === 'bom' ? 700 : 500
-            }}
+            sx={{ ...cancelButtonSx, mr: 'auto' }}
           >
             Cancel
           </Button>
@@ -10802,7 +11140,7 @@ const EnhancedDataEditor = () => {
             sx={{
               textTransform: 'none',
               borderRadius: '999px',
-              fontWeight: 700,
+              fontWeight: 600,
               px: 3,
               minHeight: 38,
             }}
@@ -10838,7 +11176,7 @@ const EnhancedDataEditor = () => {
               sx={{
                 textTransform: 'none',
                 borderRadius: '999px',
-                fontWeight: 700,
+                fontWeight: 600,
                 px: 3,
                 minHeight: 38,
                 bgcolor: '#2563eb',
@@ -10889,7 +11227,7 @@ const EnhancedDataEditor = () => {
         <DialogContent sx={{ px: 3, pt: 3, pb: 2.5, bgcolor: exportDialogTone.body }}>
           {exportRun.status === 'done' ? (
             <Alert severity="success" sx={{ borderRadius: '10px', mt: 1 }}>
-              <Typography sx={{ fontWeight: 700, fontSize: 14, mb: 0.5 }}>
+              <Typography sx={{ fontWeight: 600, fontSize: 14, mb: 0.5 }}>
                 Exported to FactWise.
               </Typography>
               <Typography variant="body2">
@@ -11028,7 +11366,9 @@ const EnhancedDataEditor = () => {
           <Button
             onClick={() => setCombinedProjectPromptOpen(false)}
             disabled={exportRun.status === 'running'}
-            sx={{ textTransform: 'none', borderRadius: '8px', color: exportDialogTone.secondary, mr: 'auto' }}
+            sx={exportRun.status === 'done'
+              ? { textTransform: 'none', borderRadius: '8px', color: exportDialogTone.secondary, mr: 'auto' }
+              : { ...cancelButtonSx, mr: 'auto' }}
           >
             {exportRun.status === 'done' ? 'Close' : 'Cancel'}
           </Button>
@@ -11044,7 +11384,7 @@ const EnhancedDataEditor = () => {
               }
               startIcon={exportRun.status === 'running' ? <CircularProgress size={16} /> : <FolderOpenIcon />}
               sx={{
-                textTransform: 'none', borderRadius: '999px', fontWeight: 700, px: 3, minHeight: 38,
+                textTransform: 'none', borderRadius: '999px', fontWeight: 600, px: 3, minHeight: 38,
                 bgcolor: '#2563eb',
                 '&:hover': { bgcolor: '#2563eb' }
               }}
@@ -11091,7 +11431,7 @@ const EnhancedDataEditor = () => {
               }}>
                 <CheckCircleIcon sx={{ fontSize: 46, color: '#2563eb' }} />
               </Box>
-              <Typography sx={{ fontSize: 24, lineHeight: 1.18, fontWeight: 680, color: isDarkMode ? '#bfdbfe' : '#1d4ed8', mb: 1, letterSpacing: 0 }}>
+              <Typography sx={{ fontSize: 24, lineHeight: 1.18, fontWeight: 600, color: isDarkMode ? '#bfdbfe' : '#1d4ed8', mb: 1, letterSpacing: 0 }}>
                 Exported Successfully
               </Typography>
               <Typography sx={{ fontSize: 15, lineHeight: 1.5, fontWeight: 500, color: exportDialogTone.text, mb: 0.5, letterSpacing: 0 }}>
@@ -11108,7 +11448,7 @@ const EnhancedDataEditor = () => {
                 sx={{
                   textTransform: 'none',
                   borderRadius: '999px',
-                  fontWeight: 700,
+                  fontWeight: 600,
                   px: 4,
                   bgcolor: '#2563eb',
                   '&:hover': { bgcolor: '#2563eb' }
@@ -11202,6 +11542,7 @@ const EnhancedDataEditor = () => {
               setCorrectionPreview(null);
             }}
             disabled={correctionUploading}
+            sx={cancelButtonSx}
           >
             Cancel
           </Button>
@@ -11271,13 +11612,13 @@ const EnhancedDataEditor = () => {
               }}>
                 <CheckCircleIcon sx={{ fontSize: 48, color: '#2563eb' }} />
               </Box>
-              <Typography sx={{ fontSize: 24, lineHeight: 1.18, fontWeight: 680, color: isDarkMode ? '#bfdbfe' : '#1d4ed8', mb: 1.25, letterSpacing: 0 }}>
+              <Typography sx={{ fontSize: 24, lineHeight: 1.18, fontWeight: 600, color: isDarkMode ? '#bfdbfe' : '#1d4ed8', mb: 1.25, letterSpacing: 0 }}>
                 Exported Successfully
               </Typography>
               <Typography sx={{ fontSize: 15, lineHeight: 1.5, fontWeight: 500, color: exportDialogTone.text, mb: 1, letterSpacing: 0 }}>
                 Data has been exported to project
               </Typography>
-              <Typography sx={{ fontSize: 18, lineHeight: 1.35, fontWeight: 650, color: exportDialogTone.heading, letterSpacing: 0 }}>
+              <Typography sx={{ fontSize: 18, lineHeight: 1.35, fontWeight: 500, color: exportDialogTone.heading, letterSpacing: 0 }}>
                 {exportProjectMode === 'NEW'
                   ? exportProjectName
                   : `${selectedExistingProject?.project_code} — ${selectedExistingProject?.project_name}`}
@@ -11295,7 +11636,7 @@ const EnhancedDataEditor = () => {
                   '&:hover': { backgroundColor: '#2563eb' },
                   textTransform: 'none',
                   borderRadius: '999px',
-                  fontWeight: 700,
+                  fontWeight: 600,
                   px: 4
                 }}
               >
@@ -11429,19 +11770,8 @@ const EnhancedDataEditor = () => {
               gap: 1
             }}>
               <Button
-                variant="outlined"
-                color="error"
                 onClick={() => setExportProjectDialogOpen(false)}
-                sx={{
-                  textTransform: 'none',
-                  borderRadius: '8px',
-                  color: isDarkMode ? '#fca5a5' : '#dc2626',
-                  borderColor: isDarkMode ? 'rgba(248, 113, 113, 0.42)' : 'rgba(220, 38, 38, 0.5)',
-                  '&:hover': {
-                    borderColor: isDarkMode ? '#fca5a5' : '#dc2626',
-                    bgcolor: isDarkMode ? 'rgba(248, 113, 113, 0.08)' : 'rgba(220, 38, 38, 0.05)'
-                  }
-                }}
+                sx={cancelButtonSx}
               >
                 Cancel
               </Button>
@@ -11458,7 +11788,7 @@ const EnhancedDataEditor = () => {
                   '&:hover': { backgroundColor: '#2563eb' },
                   textTransform: 'none',
                   borderRadius: '999px',
-                  fontWeight: 700,
+                  fontWeight: 600,
                   px: 3
                 }}
               >
@@ -11478,26 +11808,18 @@ const EnhancedDataEditor = () => {
         sx={{
           position: 'fixed !important',
           top: '72px !important',
-          right: '24px !important',
+          right: '20px !important',
           left: 'auto !important',
           bottom: 'auto !important',
           transform: 'none !important',
-          maxWidth: 420,
+          maxWidth: 360,
           zIndex: 1600,
         }}
       >
         <Alert 
           onClose={closeSnackbar} 
           severity={snackbar.severity}
-          variant="filled"
-          sx={{
-            width: 'min(420px, calc(100vw - 48px))',
-            maxWidth: 420,
-            borderRadius: '14px',
-            boxShadow: isDarkMode ? '0 18px 50px rgba(0,0,0,0.55)' : '0 18px 50px rgba(15,23,42,0.2)',
-            alignItems: 'center',
-            fontWeight: 700,
-          }}
+          sx={snackbarAlertSx}
         >
           {snackbar.message}
         </Alert>
@@ -11567,10 +11889,16 @@ const EnhancedDataEditor = () => {
 
       {/* What the import actually changed — columns it could not match are
           listed rather than silently dropped. */}
-      <Dialog open={Boolean(importResult)} onClose={() => setImportResult(null)} maxWidth="xs" fullWidth>
+      <Dialog
+        open={Boolean(importResult)}
+        onClose={() => setImportResult(null)}
+        maxWidth="xs"
+        fullWidth
+        PaperProps={{ sx: factWiseDialogPaperSx(fwPageTokens, { width: 'min(420px, calc(100vw - 40px))', maxWidth: 420 }) }}
+      >
         <DialogTitle>Sheet imported</DialogTitle>
         <DialogContent dividers>
-          <Typography variant="h4" sx={{ fontWeight: 700 }}>
+          <Typography variant="h4" sx={{ fontWeight: 600 }}>
             {importResult?.imported_rows}
           </Typography>
           <Typography variant="body2" sx={{ color: 'text.secondary', mb: 2 }}>
@@ -11602,27 +11930,16 @@ const EnhancedDataEditor = () => {
         onClose={() => setMpnSummaryOpen(false)}
         maxWidth="md"
         fullWidth
-        PaperProps={{
-          sx: {
-            maxWidth: 860,
-            width: 'min(860px, calc(100vw - 48px))',
-            borderRadius: '16px',
-            overflow: 'hidden',
-            bgcolor: t.surface.paper,
-            color: t.text.primary,
-            border: `1px solid ${t.border.default}`,
-            boxShadow: '0 24px 70px rgba(15, 23, 42, 0.18)'
-          }
-        }}
+        PaperProps={{ sx: mpnSummaryDialogPaperSx }}
       >
-        <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1.25, px: 3, py: 2, borderBottom: `1px solid ${t.border.default}` }}>
-          <Box sx={{ width: 36, height: 36, borderRadius: '12px', display: 'grid', placeItems: 'center', bgcolor: mpnSummary && mpnSummary.failed === 0 ? t.state.successBg : t.state.warningBg }}>
+        <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1.2, borderBottom: `1px solid ${t.border.default}` }}>
+          <Box sx={{ width: 34, height: 34, borderRadius: '10px', display: 'grid', placeItems: 'center', bgcolor: mpnSummary && mpnSummary.failed === 0 ? t.state.successBg : t.state.warningBg }}>
             {mpnSummary && mpnSummary.failed === 0
               ? <VerifiedUserIcon sx={{ color: t.color.success, fontSize: 20 }} />
               : <ErrorIcon sx={{ color: t.color.warningText, fontSize: 20 }} />}
           </Box>
           <Box>
-            <Typography sx={{ fontSize: 18, lineHeight: 1.25, fontWeight: 650, color: t.text.heading }}>
+            <Typography sx={{ fontSize: 17, lineHeight: 1.25, fontWeight: 600, color: t.text.heading }}>
               MPN validation complete
             </Typography>
             <Typography sx={{ fontSize: 12.5, lineHeight: 1.4, fontWeight: 400, color: t.text.secondary, mt: 0.25 }}>
@@ -11630,8 +11947,8 @@ const EnhancedDataEditor = () => {
             </Typography>
           </Box>
         </DialogTitle>
-        <DialogContent sx={{ px: 3, pt: 4.75, pb: 2.5 }}>
-          <Typography sx={{ fontSize: 26, lineHeight: 1.15, fontWeight: 650, mb: 0.75, mt: 2.25, color: t.text.heading }}>
+        <DialogContent sx={{ pt: 2.4, pb: 2 }}>
+          <Typography sx={{ fontSize: 23, lineHeight: 1.15, fontWeight: 500, mb: 0.5, color: t.text.heading }}>
             {mpnSummary ? `${mpnSummary.validated} of ${mpnSummary.total}` : ''}
           </Typography>
           <Typography variant="body2" sx={{ color: t.text.secondary, mb: 2, fontSize: 13.5 }}>
@@ -11722,14 +12039,14 @@ const EnhancedDataEditor = () => {
           {mpnSummary?.breakdown && (
             <>
               <Divider sx={{ my: 2 }} />
-              <Typography variant="subtitle2" sx={{ mb: 1, fontSize: 13.5, fontWeight: 650, color: t.text.heading }}>
+              <Typography variant="subtitle2" sx={{ mb: 1, fontSize: 13, fontWeight: 500, color: t.text.heading }}>
                 By source — {mpnSummary.breakdown.total_rows} rows
               </Typography>
               <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, minmax(0, 1fr))' }, gap: 1.25 }}>
               {(mpnSummary.breakdown.sources || []).map((source) => (
-                <Box key={source.name} sx={{ p: 1.25, borderRadius: '12px', border: `1px solid ${t.border.default}`, bgcolor: t.surface.subtle, minWidth: 0 }}>
+                <Box key={source.name} sx={{ p: 1.15, borderRadius: '12px', border: `1px solid ${t.border.default}`, bgcolor: t.surface.subtle, minWidth: 0 }}>
                   <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
-                    <Typography variant="body2" sx={{ fontWeight: 700, minWidth: 84, fontSize: 13 }}>
+                    <Typography variant="body2" sx={{ fontWeight: 600, minWidth: 84, fontSize: 13 }}>
                       {source.name}
                     </Typography>
                     <Chip size="small" label={`${source.valid} valid`} sx={{ bgcolor: t.state.successBg, color: t.color.success, '& .MuiChip-label': { fontWeight: 500 } }} />
@@ -11778,8 +12095,8 @@ const EnhancedDataEditor = () => {
             </>
           )}
         </DialogContent>
-        <DialogActions sx={{ px: 3, py: 2, borderTop: `1px solid ${t.border.default}` }}>
-          <Button variant="contained" onClick={() => setMpnSummaryOpen(false)} sx={{ minWidth: 112, height: 44, borderRadius: '999px', textTransform: 'none', fontWeight: 600, px: 3 }}>
+        <DialogActions>
+          <Button variant="contained" onClick={() => setMpnSummaryOpen(false)} sx={{ minWidth: 104 }}>
             Done
           </Button>
         </DialogActions>
@@ -11807,7 +12124,7 @@ const EnhancedDataEditor = () => {
           py: 2.25,
           borderBottom: isDarkMode ? '1px solid rgba(148, 163, 184, 0.16)' : '1px solid #e2e8f0',
         }}>
-          <Typography variant="h6" sx={{ fontWeight: 850, letterSpacing: 0, color: t.text.heading }}>
+          <Typography variant="h6" sx={{ fontWeight: 600, letterSpacing: 0, color: t.text.heading }}>
             BOM import errors
           </Typography>
           <Typography variant="body2" sx={{ color: t.text.secondary, mt: 0.25 }}>
@@ -11844,7 +12161,7 @@ const EnhancedDataEditor = () => {
                 >
                   <Box sx={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 1.5, flexWrap: 'wrap' }}>
                     <Box sx={{ minWidth: 0 }}>
-                      <Typography variant="subtitle2" sx={{ fontWeight: 800, color: t.text.heading }}>
+                      <Typography variant="subtitle2" sx={{ fontWeight: 600, color: t.text.heading }}>
                         {guidance.title || group.rule.replace(/_/g, ' ')}
                       </Typography>
                       <Typography
@@ -11862,7 +12179,7 @@ const EnhancedDataEditor = () => {
                           border: isError
                             ? (isDarkMode ? '1px solid rgba(248, 113, 113, 0.22)' : '1px solid #fecaca')
                             : (isDarkMode ? '1px solid rgba(251, 146, 60, 0.22)' : '1px solid #fed7aa'),
-                          fontWeight: 700,
+                          fontWeight: 600,
                         }}
                       >
                         {group.count} {group.count === 1 ? 'row' : 'rows'}
@@ -11872,7 +12189,7 @@ const EnhancedDataEditor = () => {
                       size="small"
                       label={isError ? 'Blocks import' : 'Warning'}
                       sx={{
-                        fontWeight: 800,
+                        fontWeight: 600,
                         borderRadius: '999px',
                         color: isError ? (isDarkMode ? '#fecaca' : '#991b1b') : (isDarkMode ? '#fed7aa' : '#9a3412'),
                         bgcolor: isError
@@ -11899,7 +12216,7 @@ const EnhancedDataEditor = () => {
                       <Box sx={{ display: 'grid', gap: 0.5, mt: 0.25 }}>
                         {group.conflicts.slice(0, 6).map(conflict => (
                           <Box key={conflict.code} sx={{ display: 'grid', gap: 0.25 }}>
-                            <Typography variant="caption" sx={{ color: t.text.primary, fontWeight: 700 }}>
+                            <Typography variant="caption" sx={{ color: t.text.primary, fontWeight: 600 }}>
                               {conflict.code}
                               <Box component="span" sx={{ fontWeight: 500, opacity: 0.75 }}>
                                 {` — ${conflict.rows} rows`}
@@ -11914,7 +12231,7 @@ const EnhancedDataEditor = () => {
                                   sx={{ pl: 1.25 }}
                                 >
                                   {`differs on ${field.column}: `}
-                                  <Box component="span" sx={{ fontFamily: 'monospace' }}>
+                                  <Box component="span" sx={{ fontFamily: 'var(--fw-font-stack)' }}>
                                     {(field.values || []).map(v => (v === '' ? '(blank)' : v)).join('  /  ')}
                                   </Box>
                                 </Typography>
@@ -11947,7 +12264,7 @@ const EnhancedDataEditor = () => {
                           size="small"
                           variant="text"
                           onClick={() => highlightBomIssue(group, fillField, guidance.title || group.rule)}
-                          sx={{ textTransform: 'none', fontWeight: 700, px: 0 }}
+                          sx={{ textTransform: 'none', fontWeight: 600, px: 0 }}
                         >
                           Highlight in grid
                         </Button>
@@ -11960,7 +12277,7 @@ const EnhancedDataEditor = () => {
                               group.codes.length > 0 ? group.codes : group.values,
                               guidance.title || group.rule,
                             )}
-                            sx={{ textTransform: 'none', fontWeight: 700, px: 0 }}
+                            sx={{ textTransform: 'none', fontWeight: 600, px: 0 }}
                           >
                             Show only these rows
                           </Button>
@@ -11974,7 +12291,7 @@ const EnhancedDataEditor = () => {
                       sheet's, so they exist on screen. */}
                   {group.rows.length > 0 && (
                     <Box sx={{ display: 'flex', gap: 0.75, flexWrap: 'wrap', alignItems: 'center' }}>
-                      <Typography variant="caption" sx={{ color: t.text.secondary, fontWeight: 700 }}>
+                      <Typography variant="caption" sx={{ color: t.text.secondary, fontWeight: 600 }}>
                         Rows:
                       </Typography>
                       {group.rows.slice(0, 12).map(row => (
@@ -11984,7 +12301,7 @@ const EnhancedDataEditor = () => {
                           label={row}
                           onClick={() => jumpToGridRow(row)}
                           sx={{
-                            fontWeight: 700,
+                            fontWeight: 600,
                             cursor: 'pointer',
                             borderRadius: '8px',
                             bgcolor: isDarkMode ? 'rgba(148, 163, 184, 0.14)' : '#f1f5f9',
@@ -12009,7 +12326,7 @@ const EnhancedDataEditor = () => {
                       bgcolor: isDarkMode ? 'rgba(148, 163, 184, 0.08)' : '#f8fafc',
                       border: isDarkMode ? '1px solid rgba(148, 163, 184, 0.16)' : '1px solid #e2e8f0',
                     }}>
-                      <Typography variant="caption" sx={{ color: t.text.secondary, fontWeight: 700 }}>
+                      <Typography variant="caption" sx={{ color: t.text.secondary, fontWeight: 600 }}>
                         {`Found ${group.values.map(v => `"${v}"`).join(', ')} —`}
                       </Typography>
                       <TextField
@@ -12026,7 +12343,7 @@ const EnhancedDataEditor = () => {
                         startIcon={bomFixBusy === `replace:${group.rule}` ? <CircularProgress size={14} sx={{ color: 'white' }} /> : null}
                         onClick={() => replaceBomIssueValues(group, fillField, bomFixDefaults[group.rule])}
                         sx={{
-                          textTransform: 'none', fontWeight: 800, borderRadius: '999px',
+                          textTransform: 'none', fontWeight: 600, borderRadius: '999px',
                           bgcolor: '#0ea5e9', '&:hover': { bgcolor: '#0284c7' },
                         }}
                       >
@@ -12039,7 +12356,7 @@ const EnhancedDataEditor = () => {
                         disabled={Boolean(bomFixBusy)}
                         startIcon={bomFixBusy === `delete:${group.rule}` ? <CircularProgress size={14} /> : null}
                         onClick={() => deleteBomIssueRows(group, fillField)}
-                        sx={{ textTransform: 'none', fontWeight: 800, borderRadius: '999px' }}
+                        sx={{ textTransform: 'none', fontWeight: 600, borderRadius: '999px' }}
                       >
                         {`Delete ${group.count} row${group.count === 1 ? '' : 's'}`}
                       </Button>
@@ -12055,7 +12372,7 @@ const EnhancedDataEditor = () => {
                           onClick={() => { setBomValidationOpen(false); handleOpenFactwiseIdDialog(); }}
                           sx={{
                             textTransform: 'none',
-                            fontWeight: 800,
+                            fontWeight: 600,
                             borderRadius: '999px',
                             bgcolor: '#0ea5e9',
                             '&:hover': { bgcolor: '#0284c7' },
@@ -12072,7 +12389,7 @@ const EnhancedDataEditor = () => {
                           onClick={() => { setBomValidationOpen(false); openFillMissingDialog(fillField); }}
                           sx={{
                             textTransform: 'none',
-                            fontWeight: 800,
+                            fontWeight: 600,
                             borderRadius: '999px',
                             color: isDarkMode ? '#cbd5e1' : '#334155',
                             borderColor: isDarkMode ? 'rgba(148, 163, 184, 0.3)' : '#cbd5e1',
@@ -12114,7 +12431,7 @@ const EnhancedDataEditor = () => {
             onClick={continueBomExportAnyway}
             variant="contained"
             sx={{
-              fontWeight: 850,
+              fontWeight: 600,
               textTransform: 'none',
               borderRadius: '999px',
               px: 2.5,

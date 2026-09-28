@@ -44,6 +44,8 @@ import {
 import FactwiseBulkImportErrorGrid from './FactwiseBulkImportErrorGrid';
 import BomCodeConflictPrompt from './BomCodeConflictPrompt';
 import { readBomRevisionIntent, saveBomRevisionIntent } from '../utils/bomRevisionIntent';
+import { useThemeContext } from '../utils/ThemeContext';
+import { buildFactWisePageTokens, factWiseCancelButtonSx } from '../utils/factwisePageStyles';
 
 const STEP_ORDER = [
   { key: 'items', label: 'Import items into Factwise' },
@@ -135,6 +137,9 @@ export default function FactwiseProjectExportDialog({
   refreshHost,
   defaultProjectName = '',
 }) {
+  const { isDarkMode, tokens: themeTokens } = useThemeContext();
+  const fwTokens = buildFactWisePageTokens(isDarkMode, themeTokens);
+  const cancelButtonSx = factWiseCancelButtonSx(fwTokens);
   const orchestration = useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHost });
   // If the user made edits to the main data editor between opens, the
   // checkpoint's item_bulk_import_id / bom_bulk_import_id / project_id from
@@ -783,7 +788,7 @@ export default function FactwiseProjectExportDialog({
           justifyContent: 'space-between',
         }}
       >
-        <Typography variant="h6" component="h2" sx={{ fontWeight: 650 }}>
+        <Typography variant="h6" component="h2" sx={{ fontWeight: 500 }}>
           Export to Factwise Project
         </Typography>
         {!isRunning && (
@@ -1204,7 +1209,7 @@ export default function FactwiseProjectExportDialog({
           </>
         ) : (
           <>
-            <Button onClick={onClose} disabled={isRunning}>
+            <Button onClick={onClose} disabled={isRunning} sx={cancelButtonSx}>
               Cancel
             </Button>
             <Button

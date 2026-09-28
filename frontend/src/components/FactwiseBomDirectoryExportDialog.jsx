@@ -30,6 +30,8 @@ import { fetchEnterpriseBomDetail } from '../services/factwiseApi';
 import FactwiseBulkImportErrorGrid from './FactwiseBulkImportErrorGrid';
 import BomCodeConflictPrompt from './BomCodeConflictPrompt';
 import { readBomRevisionIntent } from '../utils/bomRevisionIntent';
+import { useThemeContext } from '../utils/ThemeContext';
+import { buildFactWisePageTokens, factWiseCancelButtonSx } from '../utils/factwisePageStyles';
 
 // Two-step export flow: items first, then BOM. Same orchestrator + error grid
 // used by the Project export dialog, minus the project creation / attach.
@@ -104,6 +106,9 @@ export default function FactwiseBomDirectoryExportDialog({
   getColumnOrder,
   refreshHost,
 }) {
+  const { isDarkMode, tokens: themeTokens } = useThemeContext();
+  const fwTokens = buildFactWisePageTokens(isDarkMode, themeTokens);
+  const cancelButtonSx = factWiseCancelButtonSx(fwTokens);
   const orchestration = useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHost });
   // Reset checkpoint every time the dialog transitions closed → open so a
   // stale bulk_import_id from a previous run can't get reused after the
@@ -393,7 +398,7 @@ export default function FactwiseBomDirectoryExportDialog({
           justifyContent: 'space-between',
         }}
       >
-        <Typography variant="h6" component="h2" sx={{ fontWeight: 650 }}>
+        <Typography variant="h6" component="h2" sx={{ fontWeight: 500 }}>
           Export to Factwise BOM Directory
         </Typography>
         {!isRunning && (
@@ -575,7 +580,7 @@ export default function FactwiseBomDirectoryExportDialog({
           </>
         ) : (
           <>
-            <Button onClick={onClose} disabled={isRunning}>
+            <Button onClick={onClose} disabled={isRunning} sx={cancelButtonSx}>
               Cancel
             </Button>
             <Button

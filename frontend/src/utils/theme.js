@@ -8,6 +8,8 @@ import { createTheme } from '@mui/material/styles';
  * @param {object} tokens  – the full token tree from ThemeContext
  * @returns {import('@mui/material').Theme}
  */
+import { factWisePrimaryButtonSx } from './factwisePageStyles';
+
 export const buildTheme = (mode, tokens) =>
   createTheme({
     palette: {
@@ -23,7 +25,7 @@ export const buildTheme = (mode, tokens) =>
     },
 
     typography: {
-      fontFamily: '"Inter", "Roboto", "Helvetica", "Arial", sans-serif',
+      fontFamily: '"Inter Variable", Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
     },
 
     shape: { borderRadius: 10 },
@@ -60,7 +62,7 @@ export const buildTheme = (mode, tokens) =>
             border: `1px solid ${tokens.border.modal}`,
             borderRadius: 18,
             backgroundColor: mode === 'dark'
-              ? 'rgba(17, 24, 39, 0.84)'
+              ? '#171b23'
               : 'rgba(255, 255, 255, 0.84)',
             backgroundImage: tokens.surface.elevatedGradient,
             backdropFilter: 'blur(22px) saturate(180%)',
@@ -73,8 +75,8 @@ export const buildTheme = (mode, tokens) =>
       MuiDialogTitle: {
         styleOverrides: {
           root: {
-            fontWeight: 800,
-            letterSpacing: '-0.01em',
+            fontWeight: 600,
+            letterSpacing: 0,
             color: tokens.text.heading,
           },
         },
@@ -157,7 +159,7 @@ export const buildTheme = (mode, tokens) =>
           root: {
             borderRadius: 999,
             textTransform: 'none',
-            fontWeight: 700,
+            fontWeight: 500,
           },
           outlined: {
             borderColor: tokens.border.default,
@@ -168,12 +170,9 @@ export const buildTheme = (mode, tokens) =>
             },
           },
           containedPrimary: {
-            background: 'linear-gradient(135deg, #2563eb 0%, #0284c7 100%)',
-            color: '#ffffff',
-            boxShadow: '0 12px 26px -14px rgba(37, 99, 235, 0.9)',
+            ...factWisePrimaryButtonSx,
             '&:hover': {
-              background: 'linear-gradient(135deg, #1d4ed8 0%, #0369a1 100%)',
-              boxShadow: '0 16px 32px -16px rgba(37, 99, 235, 0.95)',
+              ...factWisePrimaryButtonSx['&:hover'],
             },
           },
         },
@@ -192,7 +191,7 @@ export const buildTheme = (mode, tokens) =>
       /* ── Chip ────────────────────────────────────────────────────────── */
       MuiChip: {
         styleOverrides: {
-          root:     { fontWeight: 700 },
+          root:     { fontWeight: 500 },
           outlined: { borderColor: tokens.border.default, color: tokens.text.primary },
         },
       },
@@ -214,7 +213,7 @@ export const buildTheme = (mode, tokens) =>
             backgroundColor: mode === 'dark' ? '#1e293b' : '#0f172a',
             color: '#ffffff',
             fontSize: '12px',
-            fontWeight: 600,
+            fontWeight: 500,
             borderRadius: 10,
             padding: '7px 14px',
             border: mode === 'dark' ? '1px solid rgba(255, 255, 255, 0.14)' : '1px solid rgba(15, 23, 42, 0.2)',

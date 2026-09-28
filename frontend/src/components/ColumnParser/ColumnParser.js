@@ -34,6 +34,15 @@ import {
   ContentCut as ContentCutIcon,
   DeleteOutline as DeleteOutlineIcon,
 } from '@mui/icons-material';
+import { useThemeContext } from '../../utils/ThemeContext';
+import {
+  buildFactWisePageTokens,
+  factWiseAlertSx,
+  factWiseCancelButtonSx,
+  factWisePrimaryButtonSx,
+  factWiseSelectFieldSx,
+  factWiseSelectMenuProps,
+} from '../../utils/factwisePageStyles';
 
 const API_BASE = process.env.REACT_APP_API_BASE_URL || '/api';
 const STEPS = ['Split points', 'Outputs', 'Preview'];
@@ -202,7 +211,9 @@ const buildParts = (text, boundaries, trimValues, dropEmptyValues) => {
   return dropEmptyValues ? parts.filter(part => part.preview !== '') : parts;
 };
 
-const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns = null, parseReference = null, sampleUnit = 'row', describeSample = null }) => {
+const ColumnParser = ({ sessionId, onApply, onCancel, initialColumn = '', availableColumns = null, parseReference = null, sampleUnit = 'row', describeSample = null }) => {
+  const { isDarkMode, tokens: themeTokens } = useThemeContext();
+  const fwTokens = buildFactWisePageTokens(isDarkMode, themeTokens);
   const [step, setStep] = useState(0);
   const [columns, setColumns] = useState([]);
   const [selectedColumn, setSelectedColumn] = useState(initialColumn);
@@ -525,12 +536,129 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
   }, [currentSamplePairs, parts, step]);
 
   const previewChipSx = (type) => {
-    if (type === 'discard') return { fontWeight: 650, color: '#94a3b8', borderColor: '#334155' };
-    if (type === 'tag') return { fontWeight: 700, bgcolor: '#7c3aed', color: '#fff' };
-    if (type === 'spec') return { fontWeight: 700, bgcolor: '#f59e0b', color: '#111827' };
-    if (type === 'custom') return { fontWeight: 700, bgcolor: '#6366f1', color: '#fff' };
-    if (type === 'direct') return { fontWeight: 700, bgcolor: '#0f766e', color: '#fff' };
-    return { fontWeight: 700 };
+    const base = { height: 26, borderRadius: '999px', fontSize: '12px', fontWeight: 500 };
+    if (type === 'discard') return { ...base, color: fwTokens.muted, borderColor: fwTokens.border };
+    if (type === 'tag') return { ...base, bgcolor: isDarkMode ? 'rgba(0,122,255,0.18)' : '#eaf4ff', color: fwTokens.primaryText };
+    if (type === 'spec') return { ...base, bgcolor: isDarkMode ? 'rgba(245,158,11,0.16)' : '#fffbeb', color: isDarkMode ? '#fde68a' : '#92400e' };
+    if (type === 'custom') return { ...base, bgcolor: isDarkMode ? 'rgba(148,163,184,0.18)' : '#eef2f7', color: fwTokens.text };
+    if (type === 'direct') return { ...base, bgcolor: isDarkMode ? 'rgba(16,185,129,0.16)' : '#ecfdf5', color: isDarkMode ? '#bbf7d0' : '#047857' };
+    return base;
+  };
+
+  const selectSx = factWiseSelectFieldSx(fwTokens, { height: 36, radius: 8 });
+  const selectMenuProps = factWiseSelectMenuProps(fwTokens, { width: 260, maxHeight: 260 });
+  const textFieldSx = {
+    '& .MuiInputLabel-root': {
+      color: fwTokens.muted,
+      fontSize: '12.5px',
+      fontWeight: 500,
+      letterSpacing: 0,
+    },
+    '& .MuiInputBase-root': {
+      minHeight: '36px !important',
+      height: '36px !important',
+      borderRadius: '8px',
+      bgcolor: fwTokens.inputBg,
+      color: fwTokens.text,
+      fontSize: '13px',
+      fontWeight: 400,
+    },
+    '& .MuiInputBase-input': {
+      height: '36px !important',
+      boxSizing: 'border-box',
+      py: 0,
+      px: 1.35,
+      fontSize: '13px',
+      fontWeight: 400,
+      color: fwTokens.text,
+    },
+    '& .MuiOutlinedInput-notchedOutline': {
+      borderColor: fwTokens.strongBorder,
+    },
+    '& .MuiInputBase-root:hover .MuiOutlinedInput-notchedOutline': {
+      borderColor: isDarkMode ? 'rgba(255,255,255,0.28)' : fwTokens.primaryHover,
+    },
+    '& .Mui-focused .MuiOutlinedInput-notchedOutline': {
+      borderColor: `${fwTokens.primary} !important`,
+      borderWidth: '1px',
+    },
+  };
+  const primaryButtonSx = {
+    ...factWisePrimaryButtonSx,
+    minHeight: 36,
+    height: 36,
+    px: 2,
+    fontSize: '12.5px',
+    fontWeight: 500,
+    minWidth: 112,
+    whiteSpace: 'nowrap',
+    '& .MuiButton-startIcon': { mr: 0.65 },
+    '& .MuiButton-endIcon': { ml: 0.65 },
+    '& .MuiSvgIcon-root': { fontSize: 17 },
+  };
+  const secondaryButtonSx = {
+    minHeight: 34,
+    height: 34,
+    px: 1.5,
+    borderRadius: '999px',
+    textTransform: 'none',
+    fontSize: '12.5px',
+    fontWeight: 500,
+    color: fwTokens.primaryText,
+    borderColor: isDarkMode ? 'rgba(0,122,255,0.34)' : 'rgba(0,122,255,0.22)',
+    bgcolor: isDarkMode ? 'rgba(0,122,255,0.10)' : '#eff6ff',
+    '&:hover': {
+      borderColor: isDarkMode ? 'rgba(0,122,255,0.48)' : 'rgba(0,122,255,0.34)',
+      bgcolor: isDarkMode ? 'rgba(0,122,255,0.16)' : '#eaf4ff',
+    },
+    '& .MuiSvgIcon-root': { fontSize: 17 },
+  };
+  const backButtonSx = {
+    minHeight: 34,
+    height: 34,
+    px: 0.75,
+    borderRadius: '999px',
+    textTransform: 'none',
+    fontSize: '12.5px',
+    fontWeight: 500,
+    color: fwTokens.primaryText,
+    '&:hover': {
+      bgcolor: isDarkMode ? 'rgba(0,122,255,0.12)' : '#eaf4ff',
+    },
+    '& .MuiButton-startIcon': { mr: 0.45 },
+    '& .MuiSvgIcon-root': { fontSize: 17 },
+  };
+  const cancelButtonSx = factWiseCancelButtonSx(fwTokens, { height: 34, minWidth: 78, px: 1.75, fontSize: '12.5px' });
+  const inlineAlertSx = (severity = 'info', sx = {}) => factWiseAlertSx(fwTokens, severity, {
+    minHeight: 34,
+    py: 0.45,
+    px: 1.05,
+    borderRadius: '8px',
+    fontSize: '12px',
+    fontWeight: 400,
+    iconSize: 16,
+    sx: {
+      '& .MuiAlert-message': { lineHeight: 1.35 },
+      ...sx,
+    },
+  });
+  const actionRowSx = {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 1.25,
+    mt: 2,
+    pt: 1.5,
+    borderTop: `1px solid ${fwTokens.subtleBorder}`,
+  };
+  const leftActionsSx = {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 1,
+    minWidth: 0,
+  };
+  const handleCancel = () => {
+    if (!loading) onCancel?.();
   };
 
   const renderParseReference = () => {
@@ -538,8 +666,8 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
     const referenceSample = sampleUnit === 'group' ? currentSample : (parseReference?.source || '');
     if (!parseReference?.source || !referenceSample) return null;
     return (
-      <Box sx={{ p: 1.15, mb: 1.5, border: '1px solid #273244', bgcolor: '#0b1220', borderRadius: 1 }}>
-        <Typography sx={{ fontSize: 13, fontWeight: 700, color: '#f8fafc', lineHeight: 1.4, wordBreak: 'break-word' }}>
+      <Box sx={{ p: 1.15, mb: 1.5, border: `1px solid ${fwTokens.subtleBorder}`, bgcolor: fwTokens.surfaceSoft, borderRadius: '10px' }}>
+        <Typography sx={{ fontSize: '12.5px', fontWeight: 500, color: fwTokens.text, lineHeight: 1.4, wordBreak: 'break-word' }}>
           {referenceSample}
         </Typography>
         <Box sx={{ display: 'flex', gap: 0.75, flexWrap: 'wrap', mt: 0.9 }}>
@@ -655,20 +783,20 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
   };
 
   const renderPartOutputRows = () => (
-    <Box sx={{ borderTop: '1px solid #e5e7eb', mb: 2 }}>
+    <Box sx={{ borderTop: `1px solid ${fwTokens.subtleBorder}`, mb: 0.5 }}>
       {parts.map((part, index) => (
         <Box
           key={part.id}
           sx={{
             display: 'grid',
-            gridTemplateColumns: { xs: '1fr', md: 'minmax(140px, 1fr) 190px minmax(200px, 1fr) 96px' },
-            gap: 1.5,
+            gridTemplateColumns: { xs: '1fr', md: 'minmax(150px, 1fr) 168px minmax(190px, 1fr) 40px' },
+            gap: 1,
             alignItems: 'center',
-            py: 1.25,
-            borderBottom: '1px solid #e5e7eb',
+            py: 1,
+            borderBottom: `1px solid ${fwTokens.subtleBorder}`,
           }}
         >
-          <Typography variant="body2" sx={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
+          <Typography variant="body2" sx={{ overflow: 'hidden', textOverflow: 'ellipsis', fontSize: '13px', fontWeight: 400, color: fwTokens.text }}>
             {index + 1}. {part.preview || '(empty)'}
           </Typography>
           <FormControl size="small">
@@ -677,6 +805,8 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
               label="Output"
               value={part.outputType === 'discard' ? '' : part.outputType}
               displayEmpty
+              MenuProps={selectMenuProps}
+              sx={selectSx}
               renderValue={(selected) => {
                 if (!selected) return '';
                 const labels = {
@@ -701,6 +831,8 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
               <Select
                 label="Target column"
                 value={part.targetColumn}
+                MenuProps={selectMenuProps}
+                sx={selectSx}
                 onChange={event => {
                   updatePart(part.id, 'targetColumn', event.target.value);
                   setError('');
@@ -717,6 +849,7 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
               size="small"
               label="Column name"
               value={part.customName}
+              sx={textFieldSx}
               onChange={event => {
                 updatePart(part.id, 'customName', event.target.value);
                 setError('');
@@ -724,7 +857,7 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
               }}
             />
           ) : (
-            <Typography variant="caption" color="text.secondary">
+            <Typography variant="caption" sx={{ color: fwTokens.muted, fontSize: '11.5px', fontWeight: 400 }}>
               This value will not be added to the output.
             </Typography>
           )}
@@ -740,10 +873,11 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
                   width: 34,
                   height: 34,
                   border: '1px solid',
-                  borderColor: part.outputType === 'discard' ? '#e5e7eb' : '#fecaca',
-                  bgcolor: part.outputType === 'discard' ? '#f8fafc' : '#fff5f5',
+                  borderColor: part.outputType === 'discard' ? fwTokens.subtleBorder : (isDarkMode ? 'rgba(248,113,113,0.30)' : '#fecaca'),
+                  bgcolor: part.outputType === 'discard' ? fwTokens.surfaceSoft : (isDarkMode ? 'rgba(127,29,29,0.20)' : '#fff1f2'),
+                  color: part.outputType === 'discard' ? fwTokens.disabled : (isDarkMode ? '#fca5a5' : '#dc2626'),
                   '&:hover': {
-                    bgcolor: '#fee2e2',
+                    bgcolor: isDarkMode ? 'rgba(239,68,68,0.18)' : '#ffe4e6',
                   },
                 }}
               >
@@ -757,60 +891,102 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
   );
 
   return (
-    <Box sx={{ pt: 1 }}>
-      <Stepper activeStep={step} alternativeLabel sx={{ mb: 3 }}>
+    <Box sx={{ pt: 0, color: fwTokens.text }}>
+      <Stepper
+        activeStep={step}
+        alternativeLabel
+        sx={{
+          mb: 2.25,
+          px: { xs: 0, sm: 7 },
+          '& .MuiStepLabel-label': {
+            mt: 1,
+            fontSize: '12.5px',
+            fontWeight: 500,
+            color: `${fwTokens.muted} !important`,
+          },
+          '& .Mui-active .MuiStepLabel-label, & .Mui-completed .MuiStepLabel-label': {
+            color: `${fwTokens.text} !important`,
+            fontWeight: 600,
+          },
+          '& .MuiStepIcon-root': {
+            width: 22,
+            height: 22,
+            color: isDarkMode ? '#8b949e' : '#94a3b8',
+          },
+          '& .MuiStepIcon-root.Mui-active, & .MuiStepIcon-root.Mui-completed': {
+            color: fwTokens.primary,
+          },
+          '& .MuiStepConnector-line': {
+            borderColor: fwTokens.strongBorder,
+          },
+        }}
+      >
         {STEPS.map(label => (
           <Step key={label}><StepLabel>{label}</StepLabel></Step>
         ))}
       </Stepper>
 
-      {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
+      {error && <Alert severity="error" sx={inlineAlertSx('error', { mb: 1.5 })}>{error}</Alert>}
 
       {step === 0 && (
         <Box>
-          <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 1.5, flexWrap: 'wrap', mb: sampleValues.length ? 2.5 : 0 }}>
-            <FormControl size="small" sx={{ minWidth: 260, flex: 1 }}>
-              <InputLabel>Column to parse</InputLabel>
-              <Select
-                label="Column to parse"
-                value={selectedColumn}
-                onChange={event => {
-                  setSelectedColumn(event.target.value);
-                  setSampleValues([]);
-                  setBoundaries([]);
-                  setParts([]);
-                  setPreviewData(null);
-                  setError('');
-                }}
-              >
-                {columns.map(column => (
-                  <MenuItem key={`${column.value}-${column.index}`} value={column.value}>{column.label}</MenuItem>
-                ))}
-              </Select>
-            </FormControl>
-            <Button
-              variant="contained"
-              endIcon={loading ? <CircularProgress size={16} /> : <ArrowForwardIcon />}
-              onClick={analyzeColumn}
-              disabled={!selectedColumn || loading}
+          <Box sx={{ mb: sampleValues.length ? 2.25 : 0 }}>
+            <Typography sx={{ mb: 0.75, fontSize: '12.5px', fontWeight: 500, lineHeight: 1, color: fwTokens.muted }}>
+              Column to parse
+            </Typography>
+            <Box
+              sx={{
+                display: 'grid',
+                gridTemplateColumns: { xs: '1fr', sm: 'minmax(0, 1fr) 112px' },
+                alignItems: 'center',
+                gap: 1.25,
+              }}
             >
-              {loading ? 'Analyzing...' : sampleValues.length ? 'Analyze again' : 'Analyze'}
-            </Button>
+              <FormControl size="small" sx={{ minWidth: 0, width: '100%' }}>
+                <Select
+                  value={selectedColumn}
+                  MenuProps={selectMenuProps}
+                  sx={selectSx}
+                  inputProps={{ 'aria-label': 'Column to parse' }}
+                  onChange={event => {
+                    setSelectedColumn(event.target.value);
+                    setSampleValues([]);
+                    setBoundaries([]);
+                    setParts([]);
+                    setPreviewData(null);
+                    setError('');
+                  }}
+                >
+                  {columns.map(column => (
+                    <MenuItem key={`${column.value}-${column.index}`} value={column.value}>{column.label}</MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+              <Button
+                variant="contained"
+                endIcon={loading ? <CircularProgress size={16} /> : <ArrowForwardIcon />}
+                onClick={analyzeColumn}
+                disabled={!selectedColumn || loading}
+                sx={{ ...primaryButtonSx, width: '100%' }}
+              >
+                {loading ? 'Analyzing...' : sampleValues.length ? 'Analyze again' : 'Analyze'}
+              </Button>
+            </Box>
           </Box>
 
           {sampleValues.length > 0 && (
             <>
               <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 2, mb: 2 }}>
                 <Box>
-                  <Typography variant="subtitle2">Sample {currentSampleIndex + 1} of {sampleEntries.length}</Typography>
-                  <Typography variant="caption" color="text.secondary">{totalValues} populated rows</Typography>
+                  <Typography variant="subtitle2" sx={{ fontSize: '13px', fontWeight: 600, color: fwTokens.text }}>Sample {currentSampleIndex + 1} of {sampleEntries.length}</Typography>
+                  <Typography variant="caption" sx={{ fontSize: '12px', fontWeight: 400, color: fwTokens.muted }}>{totalValues} populated rows</Typography>
                 </Box>
                 {(!hasParseReference || sampleUnit === 'group') && (
                   <Box sx={{ display: 'flex', gap: 0.5 }}>
-                    <IconButton size="small" onClick={() => setCurrentSampleIndex(index => index - 1)} disabled={currentSampleIndex === 0}>
+                    <IconButton size="small" onClick={() => setCurrentSampleIndex(index => index - 1)} disabled={currentSampleIndex === 0} sx={{ color: fwTokens.muted }}>
                       <ChevronLeftIcon />
                     </IconButton>
-                    <IconButton size="small" onClick={() => setCurrentSampleIndex(index => index + 1)} disabled={currentSampleIndex >= sampleEntries.length - 1}>
+                    <IconButton size="small" onClick={() => setCurrentSampleIndex(index => index + 1)} disabled={currentSampleIndex >= sampleEntries.length - 1} sx={{ color: fwTokens.muted }}>
                       <ChevronRightIcon />
                     </IconButton>
                   </Box>
@@ -820,7 +996,7 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
 
               <Box sx={{ mb: 2.5 }}>
                 <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 1.5, flexWrap: 'wrap', mb: 1.5 }}>
-                  <Typography variant="subtitle2" sx={{ pt: 1 }}>
+                  <Typography variant="subtitle2" sx={{ pt: 0.65, fontSize: '13px', fontWeight: 600, color: fwTokens.text }}>
                     {splitMode === 'delimiter' ? 'Delimiter settings' : 'Select split points'}
                   </Typography>
                   <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: 1, flexWrap: 'wrap', ml: 'auto', maxWidth: '100%' }}>
@@ -830,6 +1006,8 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
                         <Select
                           label="Delimiter"
                           value={simpleDelimiterMode}
+                          MenuProps={selectMenuProps}
+                          sx={selectSx}
                           onChange={event => {
                             const mode = event.target.value;
                             setSimpleDelimiterMode(mode);
@@ -850,12 +1028,12 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
                         size="small"
                         label="Custom delimiter"
                         value={customSimpleDelimiter}
+                        sx={{ ...textFieldSx, width: { xs: '100%', sm: 190 }, maxWidth: '100%' }}
                         onChange={event => {
                           setCustomSimpleDelimiter(event.target.value);
                           setSimpleDelimiter(event.target.value);
                           setPreviewData(null);
                         }}
-                        sx={{ width: { xs: '100%', sm: 190 }, maxWidth: '100%' }}
                       />
                     )}
                     {splitMode === 'characters' && (
@@ -864,9 +1042,9 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
                         type="number"
                         label="Characters per column"
                         value={chunkSize}
+                        sx={{ ...textFieldSx, width: { xs: '100%', sm: 190 }, maxWidth: '100%' }}
                         onChange={event => setChunkSize(Math.max(1, Number(event.target.value) || 1))}
                         InputProps={{ inputProps: { min: 1 } }}
-                        sx={{ width: { xs: '100%', sm: 190 }, maxWidth: '100%' }}
                       />
                     )}
                     <FormControl size="small" sx={{ width: { xs: '100%', sm: 220 }, maxWidth: '100%' }}>
@@ -874,6 +1052,8 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
                       <Select
                         label="Group separator"
                         value={groupSeparatorMode}
+                        MenuProps={selectMenuProps}
+                        sx={selectSx}
                         onChange={event => {
                           const mode = event.target.value;
                           setGroupSeparatorMode(mode);
@@ -896,16 +1076,16 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
                         size="small"
                         label="Custom separator"
                         value={customGroupSeparator}
+                        sx={{ ...textFieldSx, width: { xs: '100%', sm: 190 }, maxWidth: '100%' }}
                         onChange={event => {
                           setCustomGroupSeparator(event.target.value);
                           setGroupSeparator(event.target.value);
                         }}
-                        sx={{ width: { xs: '100%', sm: 190 }, maxWidth: '100%' }}
                       />
                     )}
                   </Box>
                 </Box>
-                <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
+                <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.45 }}>
                   {firstGroup.split('').map((char, index) => {
                     const selected = splitMode === 'delimiter'
                       ? char === simpleDelimiter
@@ -931,14 +1111,18 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
                             if (splitMode === 'pattern') toggleBoundary(char, index);
                           }}
                           sx={{
-                            width: char === ' ' ? 58 : 32,
-                            height: 36,
-                            border: selected ? '2px solid #15803d' : `1px solid ${splitMode === 'pattern' && common ? '#0284c7' : '#d1d5db'}`,
-                            borderRight: fixedBoundary ? '4px solid #15803d' : undefined,
-                            bgcolor: selected ? '#dcfce7' : '#fff',
-                            color: '#111827',
-                            fontFamily: 'monospace',
+                            width: char === ' ' ? 54 : 30,
+                            height: 34,
+                            border: selected ? `2px solid ${fwTokens.primary}` : `1px solid ${splitMode === 'pattern' && common ? fwTokens.primary : fwTokens.strongBorder}`,
+                            borderRight: fixedBoundary ? `4px solid ${fwTokens.primary}` : undefined,
+                            borderRadius: '4px',
+                            bgcolor: selected ? fwTokens.primarySoft : fwTokens.inputBg,
+                            color: fwTokens.text,
+                            fontFamily: 'var(--fw-font-stack)',
+                            fontSize: '13px',
+                            fontWeight: 500,
                             cursor: splitMode === 'characters' ? 'default' : 'pointer',
+                            transition: 'border-color 150ms ease, background-color 150ms ease',
                           }}
                         >
                           {char === ' ' ? 'Space' : char}
@@ -947,7 +1131,7 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
                     );
                   })}
                 </Box>
-                <Box sx={{ display: 'flex', alignItems: 'center', columnGap: 4, rowGap: 0.5, flexWrap: 'wrap', mt: 2 }}>
+                <Box sx={{ display: 'flex', alignItems: 'center', columnGap: 3, rowGap: 0.5, flexWrap: 'wrap', mt: 1.75, '& .MuiFormControlLabel-label': { fontSize: '13px', fontWeight: 400, color: fwTokens.text } }}>
                   <FormControlLabel
                     sx={{ m: 0 }}
                     control={<Checkbox checked={trimValues} onChange={event => setTrimValues(event.target.checked)} />}
@@ -966,17 +1150,27 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
               {parts.length > 0 && (
                 <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', mb: 2 }}>
                   {parts.map((part, index) => (
-                    <Chip key={part.id} label={`${index + 1}: ${part.preview || '(empty)'}`} />
+                    <Chip key={part.id} label={`${index + 1}: ${part.preview || '(empty)'}`} sx={{ height: 26, borderRadius: '999px', fontSize: '12px', fontWeight: 500, bgcolor: fwTokens.surfaceSoft, color: fwTokens.text, border: `1px solid ${fwTokens.subtleBorder}` }} />
                   ))}
                 </Box>
               )}
 
-              <Box sx={{ display: 'flex', justifyContent: 'flex-end' }}>
-                <Button variant="contained" endIcon={<ArrowForwardIcon />} onClick={() => setStep(1)} disabled={!parts.length}>
+              <Box sx={actionRowSx}>
+                <Box sx={leftActionsSx}>
+                  <Button onClick={handleCancel} disabled={loading} sx={cancelButtonSx}>Cancel</Button>
+                </Box>
+                <Button variant="contained" endIcon={<ArrowForwardIcon />} onClick={() => setStep(1)} disabled={!parts.length} sx={primaryButtonSx}>
                   Configure outputs
                 </Button>
               </Box>
             </>
+          )}
+          {!sampleValues.length && (
+            <Box sx={actionRowSx}>
+              <Box sx={leftActionsSx}>
+                <Button onClick={handleCancel} disabled={loading} sx={cancelButtonSx}>Cancel</Button>
+              </Box>
+            </Box>
           )}
         </Box>
       )}
@@ -985,9 +1179,12 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
         <Box>
           {renderParseReference()}
           {renderPartOutputRows()}
-          <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
-            <Button startIcon={<ArrowBackIcon />} onClick={() => setStep(0)}>Back</Button>
-            <Button variant="contained" startIcon={<ContentCutIcon />} onClick={loadPreview} disabled={loading}>
+          <Box sx={actionRowSx}>
+            <Box sx={leftActionsSx}>
+              <Button startIcon={<ArrowBackIcon />} onClick={() => setStep(0)} sx={backButtonSx}>Back</Button>
+              <Button onClick={handleCancel} disabled={loading} sx={cancelButtonSx}>Cancel</Button>
+            </Box>
+            <Button variant="contained" startIcon={<ContentCutIcon />} onClick={loadPreview} disabled={loading} sx={primaryButtonSx}>
               {loading ? 'Preparing...' : 'Preview'}
             </Button>
           </Box>
@@ -998,31 +1195,62 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
         <Box>
           {renderParseReference()}
           <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', mb: 1.5 }}>
-            <Chip label={`${previewData.total_rows || 0} rows`} />
-            <Chip label={`${previewData.preview_headers?.length || 0} output columns`} />
-            {previewData.max_counts?.tags > 0 && <Chip label={`${previewData.max_counts.tags} Tags`} />}
+            <Chip label={`${previewData.total_rows || 0} rows`} sx={{ height: 26, borderRadius: '999px', fontSize: '12px', fontWeight: 500, bgcolor: fwTokens.surfaceSoft, color: fwTokens.text, border: `1px solid ${fwTokens.subtleBorder}` }} />
+            <Chip label={`${previewData.preview_headers?.length || 0} output columns`} sx={{ height: 26, borderRadius: '999px', fontSize: '12px', fontWeight: 500, bgcolor: fwTokens.surfaceSoft, color: fwTokens.text, border: `1px solid ${fwTokens.subtleBorder}` }} />
+            {previewData.max_counts?.tags > 0 && <Chip label={`${previewData.max_counts.tags} Tags`} sx={{ height: 26, borderRadius: '999px', fontSize: '12px', fontWeight: 500, bgcolor: fwTokens.primarySoft, color: fwTokens.primaryText }} />}
           </Box>
-          <TableContainer sx={{ maxHeight: 280, border: '1px solid #e5e7eb', mb: 2 }}>
+          <TableContainer sx={{ maxHeight: 260, border: `1px solid ${fwTokens.subtleBorder}`, borderRadius: '8px', mb: 0.5, bgcolor: isDarkMode ? '#10141c' : '#ffffff' }}>
             <Table size="small" stickyHeader>
               <TableHead>
                 <TableRow>
-                  {previewData.preview_headers?.map(header => <TableCell key={header}>{header}</TableCell>)}
+                  {previewData.preview_headers?.map(header => (
+                    <TableCell
+                      key={header}
+                      sx={{
+                        bgcolor: isDarkMode ? '#151b27' : '#f7f9fb',
+                        color: fwTokens.text,
+                        borderBottom: `1px solid ${fwTokens.subtleBorder}`,
+                        fontSize: '12.5px',
+                        fontWeight: 600,
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      {header}
+                    </TableCell>
+                  ))}
                 </TableRow>
               </TableHead>
               <TableBody>
                 {previewData.preview_data?.map((row, rowIndex) => (
                   <TableRow key={rowIndex}>
                     {previewData.preview_headers?.map((header, columnIndex) => (
-                      <TableCell key={`${header}-${columnIndex}`}>{row[columnIndex]}</TableCell>
+                      <TableCell
+                        key={`${header}-${columnIndex}`}
+                        sx={{
+                          color: fwTokens.text,
+                          borderBottom: `1px solid ${fwTokens.subtleBorder}`,
+                          fontSize: '12.5px',
+                          fontWeight: 400,
+                          maxWidth: 220,
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {row[columnIndex]}
+                      </TableCell>
                     ))}
                   </TableRow>
                 ))}
               </TableBody>
             </Table>
           </TableContainer>
-          <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
-            <Button startIcon={<ArrowBackIcon />} onClick={() => setStep(1)}>Back</Button>
-            <Button variant="contained" color="success" startIcon={loading ? <CircularProgress size={16} /> : <CheckIcon />} onClick={applyParser} disabled={loading}>
+          <Box sx={actionRowSx}>
+            <Box sx={leftActionsSx}>
+              <Button startIcon={<ArrowBackIcon />} onClick={() => setStep(1)} sx={backButtonSx}>Back</Button>
+              <Button onClick={handleCancel} disabled={loading} sx={cancelButtonSx}>Cancel</Button>
+            </Box>
+            <Button variant="contained" startIcon={loading ? <CircularProgress size={16} /> : <CheckIcon />} onClick={applyParser} disabled={loading} sx={primaryButtonSx}>
               {loading ? 'Applying...' : 'Apply structured split'}
             </Button>
           </Box>

@@ -1,5 +1,5 @@
 import React from 'react';
-import { Routes, Route, useLocation } from 'react-router-dom';
+import { Routes, Route } from 'react-router-dom';
 import { Box } from '@mui/material';
 import Header from './components/Header';
 import Dashboard from './pages/Dashboard';
@@ -12,6 +12,8 @@ import BomNormalizer from './pages/BomNormalizer';
 import EnhancedDataEditor from './components/EnhancedDataEditor';
 import { useFactwise } from './contexts/FactwiseContext';
 import { useSyncFactwiseCredentials } from './hooks/useSyncFactwiseCredentials';
+import { buildFactWisePageTokens } from './utils/factwisePageStyles';
+import { useThemeContext } from './utils/ThemeContext';
 
 const AppRoutes = () => (
   <Routes>
@@ -28,7 +30,8 @@ const AppRoutes = () => (
 );
 
 function App() {
-  const location = useLocation();
+  const { isDarkMode, tokens: themeTokens } = useThemeContext();
+  const fwTokens = buildFactWisePageTokens(isDarkMode, themeTokens);
   // FactwiseContext is still mounted (captures ?embedded=1 params silently for
   // future BE integration), but the UI is intentionally IDENTICAL to standalone
   // whether or not the app is inside the Factwise iframe.
@@ -36,19 +39,6 @@ function App() {
   // Silent one-shot sync: when embedded, pull decrypted distributor credentials
   // from Factwise and push them into this app's own credential store. No UI.
   useSyncFactwiseCredentials();
-  const normalizedPath = location.pathname.replace(/\/+$/, '') || '/';
-  const isBomNormalizerRoute = ['/bom-normalizer', '/bom-normaliser'].includes(
-    normalizedPath
-  );
-
-  if (isBomNormalizerRoute) {
-    return (
-      <div className="App" style={{ minHeight: '100vh' }}>
-        <AppRoutes />
-      </div>
-    );
-  }
-
   return (
     <div className="App" style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
       <Header />
@@ -57,7 +47,8 @@ function App() {
         sx={{
           flexGrow: 1,
           minWidth: 0,
-          bgcolor: 'var(--color-background)',
+          bgcolor: fwTokens.bg,
+          background: fwTokens.pageBackground,
           color: 'var(--color-foreground)'
         }}
       >
