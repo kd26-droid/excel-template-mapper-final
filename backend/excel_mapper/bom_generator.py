@@ -1093,6 +1093,15 @@ def apply_records_duplicate_policy(records, policy, per_group_target_level=None,
         row_parent = str(record.get('parent') or '').strip()
         row_path = path_of.get(index, ())
 
+        # A sheet whose hierarchy is an outline states no parent on any row, so
+        # `parent` is blank everywhere and the key below degenerates to the item
+        # alone. Two legitimate usages - one resistor 13x on the power board and
+        # 2x on the MCPCBA - then share a key, the path check sees two paths and
+        # drops the second, and the BOM understates the build with nothing said.
+        # The path already names the assembly each row sits under, so use it.
+        if not row_parent and row_path:
+            row_parent = row_path[-1]
+
         # Same item under the same parent, reached by a path already taken:
         # this is that line printed again, not another of it. Dropped before any
         # policy runs, so nothing sums it in.

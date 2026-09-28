@@ -1664,7 +1664,15 @@ def _reads_as(entries, column):
         for name, field in (entry.get('fields') or {}).items():
             if not isinstance(field, dict):
                 continue
-            if str(field.get('sourceColumn') or '') != str(column or ''):
+            # A field the saved rule produced states no source column - it came
+            # from this pattern, which is already this column. Only a field that
+            # names a DIFFERENT column is somebody else's: the description and
+            # the quantity carry their own and are not under review here.
+            # Comparing '' against the column name dropped every value a
+            # recognised pattern produced, and the agent then told people their
+            # 97 rows yielded no part number at all.
+            source = str(field.get('sourceColumn') or '')
+            if source and source != str(column or ''):
                 continue
             value = str(field.get('value') or '').strip()
             if not value:
