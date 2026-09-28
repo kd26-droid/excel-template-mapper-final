@@ -1024,6 +1024,38 @@ def apply_records_duplicate_policy(records, policy, per_group_target_level=None,
                     return _num(text)
         return None
 
+    # The chain of assemblies above each row, from the root down.
+    #
+    # Bucketing already keys on `parent`, which separates a screw under one
+    # assembly from the same screw under another. It cannot separate a
+    # sub-assembly's contents PRINTED AGAIN at a second usage, because every
+    # copy names the same parent - the sub-assembly itself. What differs is the
+    # path ABOVE that parent: one copy arrived through 853-295671-001, the next
+    # through 853-295608-001.
+    #
+    # Rows reached by the same path are genuinely separate lines of one
+    # assembly and are summed, which is what this policy is for. Rows reached by
+    # a different path are the same line printed again, so one is kept and no
+    # summing happens - otherwise a 13-part kit used 21 times comes out
+    # containing 20 of each part, a number its source states nowhere.
+    path_of = {}
+    open_at = {}
+    for index, record in enumerate(records):
+        if not isinstance(record, dict):
+            continue
+        level_text = str(record.get(F_LEVEL) or '').strip()
+        try:
+            level = int(float(level_text))
+        except (TypeError, ValueError):
+            continue
+        for depth in [d for d in open_at if d >= level]:
+            del open_at[depth]
+        path_of[index] = tuple(open_at[d] for d in sorted(open_at))
+        code = str(record.get(F_CPN) or record.get(F_ITEM_CODE)
+                   or record.get(F_MPN) or '').strip()
+        if code:
+            open_at[level] = code
+
     row_to_group = {}
     for group in groups:
         gid = group['signature_id']
@@ -1032,6 +1064,7 @@ def apply_records_duplicate_policy(records, policy, per_group_target_level=None,
             row_to_group[occ['row_index']] = (gid, target)
 
     output = []
+    first_path_for_line = {}
     per_bucket_qty = {}
     per_bucket_written = {}
     per_group_qty_total = {}
@@ -1058,6 +1091,24 @@ def apply_records_duplicate_policy(records, policy, per_group_target_level=None,
         # Sheets that state no parent leave this blank on every row, so they
         # bucket exactly as they did before.
         row_parent = str(record.get('parent') or '').strip()
+        row_path = path_of.get(index, ())
+
+        # Same item under the same parent, reached by a path already taken:
+        # this is that line printed again, not another of it. Dropped before any
+        # policy runs, so nothing sums it in.
+        #
+        # Level is deliberately NOT part of this key. A parent's children all
+        # sit one level below it, so level adds nothing - except when a
+        # sub-assembly is reached through paths of different lengths, and then
+        # it splits the copies into one bucket per depth and lets a pair
+        # through. The generated block carries a single level regardless, so
+        # those two rows land in one BOM and read as the same child twice.
+        line_key = (gid, row_parent)
+        first_path = first_path_for_line.get(line_key)
+        if first_path is None:
+            first_path_for_line[line_key] = row_path
+        elif first_path != row_path:
+            continue
 
         def write(target_record, qty=None, level=None):
             if qty is not None:
