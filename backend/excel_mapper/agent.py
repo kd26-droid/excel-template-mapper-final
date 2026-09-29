@@ -3130,19 +3130,10 @@ def _tool_import_to_factwise(state, args):
         # Falls back to attaching everything if the sub-assemblies cannot be
         # worked out - a project carrying too much is recoverable, one missing
         # the assembly it was made for is not.
-        sub_codes = set()
-        try:
-            reviewed = _tool_review_sub_boms(state, {})
-            if reviewed.get('ok'):
-                sub_codes = {str(sub.get('code') or '').strip().lower()
-                             for sub in (reviewed.get('sub_boms') or [])}
-                sub_codes.discard('')
-        except Exception:  # pragma: no cover - attaching must not fail on this
-            sub_codes = set()
-        root_codes = [code for code in bom_codes
-                      if str(code).strip().lower() not in sub_codes]
-        if not root_codes:
-            root_codes = list(bom_codes)
+        from .factwise40 import root_bom_codes, sub_assembly_codes
+
+        sub_codes = sub_assembly_codes(state.get('mapped_session_id')) or set()
+        root_codes = root_bom_codes(state.get('mapped_session_id'), bom_codes)
         wanted = {str(code).strip().lower() for code in root_codes}
         # Newest version per code: importing an existing code creates a new
         # version, and the project should carry the one just made.

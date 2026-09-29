@@ -80,6 +80,49 @@ def _container_fallback_url(url):
     return ''
 
 
+def sub_assembly_codes(session_id):
+    """Every BOM the session's generated tree holds other than its root.
+
+    Lower-cased codes, or None when the BOM cannot be generated - which callers
+    must read as "unknown", not "none".
+    """
+    from .views import _generate_bom_for_session
+
+    if not session_id:
+        return None
+    try:
+        result, bom_header, error = _generate_bom_for_session(session_id)
+    except Exception as exc:  # pragma: no cover - the BOM may not build
+        logger.warning('Sub-assemblies of %s could not be derived: %s', session_id, exc)
+        return None
+    if error is not None or result is None:
+        return None
+    root = str((bom_header or {}).get('bomCode')
+               or (bom_header or {}).get('finishedGoodCode') or '').strip()
+    codes = set()
+    for row in result.bom_rows or []:
+        code = str(row.get('BOM ID') or '').strip()
+        if code and code != root:
+            codes.add(code.lower())
+    return codes
+
+
+def root_bom_codes(session_id, bom_codes):
+    """The BOMs a project should list: those nothing else in this import contains.
+
+    A sub-assembly is already inside its parent's tree - that is what makes it
+    a sub-assembly - so putting it on the project as well lists the same thing
+    twice. The agent and the editor both attach through this, so the two cannot
+    disagree about what a project shows. Every code comes back when the
+    sub-assemblies cannot be worked out: a project carrying too much is
+    recoverable, one missing the assembly it was made for is not.
+    """
+    codes = [code for code in (bom_codes or []) if str(code).strip()]
+    subs = sub_assembly_codes(session_id) or set()
+    roots = [code for code in codes if str(code).strip().lower() not in subs]
+    return roots or codes
+
+
 def _sheet_bom_codes(raw):
     """The distinct BOM codes a combined sheet carries, in the order they appear.
 
@@ -238,8 +281,14 @@ def factwise40_validate(request):
                     payload.get('created'), payload.get('updated'))
         # Returned alongside the outcome because the caller has to find the BOM
         # that was just created, and commit does not name it.
+        bom_codes = _sheet_bom_codes(sheet[1])
         return Response({'success': True, 'result': payload,
-                         'bom_codes': _sheet_bom_codes(sheet[1])})
+                         'bom_codes': bom_codes,
+                         # What a project should carry. Needs the session the
+                         # sheet came from; without one, every code.
+                         'root_bom_codes': root_bom_codes(
+                             str(request.data.get('session_id') or '').strip(),
+                             bom_codes)})
 
     # A count alone cannot be acted on: "885 problems" is the same line whether
     # one column is wrong on every row or 885 things are. The grouping is what
