@@ -10533,6 +10533,12 @@ const BomNormalizer = () => {
   ]);
   const [workflowTemplates, setWorkflowTemplates] = useState([]);
   const [selectedWorkflowTemplateId, setSelectedWorkflowTemplateId] = useState('');
+  // The workflow template this run saved or applied. The BOM-structure answers
+  // (BOM code, name, levels, sub-assemblies) only exist once that gate is
+  // confirmed, which is a step AFTER the save button - so a template saved here
+  // has them written onto it at that moment, and one applied here seeds the
+  // gate with them.
+  const [workflowTemplateInUse, setWorkflowTemplateInUse] = useState(null);
   const [workflowTemplateLoading, setWorkflowTemplateLoading] = useState(false);
   const [workflowTemplateSaving, setWorkflowTemplateSaving] = useState(false);
   const [successMessage, setSuccessMessage] = useState('');
@@ -13449,7 +13455,8 @@ const BomNormalizer = () => {
     // it — and defaulting it to "new" without asking is how a file meant to
     // revise a BOM silently becomes a second BOM beside it.
     if (!answers) {
-      const saved = location.state?.savedBomStructure;
+      const saved = location.state?.savedBomStructure
+        || workflowTemplateInUse?.workflow?.bomStructure;
       if (saved) {
         const reconciled = reconcileSavedBomStructure(saved, {
           sheetNames: bomStructureSheetNames,
@@ -13457,6 +13464,16 @@ const BomNormalizer = () => {
           getSheetRecords: bomStructureRecordReader,
         });
         setBomStructureSeed(reconciled.answers);
+        // TEMPORARY - skip the gate when a saved template's answers all still
+        // fit this file (`complete`), replaying its new-or-revision choice too.
+        // Added for the demo, to be changed later: that choice belongs to the
+        // upload, not the template, so reusing a template saved as "new" on a
+        // file meant to revise a BOM creates a second BOM beside it. The gate
+        // still opens whenever anything saved no longer fits.
+        if (reconciled.complete && reconciled.answers) {
+          answers = { ...saved, sheets: reconciled.answers };
+          setBomStructureAnswers(answers);
+        }
       }
     }
 
@@ -13603,6 +13620,7 @@ const BomNormalizer = () => {
     buildNormalizedResultsSnapshot,
     buildNormalizerWorkflowRecipe,
     config,
+    workflowTemplateInUse,
     dataRows,
     factwiseConfig,
     fileName,
@@ -13642,7 +13660,8 @@ const BomNormalizer = () => {
     // it — and defaulting it to "new" without asking is how a file meant to
     // revise a BOM silently becomes a second BOM beside it.
     if (!answers) {
-      const saved = location.state?.savedBomStructure;
+      const saved = location.state?.savedBomStructure
+        || workflowTemplateInUse?.workflow?.bomStructure;
       if (saved) {
         const reconciled = reconcileSavedBomStructure(saved, {
           sheetNames: bomStructureSheetNames,
@@ -13650,6 +13669,16 @@ const BomNormalizer = () => {
           getSheetRecords: bomStructureRecordReader,
         });
         setBomStructureSeed(reconciled.answers);
+        // TEMPORARY - skip the gate when a saved template's answers all still
+        // fit this file (`complete`), replaying its new-or-revision choice too.
+        // Added for the demo, to be changed later: that choice belongs to the
+        // upload, not the template, so reusing a template saved as "new" on a
+        // file meant to revise a BOM creates a second BOM beside it. The gate
+        // still opens whenever anything saved no longer fits.
+        if (reconciled.complete && reconciled.answers) {
+          answers = { ...saved, sheets: reconciled.answers };
+          setBomStructureAnswers(answers);
+        }
       }
     }
 
@@ -13709,7 +13738,7 @@ const BomNormalizer = () => {
         setCombineError(err.response?.data?.error || err.message || 'Could not continue to BOM Mapping.');
       })
       .finally(() => setBusy(false));
-  }, [buildNormalizerWorkflowRecipe, location.state, mergePreview, mergePreviewFilter, mergeVisibleColumns, navigate, saveReturnSnapshot]);
+  }, [buildNormalizerWorkflowRecipe, location.state, mergePreview, mergePreviewFilter, mergeVisibleColumns, navigate, saveReturnSnapshot, workflowTemplateInUse]);
 
   // Sheets offered to the gate: whichever the user actually normalized.
   const bomStructureSheetNames = useMemo(
@@ -13755,13 +13784,27 @@ const BomNormalizer = () => {
   const handleBomStructureConfirm = useCallback((payload) => {
     setBomStructureAnswers(payload);
     setBomStructureOpen(false);
+    // Only a template saved in THIS run is updated. One that was merely applied
+    // is a recipe for other files, and silently rewriting it with this file's
+    // answers on every reuse would change it behind its owner's back.
+    if (workflowTemplateInUse?.savedThisRun && workflowTemplateInUse?.name) {
+      const workflow = { ...workflowTemplateInUse.workflow, bomStructure: payload };
+      api.saveBomWorkflowTemplate({
+        name: workflowTemplateInUse.name,
+        description: workflowTemplateInUse.description,
+        sourceSignature: workflowTemplateInUse.sourceSignature,
+        workflow,
+      })
+        .then(() => setWorkflowTemplateInUse((prev) => (prev ? { ...prev, workflow } : prev)))
+        .catch(() => setError('The BOM answers could not be saved onto the workflow template.'));
+    }
     const pending = pendingBomAction;
     setPendingBomAction(null);
     // Answers are handed over directly rather than read back from state, which
     // has not committed yet at this point.
     if (pending === 'merge') handleContinueMergePreviewToBomMapping(payload);
     else if (pending === 'normalized') handleContinueNormalizedToBomMapping(payload);
-  }, [pendingBomAction, handleContinueMergePreviewToBomMapping, handleContinueNormalizedToBomMapping]);
+  }, [pendingBomAction, handleContinueMergePreviewToBomMapping, handleContinueNormalizedToBomMapping, workflowTemplateInUse]);
 
   const handleSheetChange = useCallback(async (nextSheetName) => {
     if (!workbook) return;
@@ -14093,6 +14136,13 @@ const BomNormalizer = () => {
       setNormalizedRows([]);
       setNormalizationSummary(null);
       setError('');
+      setWorkflowTemplateInUse({
+        name: template?.name,
+        description: template?.description || '',
+        sourceSignature: template?.source_signature || {},
+        workflow,
+        savedThisRun: false,
+      });
       setSuccessMessage(`Applied workflow template "${template?.name || 'selected template'}".`);
       setCurrentStep(2);
     } catch (err) {
@@ -14126,15 +14176,20 @@ const BomNormalizer = () => {
         headerRowIndex,
       },
       outputColumns: getNormalizedExportColumns(normalizedRows),
+      bomStructure: bomStructureAnswers || null,
     };
 
     setWorkflowTemplateSaving(true);
     try {
+      const description = `Saved from ${fileName || 'BOM Normalizer'}`;
       const response = await api.saveBomWorkflowTemplate({
         name: name.trim(),
-        description: `Saved from ${fileName || 'BOM Normalizer'}`,
+        description,
         sourceSignature,
         workflow,
+      });
+      setWorkflowTemplateInUse({
+        name: name.trim(), description, sourceSignature, workflow, savedThisRun: true,
       });
       await refreshWorkflowTemplates();
       setSelectedWorkflowTemplateId(String(response.data.template?.id || ''));
@@ -14158,6 +14213,7 @@ const BomNormalizer = () => {
     sheetName,
     sheetScope,
     tagConfig,
+    bomStructureAnswers,
   ]);
 
   const buildNormalizationSummary = useCallback((rows, pairingCheck = null) => {

@@ -4415,6 +4415,9 @@ const EnhancedDataEditor = () => {
         type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       }), `sheet_${sessionId}.xlsx`);
       form.append('action', 'commit');
+      // Lets the backend work out which BOMs are sub-assemblies of others, so
+      // the project gets the top-level ones only - the same rule the agent uses.
+      form.append('session_id', sessionId);
       form.append('api_url', factwiseApiUrl);
       form.append('enterprise_id', factwiseEnterpriseId);
       form.append('token', factwiseToken);
@@ -4426,6 +4429,12 @@ const EnhancedDataEditor = () => {
       }
       const outcome = committed.data.result || {};
       const bomCodes = committed.data.bom_codes || [];
+      // The top-level BOMs only. A sub-assembly is already inside its parent,
+      // so listing it on the project too shows the same thing twice. Every code
+      // when the backend could not tell them apart.
+      const rootCodes = (committed.data.root_bom_codes || []).length
+        ? committed.data.root_bom_codes
+        : bomCodes;
 
       if (projectMode === 'none') {
         // Nothing to attach to: FactWise now holds the items and the BOM, and a
@@ -4467,7 +4476,7 @@ const EnhancedDataEditor = () => {
 
       setExportRun(prev => ({ ...prev, step: 'Adding the BOM to the project…' }));
       const boms = await factwise40('boms_list');
-      const wanted = new Set(bomCodes.map(code => String(code).trim().toLowerCase()));
+      const wanted = new Set(rootCodes.map(code => String(code).trim().toLowerCase()));
       // Newest version per code: an import of an existing code creates a new
       // version, and the project should carry the one just made.
       const byCode = new Map();
@@ -4496,7 +4505,7 @@ const EnhancedDataEditor = () => {
           skipped: outcome.skipped_existing || 0,
           project: projectLabel,
           attached,
-          missing: bomCodes.filter(
+          missing: rootCodes.filter(
             code => !attached.some(name => String(name).toLowerCase() === String(code).toLowerCase())
           ),
         },

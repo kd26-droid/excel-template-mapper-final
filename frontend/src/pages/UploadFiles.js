@@ -347,6 +347,8 @@ const readCsvWorkbook = (text, readOptions) => {
   }
 };
 
+const EXCEL_OUTLINE_LEVEL_HEADER = 'Excel Outline Level';
+
 const readSheetRows = (workbook, sheetName, options = {}) => {
   const { expandMergedCells = true } = options;
   if (!workbook || !sheetName || !workbook.Sheets || !workbook.Sheets[sheetName]) return [];
@@ -1966,10 +1968,27 @@ const UploadFiles = () => {
 
   // Level auto-detection has to read headers at the row the user actually
   // chose — THALES-style sheets put their header well below row 1.
-  const bomStructureHeaderReader = useCallback(
-    sheetName => getSheetHeaders(sheetName, clientHeaderRow, 'primary'),
-    [getSheetHeaders, clientHeaderRow]
-  );
+  // The levels Excel stores on grouped rows, one per sheet row (A1-anchored, as
+  // readSheetRows is), or null when the sheet is not grouped. The normaliser and
+  // the backend both turn these into an `Excel Outline Level` column; the gate
+  // here has to see the same column, or it judges a grouped BOM to be flat and
+  // overrides every saved answer that says otherwise.
+  const primaryOutlineLevels = useCallback((sheetName) => {
+    const rows = getSheetJoinSourceWorkbook('primary')?.Sheets?.[sheetName]?.['!rows'];
+    if (!Array.isArray(rows)) return null;
+    const levels = rows.map((info) => {
+      const raw = Number(info?.level);
+      return Number.isFinite(raw) && raw > 0 ? raw + 1 : 1;
+    });
+    return levels.some(level => level > 1) ? levels : null;
+  }, [getSheetJoinSourceWorkbook]);
+
+  const bomStructureHeaderReader = useCallback((sheetName) => {
+    const headers = getSheetHeaders(sheetName, clientHeaderRow, 'primary');
+    return primaryOutlineLevels(sheetName) && !headers.includes(EXCEL_OUTLINE_LEVEL_HEADER)
+      ? [...headers, EXCEL_OUTLINE_LEVEL_HEADER]
+      : headers;
+  }, [getSheetHeaders, clientHeaderRow, primaryOutlineLevels]);
 
   const getSheetRecords = useCallback((sheetName, headerRow = 1, sourceId = 'primary') => {
     const workbook = getSheetJoinSourceWorkbook(sourceId);
@@ -1989,10 +2008,28 @@ const UploadFiles = () => {
       });
   }, [getSheetJoinSourceWorkbook]);
 
-  const bomStructureRecordReader = useCallback(
-    sheetName => getSheetRecords(sheetName, clientHeaderRow, 'primary'),
-    [getSheetRecords, clientHeaderRow]
-  );
+  const bomStructureRecordReader = useCallback((sheetName) => {
+    const levels = primaryOutlineLevels(sheetName);
+    if (!levels) return getSheetRecords(sheetName, clientHeaderRow, 'primary');
+    const workbook = getSheetJoinSourceWorkbook('primary');
+    if (!workbook || !sheetName || !workbook.Sheets[sheetName]) return [];
+    const rows = readSheetRows(workbook, sheetName);
+    const headerIndex = Math.max(0, Number(clientHeaderRow || 1) - 1);
+    const columns = getUsableColumnDescriptors(rows, headerIndex);
+    // Same records as getSheetRecords, but each keeps its sheet row so the level
+    // Excel stored on that row travels with it.
+    return rows.slice(headerIndex + 1)
+      .map((row, offset) => [row, headerIndex + 1 + offset])
+      .filter(([row]) => row && row.some(value => String(value || '').trim()))
+      .map(([row, sheetRow]) => {
+        const record = {};
+        columns.forEach((column) => {
+          record[column.header] = row[column.index] ?? '';
+        });
+        record[EXCEL_OUTLINE_LEVEL_HEADER] = String(levels[sheetRow] || 1);
+        return record;
+      });
+  }, [getSheetRecords, clientHeaderRow, primaryOutlineLevels, getSheetJoinSourceWorkbook]);
 
   // Rows above the header row. On a THALES export this block is the only place
   // the level-0 assembly is named, so the gate reads it to prefill the finished
@@ -2589,8 +2626,10 @@ const UploadFiles = () => {
               cellText: false
             });
           } else {
-            // For Excel files, use binary reading
-            workbook = XLSX.read(data, { type: 'binary' });
+            // For Excel files, use binary reading. cellStyles keeps the row
+            // grouping (`!rows[i].level`), which is the only place a grouped
+            // BOM such as Honeywell's states its levels.
+            workbook = XLSX.read(data, { type: 'binary', cellStyles: true });
           }
           
           applyWorkbookSelection(workbook);
@@ -3738,12 +3777,22 @@ const UploadFiles = () => {
     if (!isPDF && !bomAnswers && clientSheetNames.length > 0) {
       const saved = getSavedBomStructure();
       if (saved) {
-        const { answers } = reconcileSavedBomStructure(saved, {
+        const { answers, complete } = reconcileSavedBomStructure(saved, {
           sheetNames: bomStructureSheetNames,
           getSheetHeaders: bomStructureHeaderReader,
           getSheetRecords: bomStructureRecordReader,
         });
         setBomStructureSeed(answers);
+        // TEMPORARY - skip the gate when a saved template's answers all still
+        // fit this file (`complete`), replaying its new-or-revision choice too.
+        // Added for the demo, to be changed later: that choice belongs to the
+        // upload, not the template, so reusing a template saved as "new" on a
+        // file meant to revise a BOM creates a second BOM beside it. The gate
+        // still opens whenever anything saved no longer fits.
+        if (complete && answers) {
+          bomAnswers = { ...saved, sheets: answers };
+          setBomStructureAnswers(bomAnswers);
+        }
       }
     }
 

@@ -71,7 +71,9 @@ from .default_template import (
     SFO_TEMPLATE_NAME,
 )
 from .models import MappingTemplate, TagTemplate, ColumnRule, PDFSession, PDFExtractionResult, Project
-from .editor_defaults import apply_editor_defaults_to_rows, get_editor_defaults_for_entity
+from .editor_defaults import (apply_editor_defaults_to_rows,
+                              get_editor_defaults_for_entity,
+                              _saved_item_code_rule)
 try:
     # Prefer relative import; fall back gracefully on any import error
     from .azure_storage import hybrid_file_manager
@@ -736,9 +738,7 @@ def apply_editor_defaults(request):
         else:
             applied['skipped'].append('defaults: %s' % payload.get('error'))
 
-    # 2. The item code. Only the join is handled here - the other content types
-    #    (serial, copy, conditional) each carry their own inputs, and guessing
-    #    at them would write item codes nobody asked for.
+    # 2. The item code, in whichever way the panel builds it.
     content_type = str(ui.get('itemCodeContentType') or '').strip()
     if content_type == 'concat':
         first = str(ui.get('itemCodeJoinFirstColumn') or '').strip()
@@ -769,7 +769,46 @@ def apply_editor_defaults(request):
         else:
             applied['skipped'].append('item code: join columns not set')
     elif content_type:
-        applied['skipped'].append('item code: "%s" is not applied automatically' % content_type)
+        # Copy and if/else live in ui_defaults rather than in the typed
+        # item_code_rule, and `_saved_item_code_rule` is what reads them - the
+        # same rule the editor page and the export already run. It did not exist
+        # when this branch was written, so the branch skipped those modes and
+        # said so out loud. It exists now, and skipping cost every caller
+        # without a UI its item codes: blank codes fail FactWise's required
+        # field check, rows with no code cannot be told apart, and alternates
+        # are matched BY code so they lose their target. One skipped rule put
+        # 368 errors of three different kinds on a 174-row sheet.
+        saved_rule = _saved_item_code_rule(settings_row)
+        if saved_rule is None:
+            applied['skipped'].append(
+                'item code: "%s" has no source columns set' % content_type)
+        else:
+            # The typed defaults above wrote into the session, and the item code
+            # usually reads the columns they just filled. `info` was read before
+            # that, so it no longer describes the session: reading the grid
+            # through it - and writing it back - filled 171 item codes into a
+            # snapshot nothing else would ever see. Re-read and use that copy
+            # throughout.
+            code_info = get_session_consistent(session_id) or info
+            code_headers, code_rows = read_session_grid(session_id, code_info)
+            try:
+                _code_headers, filled, changed = apply_column_value_rule(
+                    code_headers, code_rows, saved_rule,
+                    locked_item_codes=locked_identity_codes(
+                        code_info, code_headers, code_rows))
+            except ValueError as exc:
+                # A rule naming a column this sheet has not got is the user's to
+                # fix, and must not take the pinned rules below down with it.
+                applied['skipped'].append('item code: %s' % exc)
+            else:
+                if changed:
+                    write_session_grid(session_id, code_info, code_headers, filled)
+                    # write_session_grid only rewrites the dict in memory; every
+                    # other caller saves it, and without this the 171 filled
+                    # codes never left this request.
+                    save_session(session_id, code_info)
+                applied['item_code'] = {'mode': content_type,
+                                        'rows_filled': changed}
 
     # 3. The pinned column rules, in the order the panel lists them.
     for pinned in (ui.get('autoColumnRules') or []):
@@ -1241,6 +1280,11 @@ def normaliser_continue(request, session_id):
     payload = {'clientFile': upload, 'sheetName': 'Merged BOM', 'headerRow': '1'}
     if bom_structure:
         payload['bomStructure'] = json.dumps(bom_structure)
+    # A saved mapping template, applied at upload the way the upload page applies
+    # one: its column mapping, item-code rule, defaults and tag rules.
+    use_template_id = str(request.data.get('useTemplateId') or '').strip()
+    if use_template_id:
+        payload['useTemplateId'] = use_template_id
     response = upload_files(factory.post('/api/upload/', payload, format='multipart'))
 
     data = getattr(response, 'data', {}) or {}
@@ -1277,8 +1321,11 @@ def normaliser_continue(request, session_id):
     # session openable. Left undone, the editor answers "No mappings found".
     new_info = get_session_consistent(new_session_id) or {}
     template_headers = new_info.get('template_headers') or get_sfo_reference_headers()
-    mappings = _normalised_sheet_mappings(columns, rows, template_headers)
-    mapped = False
+    # A template that mapped this session at upload keeps its own mapping; the
+    # generated one would replace it with the plain default.
+    template_applied = bool(use_template_id and new_info.get('original_template_id'))
+    mappings = [] if template_applied else _normalised_sheet_mappings(columns, rows, template_headers)
+    mapped = template_applied
     if mappings:
         response = save_mappings(_internal_post({
             'session_id': new_session_id, 'mappings': mappings,
@@ -7880,7 +7927,13 @@ def data_view(request):
                     return str(row[position] or '').strip() if (
                         isinstance(row, list) and position < len(row)
                     ) else ''
-                real = {cell(r, cpn_i) for r in stored_rows} & fg_codes
+                # A sheet row is the finished good if its CPN is the code - or,
+                # once a renamed root has been renamed in place above, if its
+                # Item code is and it came from the sheet (it has a CPN). The
+                # root keeps the sheet's own number as its CPN, so checking the
+                # CPN alone missed it and kept the appended duplicate beside it.
+                real = ({cell(r, cpn_i) for r in stored_rows}
+                        | {cell(r, code_i) for r in stored_rows if cell(r, cpn_i)}) & fg_codes
                 if real:
                     kept = [
                         r for r in stored_rows
@@ -8447,11 +8500,59 @@ def _add_combined_bom_identity_columns(session_id, rows, headers):
         position_of[label] = index
     code_index = _grid_column_index(output_headers, 'Item code')
     level_index = _grid_column_index(output_headers, 'Level')
+    quantity_index = _grid_column_index(output_headers, 'Quantity')
+    cpn_index = _grid_column_index(output_headers, 'CPN Code')
+
+    # Every (BOM, child) pair the generated BOM carries as a line. A grid row
+    # whose own pair is here but which produced no line of its own is that line
+    # printed again: the sheet repeats a sub-assembly's contents at every place
+    # it is used, and the generator keeps one copy and references it from each
+    # parent. Left with its Level and Quantity, such a row reads to 4.0 as a BOM
+    # line missing its BOM code - 290 of them on the LAM sheet. Handed the code
+    # instead, it reads as the same line listed again, and 4.0 sums them: the kit
+    # came out needing 20 of each part where the source says 1.
+    #
+    # The pair, not the part alone. A part used in two assemblies is in the BOM
+    # through either of them, so matching on the part would also clear a usage
+    # the generator LOST - a resistor 13x on one board whose line went missing
+    # while its 2x on another survived - and that row's error is the only sign.
+    in_bom = set()
+    for bom_row in result.bom_rows or []:
+        bom_id = str(bom_row.get('BOM ID') or '').strip()
+        for key in ('Raw material CPN', 'Raw material code', 'Sub BOM ID'):
+            code = str(bom_row.get(key) or '').strip()
+            if bom_id and code:
+                in_bom.add((bom_id, code))
+
+    # The assembly each grid row sits under, read off its level the way the
+    # generator reads it: the nearest row above at a shallower level. Keyed on
+    # the CPN, falling back to the item code, because that is what a BOM ID is.
+    # Alternates sit beside their primary, not under it, so they open nothing.
+    parent_of = {}
+    open_rows = []
+    for position, row in enumerate(rows, start=1):
+        if not isinstance(row, list) or not 0 <= level_index < len(row):
+            continue
+        try:
+            level = int(float(str(row[level_index]).strip()))
+        except (TypeError, ValueError):
+            continue
+        while open_rows and open_rows[-1][0] >= level:
+            open_rows.pop()
+        parent_of[position] = open_rows[-1][1] if open_rows else ''
+        if position in alternate_of:
+            continue
+        code = str(row[cpn_index] or '').strip() if 0 <= cpn_index < len(row) else ''
+        if not code and 0 <= code_index < len(row):
+            code = str(row[code_index] or '').strip()
+        if code:
+            open_rows.append((level, code))
 
     width = len(output_headers)
     output_rows = []
     headers_marked = 0
     alternates_marked = 0
+    reprints_cleared = 0
     for position, row in enumerate(rows, start=1):
         if not isinstance(row, list):
             output_rows.append(row)
@@ -8492,10 +8593,25 @@ def _add_combined_bom_identity_columns(session_id, rows, headers):
                     # listed it alongside its children.
                     values[level_index] = '0'
                 headers_marked += 1
+            elif parent_of.get(position) and (
+                    (parent_of[position], item_code) in in_bom
+                    or (cpn_index >= 0 and (parent_of[position],
+                                            str(values[cpn_index] or '').strip()) in in_bom)):
+                # Kept as an item row, so the export stays row-for-row with the
+                # grid and 4.0's row numbers still point at the right editor row;
+                # it just stops claiming to be a BOM line. A row whose line is not
+                # under this parent in the BOM is left alone, so 4.0 reports it.
+                for index in (level_index, quantity_index):
+                    if index >= 0:
+                        values[index] = ''
+                reprints_cleared += 1
         output_rows.append(values)
 
     if alternates_marked:
         logger.info('Combined export: marked %d row(s) as alternates', alternates_marked)
+    if reprints_cleared:
+        logger.info('Combined export: %d repeated sub-assembly row(s) kept as item rows only',
+                    reprints_cleared)
     return output_rows, output_headers, len(identity) + headers_marked + alternates_marked
 
 
@@ -8812,6 +8928,16 @@ def _type_authored_assemblies(info, headers, rows):
     for answer in (((info or {}).get('bom_structure') or {}).get('sheets') or {}).values():
         if not isinstance(answer, dict):
             continue
+        # The root can be renamed away from the sheet's own number exactly as a
+        # sub-assembly can, and its row still carries that number. Mapped across
+        # like a sub-assembly, the row is renamed in place; left out, it stayed a
+        # plain raw material at level 1 with no BOM code - which 4.0 rejects - and
+        # the renamed root was appended as a SECOND row beside it.
+        root_header = answer.get('bomHeader') or {}
+        root_source = str(root_header.get('rootSourceCode') or '').strip()
+        root_renamed = str(root_header.get('finishedGoodCode') or '').strip()
+        if root_source and root_renamed:
+            item_code_of[root_source] = root_renamed
         for part_number, sub in (answer.get('subBoms') or {}).items():
             part_number = str(part_number).strip()
             if not part_number:

@@ -62,7 +62,9 @@ import {
 
 // Headers that mean "this column holds the BOM level". Matched whole-string so
 // that "Level of detail" or "Service level" do not produce a false positive.
-const LEVEL_HEADER_RE = /^\s*(level|lvl|niveau|indent(ure)?|depth|bom\s*level)\s*$/i;
+// `Excel Outline Level` is the column the normaliser and the backend build from
+// Excel's own row grouping when a sheet carries no level column of its own.
+const LEVEL_HEADER_RE = /^\s*(level|lvl|niveau|indent(ure)?|depth|bom\s*level|excel\s*outline\s*level)\s*$/i;
 
 // Measurement unit and base quantity are prefilled (EA, 1) rather than left
 // blank, but only in editable fields the user is looking at. That is not the
@@ -703,10 +705,15 @@ export const reconcileSavedBomStructure = (saved, { sheetNames = [], getSheetHea
     // The level column is part of the format, but a renamed column makes the
     // saved answer unusable rather than merely stale.
     if (next.hasLevels && next.levelColumn && !headers.includes(next.levelColumn)) {
+      // A template saved from the editor, after normalising, names the level
+      // column by the normaliser's own field, `level`, which the raw upload
+      // never carries. That is the same column under an alias, not a rename,
+      // so this file's own detected level column stands in without doubt.
+      const normaliserAlias = String(next.levelColumn).trim().toLowerCase() === 'level';
       next.levelColumn = detected;
-      // Even when another column looks right, the saved answer no longer
-      // describes this file — confirm rather than substitute silently.
-      complete = false;
+      // Otherwise, even when another column looks right, the saved answer no
+      // longer describes this file — confirm rather than substitute silently.
+      if (!(normaliserAlias && detected)) complete = false;
     }
 
     // The saved single/multi answer contradicting the sheet in front of us.

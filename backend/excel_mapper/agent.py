@@ -124,9 +124,18 @@ Work through these in order. Each one ends with a question. After you ask, STOP 
 1. THE HEADER ROW
    Call read_sheet. It returns the row the file suggests holds the column names, that row's labels, and a few rows beneath it.
    Show them the row number, the labels, and the example rows. Ask whether that is the right header row.
-   - They say yes -> go to checkpoint 2.
+   Show the example rows as a Markdown table: a header row of column labels, then a `| --- |` separator row, then one row per example. Never as bullets or as lines joined with `|` - without the separator row it does not render as a table. At most 6 columns: pick the ones that identify a line (part number, description, quantity, unit, level), in the sheet's order. The full list of labels is already shown above, so leave the rest out rather than cramming them in. Put a cell that is empty as `-`.
+   - They say yes -> go to checkpoint 1b.
    - They say no and name a row -> call read_sheet again with that header_row, show what it reads now, and confirm.
    - They say no without naming a row -> ask which row it is. Do not guess.
+
+1b. TEMPLATE OR STEP BY STEP
+   Call list_templates.
+   - It returns none -> say nothing about templates and go straight on to checkpoint 2.
+   - It returns some -> ask ONE question, with the templates in it: "Do you want to use one of these saved templates, or go step by step with approvals?" followed by the templates as a numbered list, in the order returned, one per line: the name only. Nothing else on the line.
+   - They choose step by step -> go to checkpoint 2.
+   - They pick a template (by number or name) -> call use_template with that template's id. It reads the columns, sets the BOM code and sub-assemblies, normalises, builds the sheet and applies the saved item-code rule and defaults, all as the template recorded them. In the same reply, say in one or two lines what it set - the BOM code, how many sub-assemblies, how many rows - then call check_with_factwise and carry on exactly as checkpoint 7 says. Checkpoints 2 to 6 are skipped: the template already answered them.
+   If use_template fails, say which step failed and why, then continue at checkpoint 2 as normal.
 
 2. THE COLUMNS
    Call infer_columns. It reports which column was read as the item code, the description, the quantity, the manufacturer and so on, and for each it also returns the other columns that could have been chosen.
@@ -264,7 +273,8 @@ Work through these in order. Each one ends with a question. After you ask, STOP 
    Then ask whether to import.
 
 9. IMPORT IT
-   Call list_projects. It returns up to three projects, newest first, each with its code, name and id, and how many exist in total.
+   If the person's messages say they just created a project for this BOM (a "Context: I just created the project ..." note with its name and project_id), that project is where it is meant to go. Do not list projects. Ask one question: import into that project, named in bold as "the project we just created", or into a different one. If they agree, call import_to_factwise with project_mode "existing" and that project_id. If they want a different one, carry on below.
+   Otherwise call list_projects. It returns up to three projects, newest first, each with its code, name and id, and how many exist in total.
    Ask where the BOM should go, phrased to match how many there actually are. Never say "your three most recent projects" unless you are showing three.
    - none at all -> say they have no projects yet, and ask for a name to create one, or a project id if they have one in mind.
    - one -> name that one and ask whether to import into it, into a different project by id, or into a new project they name.
@@ -313,6 +323,37 @@ TOOLS = [
                         'description': '1-based row number that holds the column names.',
                     },
                 },
+            },
+        },
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'list_templates',
+            'description': (
+                'The saved templates that hold a BOM structure, those made from this '
+                'same BOM first, then the most recently saved.'
+            ),
+            'parameters': {'type': 'object', 'properties': {}},
+        },
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'use_template',
+            'description': (
+                'Apply a saved template: read the columns, set the BOM code and '
+                'sub-assemblies, normalise, build the sheet and apply the saved '
+                'item-code rule and defaults - everything checkpoints 2 to 5 would '
+                'ask, answered as the template recorded it.'
+            ),
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'template_id': {'type': 'integer',
+                                    'description': 'The id list_templates returned.'},
+                },
+                'required': ['template_id'],
             },
         },
     },
@@ -1664,7 +1705,15 @@ def _reads_as(entries, column):
         for name, field in (entry.get('fields') or {}).items():
             if not isinstance(field, dict):
                 continue
-            if str(field.get('sourceColumn') or '') != str(column or ''):
+            # A field the saved rule produced states no source column - it came
+            # from this pattern, which is already this column. Only a field that
+            # names a DIFFERENT column is somebody else's: the description and
+            # the quantity carry their own and are not under review here.
+            # Comparing '' against the column name dropped every value a
+            # recognised pattern produced, and the agent then told people their
+            # 97 rows yielded no part number at all.
+            source = str(field.get('sourceColumn') or '')
+            if source and source != str(column or ''):
                 continue
             value = str(field.get('value') or '').strip()
             if not value:
@@ -2066,6 +2115,123 @@ def _tool_normalise(state, args):
     }
 
 
+def _file_values(state):
+    """Every non-blank value in the uploaded file, lower-cased."""
+    from .views import _read_raw_upload_table
+
+    table = _read_raw_upload_table(state['file_path'])
+    frames = list(table.values()) if isinstance(table, dict) else [table]
+    values = set()
+    for frame in frames:
+        for row in frame.values.tolist():
+            for cell in row:
+                text = str(cell if cell is not None else '').strip()
+                if text and text.lower() != 'nan':
+                    values.add(text.lower())
+    return values
+
+
+def _tool_list_templates(state, args):
+    """Saved templates that can answer checkpoints 2 to 5, this BOM's first.
+
+    Only a template saved with a BOM structure can be applied - one saved from a
+    plain mapping has no BOM code or sub-assemblies to set. A template was made
+    from this BOM when the codes it was saved from are in this file. Those are
+    the SOURCE codes: the root's rootSourceCode and the sub-assemblies' keys.
+    The codes typed over them (a renamed finished good, say) are what the
+    template sets, and they are never in the file, so they cannot identify it.
+    """
+    from .models import MappingTemplate
+
+    try:
+        values = _file_values(state)
+    except Exception:  # pragma: no cover - read_sheet already read it
+        values = set()
+    templates = []
+    for template in MappingTemplate.objects.order_by('-updated_at'):
+        sheets = ((template.bom_structure or {}).get('sheets') or {}).values()
+        sheet = next((sheet for sheet in sheets if (sheet or {}).get('hasBom')), None)
+        if not sheet:
+            continue
+        header = sheet.get('bomHeader') or {}
+        sources = [str(header.get('rootSourceCode') or header.get('finishedGoodCode') or '')]
+        sources += [str(code) for code in (sheet.get('subBoms') or {})]
+        sources = [code.strip().lower() for code in sources if code.strip()]
+        templates.append({
+            'id': template.id,
+            'name': template.name,
+            'made_from_this_bom': any(code in values for code in sources),
+        })
+    # Stable, so each group stays most recently saved first. The flag only
+    # orders the list; it is not handed to the model, so it is never shown.
+    templates.sort(key=lambda entry: not entry.pop('made_from_this_bom'))
+    return {'ok': True, 'templates': templates, 'count': len(templates)}
+
+
+def _tool_use_template(state, args):
+    """Answer checkpoints 2 to 5 from a saved template, then build the sheet.
+
+    The same tools a person would be walked through, in the same order, with the
+    template's answers instead of theirs: columns, the BOM structure, normalise,
+    build (with the template's mapping, item-code rule and defaults), then the
+    entity's saved defaults. The sheet is real - only the questions are skipped.
+    """
+    from .models import MappingTemplate
+    from .views import _internal_post, _normaliser_saved, normaliser_answers
+
+    try:
+        template = MappingTemplate.objects.get(id=int(args.get('template_id')))
+    except (MappingTemplate.DoesNotExist, TypeError, ValueError):
+        return {'ok': False, 'step': 'template', 'error': 'No saved template has that id.'}
+    structure = template.bom_structure or {}
+    saved = next((sheet for sheet in (structure.get('sheets') or {}).values()
+                  if (sheet or {}).get('hasBom')), None)
+    if not saved:
+        return {'ok': False, 'step': 'template', 'error': 'That template holds no BOM structure.'}
+
+    columns = _tool_infer_columns(state, {})
+    if not columns.get('ok'):
+        return {'ok': False, 'step': 'columns', 'error': columns.get('error')}
+
+    # The template was saved after normalising, so it names the level column by
+    # the normaliser's own field. This session is still the customer's sheet;
+    # set_bom_code hands the level column over by its source name, so do the same.
+    roles = _normaliser_saved(state['session_id'], 'roles') or {}
+    answer = dict(saved)
+    if answer.get('hasLevels') and roles.get('level'):
+        answer['levelColumn'] = str(roles['level'])
+    response = normaliser_answers(_internal_post({
+        'bomStructure': {'mode': structure.get('mode') or 'create',
+                         'sheets': {_sheet_name_for(state): answer}},
+    }), state['session_id'])
+    data = getattr(response, 'data', {}) or {}
+    if not data.get('success'):
+        return {'ok': False, 'step': 'bom structure',
+                'error': data.get('error') or 'The template BOM answers were not accepted.'}
+    header = answer.get('bomHeader') or {}
+    state['bom_code_set'] = bool(header.get('bomCode') or header.get('finishedGoodCode'))
+
+    normalised = _tool_normalise(state, {})
+    if not normalised.get('ok'):
+        return {'ok': False, 'step': 'normalise', 'error': normalised.get('error')}
+    built = _tool_build_sheet(state, {'template_id': template.id})
+    if not built.get('ok'):
+        return {'ok': False, 'step': 'build sheet', 'error': built.get('error')}
+    # Not fatal: the template's own defaults already came with the build, and a
+    # conversation with no FactWise entity simply has no entity defaults to add.
+    defaults = _tool_apply_defaults(state, {})
+    state['template_used'] = template.name
+    return {
+        'ok': True,
+        'template': template.name,
+        'bom_code': header.get('bomCode') or header.get('finishedGoodCode'),
+        'bom_name': header.get('bomName') or header.get('itemName'),
+        'sub_assemblies': len(answer.get('subBoms') or {}),
+        'rows': built.get('row_count'),
+        'entity_defaults_applied': bool(defaults.get('ok')),
+    }
+
+
 def _tool_build_sheet(state, args):
     """Map the normalised rows onto the template and open an editable sheet."""
     from .views import _internal_post, normaliser_continue
@@ -2077,6 +2243,8 @@ def _tool_build_sheet(state, args):
     # them - no item codes, units left as the customer wrote them - while the
     # grid, which is handed the entity on every read, looks perfectly correct.
     carry = {}
+    if args.get('template_id'):
+        carry['useTemplateId'] = str(args['template_id'])
     if state.get('entity_id'):
         carry['entityId'] = state['entity_id']
     if state.get('entity_name'):
@@ -2294,7 +2462,23 @@ def _sheet_bytes(state):
     appended - so what gets validated is the grid itself. This is the same export
     the editor's own download produces; a second writer here could drift from it.
     """
-    from .views import _internal_post, download_file
+    from rest_framework.test import APIRequestFactory
+
+    from .views import _internal_post, data_view, download_file
+
+    # The editor stamps the authored assemblies as it loads the grid - Item type
+    # Finished good on the root and every sub-assembly, a renamed root renamed
+    # in place and its appended twin dropped - and saves that onto the stored
+    # grid. The agent never opens the editor, so run the same load here, right
+    # before every export: straight after the build there is no stored grid yet
+    # and the load would repair only the page it returns, leaving a renamed root
+    # as two rows, one of them a BOM line with no BOM code.
+    try:
+        data_view(APIRequestFactory().get('/', {
+            'session_id': state['mapped_session_id'], 'page': 1, 'page_size': 1,
+        }))
+    except Exception:  # pragma: no cover - the export runs either way
+        logger.warning('Agent: editor load before export failed', exc_info=True)
 
     response = download_file(_internal_post({
         'session_id': state['mapped_session_id'],
@@ -3122,19 +3306,10 @@ def _tool_import_to_factwise(state, args):
         # Falls back to attaching everything if the sub-assemblies cannot be
         # worked out - a project carrying too much is recoverable, one missing
         # the assembly it was made for is not.
-        sub_codes = set()
-        try:
-            reviewed = _tool_review_sub_boms(state, {})
-            if reviewed.get('ok'):
-                sub_codes = {str(sub.get('code') or '').strip().lower()
-                             for sub in (reviewed.get('sub_boms') or [])}
-                sub_codes.discard('')
-        except Exception:  # pragma: no cover - attaching must not fail on this
-            sub_codes = set()
-        root_codes = [code for code in bom_codes
-                      if str(code).strip().lower() not in sub_codes]
-        if not root_codes:
-            root_codes = list(bom_codes)
+        from .factwise40 import root_bom_codes, sub_assembly_codes
+
+        sub_codes = sub_assembly_codes(state.get('mapped_session_id')) or set()
+        root_codes = root_bom_codes(state.get('mapped_session_id'), bom_codes)
         wanted = {str(code).strip().lower() for code in root_codes}
         # Newest version per code: importing an existing code creates a new
         # version, and the project should carry the one just made.
@@ -3171,6 +3346,8 @@ def _tool_import_to_factwise(state, args):
 DISPATCH = {
     'read_sheet': _tool_read_sheet,
     'infer_columns': _tool_infer_columns,
+    'list_templates': _tool_list_templates,
+    'use_template': _tool_use_template,
     'change_columns': _tool_change_columns,
     'set_bom_code': _tool_set_bom_code,
     'editor_link': _tool_editor_link,
