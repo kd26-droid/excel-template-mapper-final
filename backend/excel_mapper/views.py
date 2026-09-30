@@ -1280,6 +1280,11 @@ def normaliser_continue(request, session_id):
     payload = {'clientFile': upload, 'sheetName': 'Merged BOM', 'headerRow': '1'}
     if bom_structure:
         payload['bomStructure'] = json.dumps(bom_structure)
+    # A saved mapping template, applied at upload the way the upload page applies
+    # one: its column mapping, item-code rule, defaults and tag rules.
+    use_template_id = str(request.data.get('useTemplateId') or '').strip()
+    if use_template_id:
+        payload['useTemplateId'] = use_template_id
     response = upload_files(factory.post('/api/upload/', payload, format='multipart'))
 
     data = getattr(response, 'data', {}) or {}
@@ -1316,8 +1321,11 @@ def normaliser_continue(request, session_id):
     # session openable. Left undone, the editor answers "No mappings found".
     new_info = get_session_consistent(new_session_id) or {}
     template_headers = new_info.get('template_headers') or get_sfo_reference_headers()
-    mappings = _normalised_sheet_mappings(columns, rows, template_headers)
-    mapped = False
+    # A template that mapped this session at upload keeps its own mapping; the
+    # generated one would replace it with the plain default.
+    template_applied = bool(use_template_id and new_info.get('original_template_id'))
+    mappings = [] if template_applied else _normalised_sheet_mappings(columns, rows, template_headers)
+    mapped = template_applied
     if mappings:
         response = save_mappings(_internal_post({
             'session_id': new_session_id, 'mappings': mappings,
@@ -7919,7 +7927,13 @@ def data_view(request):
                     return str(row[position] or '').strip() if (
                         isinstance(row, list) and position < len(row)
                     ) else ''
-                real = {cell(r, cpn_i) for r in stored_rows} & fg_codes
+                # A sheet row is the finished good if its CPN is the code - or,
+                # once a renamed root has been renamed in place above, if its
+                # Item code is and it came from the sheet (it has a CPN). The
+                # root keeps the sheet's own number as its CPN, so checking the
+                # CPN alone missed it and kept the appended duplicate beside it.
+                real = ({cell(r, cpn_i) for r in stored_rows}
+                        | {cell(r, code_i) for r in stored_rows if cell(r, cpn_i)}) & fg_codes
                 if real:
                     kept = [
                         r for r in stored_rows
@@ -8914,6 +8928,16 @@ def _type_authored_assemblies(info, headers, rows):
     for answer in (((info or {}).get('bom_structure') or {}).get('sheets') or {}).values():
         if not isinstance(answer, dict):
             continue
+        # The root can be renamed away from the sheet's own number exactly as a
+        # sub-assembly can, and its row still carries that number. Mapped across
+        # like a sub-assembly, the row is renamed in place; left out, it stayed a
+        # plain raw material at level 1 with no BOM code - which 4.0 rejects - and
+        # the renamed root was appended as a SECOND row beside it.
+        root_header = answer.get('bomHeader') or {}
+        root_source = str(root_header.get('rootSourceCode') or '').strip()
+        root_renamed = str(root_header.get('finishedGoodCode') or '').strip()
+        if root_source and root_renamed:
+            item_code_of[root_source] = root_renamed
         for part_number, sub in (answer.get('subBoms') or {}).items():
             part_number = str(part_number).strip()
             if not part_number:
