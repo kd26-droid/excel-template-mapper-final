@@ -132,7 +132,7 @@ Work through these in order. Each one ends with a question. After you ask, STOP 
 1b. TEMPLATE OR STEP BY STEP
    Call list_templates.
    - It returns none -> say nothing about templates and go straight on to checkpoint 2.
-   - It returns some -> ask ONE question, with the templates in it: "Do you want to use one of these saved templates, or go step by step with approvals?" followed by the templates as a numbered list, in the order returned, one per line: the name, plus "(made from this BOM)" when made_from_this_bom is true. Nothing else on the line.
+   - It returns some -> ask ONE question, with the templates in it: "Do you want to use one of these saved templates, or go step by step with approvals?" followed by the templates as a numbered list, in the order returned, one per line: the name only. Nothing else on the line.
    - They choose step by step -> go to checkpoint 2.
    - They pick a template (by number or name) -> call use_template with that template's id. It reads the columns, sets the BOM code and sub-assemblies, normalises, builds the sheet and applies the saved item-code rule and defaults, all as the template recorded them. In the same reply, say in one or two lines what it set - the BOM code, how many sub-assemblies, how many rows - then call check_with_factwise and carry on exactly as checkpoint 7 says. Checkpoints 2 to 6 are skipped: the template already answered them.
    If use_template fails, say which step failed and why, then continue at checkpoint 2 as normal.
@@ -2162,8 +2162,9 @@ def _tool_list_templates(state, args):
             'name': template.name,
             'made_from_this_bom': any(code in values for code in sources),
         })
-    # Stable, so each group stays most recently saved first.
-    templates.sort(key=lambda entry: not entry['made_from_this_bom'])
+    # Stable, so each group stays most recently saved first. The flag only
+    # orders the list; it is not handed to the model, so it is never shown.
+    templates.sort(key=lambda entry: not entry.pop('made_from_this_bom'))
     return {'ok': True, 'templates': templates, 'count': len(templates)}
 
 
@@ -2253,20 +2254,6 @@ def _tool_build_sheet(state, args):
     if not data.get('success'):
         return {'ok': False, 'error': data.get('error') or 'The sheet could not be built.'}
     state['mapped_session_id'] = data['session_id']
-    # The editor stamps the authored assemblies as it loads the grid - Item type
-    # Finished good on the root and every sub-assembly, the root's name, a
-    # renamed root renamed in place - and saves the result. The agent never
-    # opens the editor, so its sheet shipped every assembly as a bought-in raw
-    # material. Run that same load once, exactly as opening the editor would.
-    try:
-        from rest_framework.test import APIRequestFactory
-        from .views import data_view
-
-        data_view(APIRequestFactory().get('/', {
-            'session_id': state['mapped_session_id'], 'page': 1, 'page_size': 1,
-        }))
-    except Exception:  # pragma: no cover - the sheet is built either way
-        logger.warning('Agent: editor load after build_sheet failed', exc_info=True)
     # No editor_url here on purpose: anything in a tool result is something the
     # model may repeat, and a link back into the mapper is the one place this
     # conversation exists to keep people out of.
@@ -2475,7 +2462,23 @@ def _sheet_bytes(state):
     appended - so what gets validated is the grid itself. This is the same export
     the editor's own download produces; a second writer here could drift from it.
     """
-    from .views import _internal_post, download_file
+    from rest_framework.test import APIRequestFactory
+
+    from .views import _internal_post, data_view, download_file
+
+    # The editor stamps the authored assemblies as it loads the grid - Item type
+    # Finished good on the root and every sub-assembly, a renamed root renamed
+    # in place and its appended twin dropped - and saves that onto the stored
+    # grid. The agent never opens the editor, so run the same load here, right
+    # before every export: straight after the build there is no stored grid yet
+    # and the load would repair only the page it returns, leaving a renamed root
+    # as two rows, one of them a BOM line with no BOM code.
+    try:
+        data_view(APIRequestFactory().get('/', {
+            'session_id': state['mapped_session_id'], 'page': 1, 'page_size': 1,
+        }))
+    except Exception:  # pragma: no cover - the export runs either way
+        logger.warning('Agent: editor load before export failed', exc_info=True)
 
     response = download_file(_internal_post({
         'session_id': state['mapped_session_id'],
