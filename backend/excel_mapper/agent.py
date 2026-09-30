@@ -124,6 +124,7 @@ Work through these in order. Each one ends with a question. After you ask, STOP 
 1. THE HEADER ROW
    Call read_sheet. It returns the row the file suggests holds the column names, that row's labels, and a few rows beneath it.
    Show them the row number, the labels, and the example rows. Ask whether that is the right header row.
+   Show the example rows as a Markdown table: a header row of column labels, then a `| --- |` separator row, then one row per example. Never as bullets or as lines joined with `|` - without the separator row it does not render as a table. At most 6 columns: pick the ones that identify a line (part number, description, quantity, unit, level), in the sheet's order. The full list of labels is already shown above, so leave the rest out rather than cramming them in. Put a cell that is empty as `-`.
    - They say yes -> go to checkpoint 2.
    - They say no and name a row -> call read_sheet again with that header_row, show what it reads now, and confirm.
    - They say no without naming a row -> ask which row it is. Do not guess.
@@ -264,7 +265,8 @@ Work through these in order. Each one ends with a question. After you ask, STOP 
    Then ask whether to import.
 
 9. IMPORT IT
-   Call list_projects. It returns up to three projects, newest first, each with its code, name and id, and how many exist in total.
+   If the person's messages say they just created a project for this BOM (a "Context: I just created the project ..." note with its name and project_id), that project is where it is meant to go. Do not list projects. Ask one question: import into that project, named in bold as "the project we just created", or into a different one. If they agree, call import_to_factwise with project_mode "existing" and that project_id. If they want a different one, carry on below.
+   Otherwise call list_projects. It returns up to three projects, newest first, each with its code, name and id, and how many exist in total.
    Ask where the BOM should go, phrased to match how many there actually are. Never say "your three most recent projects" unless you are showing three.
    - none at all -> say they have no projects yet, and ask for a name to create one, or a project id if they have one in mind.
    - one -> name that one and ask whether to import into it, into a different project by id, or into a new project they name.
