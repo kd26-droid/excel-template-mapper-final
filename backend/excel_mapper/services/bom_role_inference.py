@@ -13998,17 +13998,22 @@ def _apply_same_group_row_review_relations(review_rows, config):
                 entry["relation"] = "Primary"
                 continue
 
-            group_index = seen_by_group.get(group_key, 0)
+            # One BOM line, not one part number: the same part used under two
+            # parents is two lines, each with its own Primary. Counting by the
+            # part alone made every later use an alternate of the first, so a
+            # harness built from parts already used elsewhere had no lines.
+            line_key = (group_key, clean(fields.get("parent")), clean(fields.get("level")))
+            group_index = seen_by_group.get(line_key, 0)
             entry["relation"] = (
                 "Primary" if group_index == 0 else f"Alternate {group_index}"
             )
             if group_index == 0:
-                primary_by_group[group_key] = {
+                primary_by_group[line_key] = {
                     "fields": dict(fields),
                     "sourceColumns": dict(source_columns),
                 }
             else:
-                primary = primary_by_group.get(group_key) or {}
+                primary = primary_by_group.get(line_key) or {}
                 primary_fields = primary.get("fields") or {}
                 primary_sources = primary.get("sourceColumns") or {}
                 for role in inherit_fields:
@@ -14022,7 +14027,7 @@ def _apply_same_group_row_review_relations(review_rows, config):
                         primary_source = clean(primary_sources.get(role))
                         if primary_source:
                             source_columns[role] = primary_source
-            seen_by_group[group_key] = group_index + 1
+            seen_by_group[line_key] = group_index + 1
 
     return review_rows
 
@@ -15301,6 +15306,7 @@ def _normalize_same_group_rows(normalized_rows, config):
     }
     seen_by_group = {}
     primary_by_group = {}
+    line_keys_by_group = {}
     output = []
 
     for row in normalized_rows or []:
@@ -15312,16 +15318,29 @@ def _normalize_same_group_rows(normalized_rows, config):
             output.append(grouped)
             continue
 
-        group_index = seen_by_group.get(group_key, 0)
-        grouped["parentKey"] = group_key
+        # Counted per BOM line - the part under this parent at this level - not
+        # per part number across the file. See _apply_same_group_row_review_relations.
+        line_key = (group_key, clean(grouped.get("parent")), clean(grouped.get("level")))
+        group_index = seen_by_group.get(line_key, 0)
+        # parentKey is what the BOM generator groups a line's rows by, so each
+        # line needs its own: the part's first line keeps the plain value, later
+        # lines get "#2", "#3"... Sharing one key folded every use of a part
+        # back into a single line with the rest as its alternates.
+        lines = line_keys_by_group.setdefault(group_key, [])
+        if line_key not in lines:
+            lines.append(line_key)
+        line_number = lines.index(line_key) + 1
+        grouped["parentKey"] = (
+            group_key if line_number == 1 else f"{group_key} #{line_number}"
+        )
         grouped["relation"] = (
             "Primary" if group_index == 0 else f"Alternate {group_index}"
         )
         grouped["rule"] = "same_group_rows"
         if group_index == 0:
-            primary_by_group[group_key] = dict(grouped)
+            primary_by_group[line_key] = dict(grouped)
         else:
-            primary = primary_by_group.get(group_key) or {}
+            primary = primary_by_group.get(line_key) or {}
             for role, output_field in output_field_by_role.items():
                 primary_value = primary.get(output_field)
                 has_explicit_manufacturer = (
@@ -15334,7 +15353,7 @@ def _normalize_same_group_rows(normalized_rows, config):
                     and not is_blankish(primary_value)
                 ):
                     grouped[output_field] = primary_value
-        seen_by_group[group_key] = group_index + 1
+        seen_by_group[line_key] = group_index + 1
         output.append(grouped)
 
     return output
