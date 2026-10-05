@@ -66,6 +66,9 @@ import ChevronLeftIcon from '@mui/icons-material/ChevronLeft';
 import ChevronRightIcon from '@mui/icons-material/ChevronRight';
 import ExpandLessIcon from '@mui/icons-material/ExpandLess';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
+import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircleOutline';
+import GridViewOutlinedIcon from '@mui/icons-material/GridViewOutlined';
+import WarningAmberOutlinedIcon from '@mui/icons-material/WarningAmberOutlined';
 import api from '../services/api';
 import BomStructureDialog, { reconcileSavedBomStructure } from '../components/BomStructureDialog';
 import ColumnParser from '../components/ColumnParser/ColumnParser';
@@ -9740,6 +9743,44 @@ const BomNormalizer = () => {
     },
   });
   const cancelButtonSx = factWiseCancelButtonSx(normalizerTheme.pageTokens);
+  const fieldPatternPrimaryButtonSx = {
+    ...factWisePrimaryButtonSx,
+    borderColor: isDarkMode ? '#3994ff' : '#007aff',
+    background: isDarkMode
+      ? 'linear-gradient(180deg, #238cff 0%, #0875e1 100%)'
+      : 'linear-gradient(180deg, #1487ff 0%, #006fe6 100%)',
+    boxShadow: isDarkMode
+      ? '0 12px 24px -14px rgba(57, 148, 255, 0.68), inset 0 1px 0 rgba(255,255,255,0.24)'
+      : '0 12px 24px -14px rgba(0, 98, 214, 0.5), inset 0 1px 0 rgba(255,255,255,0.3)',
+    '&:hover': {
+      ...factWisePrimaryButtonSx['&:hover'],
+      background: isDarkMode
+        ? 'linear-gradient(180deg, #3598ff 0%, #0c7be9 100%)'
+        : 'linear-gradient(180deg, #278fff 0%, #0066d5 100%)',
+      boxShadow: isDarkMode
+        ? '0 14px 26px -14px rgba(57, 148, 255, 0.78), inset 0 1px 0 rgba(255,255,255,0.24)'
+        : '0 14px 26px -14px rgba(0, 98, 214, 0.58), inset 0 1px 0 rgba(255,255,255,0.3)',
+    },
+    '&.Mui-disabled': {
+      borderColor: isDarkMode ? 'rgba(148, 163, 184, 0.2)' : '#d2d9e3',
+      background: isDarkMode ? 'rgba(51, 58, 69, 0.72)' : '#e9edf3',
+      color: isDarkMode ? 'rgba(226, 232, 240, 0.5)' : '#8994a3',
+      boxShadow: 'none',
+    },
+  };
+  const fieldPatternSecondaryButtonSx = {
+    height: 36,
+    minHeight: 36,
+    px: 2,
+    borderRadius: '999px',
+    borderColor: isDarkMode ? 'rgba(148, 163, 184, 0.34)' : '#cbd5e1',
+    bgcolor: isDarkMode ? 'rgba(255, 255, 255, 0.035)' : '#ffffff',
+    color: normalizerTheme.text,
+    '&:hover': {
+      borderColor: normalizerTheme.pageTokens.primary,
+      bgcolor: isDarkMode ? 'rgba(57, 148, 255, 0.1)' : '#eef6ff',
+    },
+  };
   const normalizerFieldSx = factWiseFieldSx(normalizerTheme.pageTokens, { height: 36 });
   const normalizerSelectSx = factWiseSelectFieldSx(normalizerTheme.pageTokens, { height: 36 });
   const normalizerInputLabelSx = factWiseInputLabelSx(normalizerTheme.pageTokens);
@@ -19391,6 +19432,8 @@ const BomNormalizer = () => {
             flex: 1,
             minHeight: 0,
             overflow: 'auto',
+            scrollbarWidth: 'none',
+            '&::-webkit-scrollbar': { display: 'none' },
             p: 2,
             pb: 1.25,
             bgcolor: isDarkMode ? normalizerTheme.page : '#f4f7ff',
@@ -19408,42 +19451,141 @@ const BomNormalizer = () => {
                   boxShadow: isDarkMode ? 'none' : '0 14px 34px -30px rgba(15,23,42,0.32)',
                 }}
               >
-                <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" alignItems={{ xs: 'stretch', md: 'flex-end' }} gap={1.25}>
-                  <Box sx={{ flex: 1 }}>
-                    <Typography sx={{ fontSize: 13.5, fontWeight: 550, color: normalizerTheme.text }}>Detection summary</Typography>
+                <Box>
+                  <Typography sx={{ fontSize: 13.5, fontWeight: 600, color: normalizerTheme.text }}>Detection summary</Typography>
+                  <Typography sx={{ mt: 0.25, fontSize: 11.5, color: normalizerTheme.muted }}>
+                    A clear overview of the patterns found before you review and apply changes.
+                  </Typography>
+                </Box>
+                <Box
+                  sx={{
+                    mt: 1.1,
+                    display: 'grid',
+                    gridTemplateColumns: {
+                      xs: 'repeat(2, minmax(0, 1fr))',
+                      md: 'repeat(4, minmax(145px, 1fr))',
+                      lg: 'repeat(4, minmax(155px, 1fr)) minmax(245px, 1.25fr)',
+                    },
+                    gap: 1,
+                    alignItems: 'stretch',
+                  }}
+                >
+                  {[
+                    {
+                      label: 'Items detected',
+                      value: fieldPatternReviewSummary.itemCount,
+                      helper: 'Rows found in the source',
+                      accent: isDarkMode ? '#67c5dc' : '#0891b2',
+                      Icon: InsertDriveFileOutlinedIcon,
+                    },
+                    {
+                      label: 'Patterns detected',
+                      value: fieldPatternReviewSummary.patternCount,
+                      helper: 'Unique structures identified',
+                      accent: isDarkMode ? '#66b3ff' : '#2563eb',
+                      Icon: GridViewOutlinedIcon,
+                    },
+                    {
+                      label: 'Recognized',
+                      value: fieldPatternReviewSummary.recognizedPatternCount,
+                      helper: 'Ready for confirmation',
+                      accent: isDarkMode ? '#62dfa6' : '#079455',
+                      Icon: CheckCircleOutlineIcon,
+                    },
+                    {
+                      label: 'Need review',
+                      value: fieldPatternReviewSummary.unrecognizedPatternCount,
+                      helper: 'Requires your attention',
+                      accent: isDarkMode ? '#f8bd52' : '#d97706',
+                      Icon: WarningAmberOutlinedIcon,
+                    },
+                  ].map(({ label, value, helper, accent, Icon }) => (
                     <Box
+                      key={label}
                       sx={{
-                        mt: 1,
-                        display: 'grid',
-                        gridTemplateColumns: { xs: 'repeat(2, minmax(0, 1fr))', md: 'repeat(4, minmax(0, 1fr))' },
-                        border: `1px solid ${isDarkMode ? normalizerTheme.border : '#d9e2ef'}`,
-                        borderRadius: '8px',
+                        position: 'relative',
+                        minHeight: 108,
                         overflow: 'hidden',
-                        bgcolor: normalizerTheme.paperSoft,
+                        px: 1.5,
+                        py: 1.35,
+                        border: `1px solid ${isDarkMode ? normalizerTheme.border : '#d9e2ef'}`,
+                        borderRadius: '14px',
+                        bgcolor: isDarkMode ? normalizerTheme.paperSoft : '#ffffff',
+                        boxShadow: isDarkMode ? 'none' : '0 16px 34px -30px rgba(15,23,42,0.5)',
+                        transition: 'border-color 150ms ease, box-shadow 150ms ease, transform 150ms ease',
+                        '&:hover': {
+                          transform: 'translateY(-1px)',
+                          borderColor: `${accent}66`,
+                          boxShadow: isDarkMode
+                            ? `0 14px 30px -26px ${accent}80`
+                            : `0 18px 36px -30px ${accent}99`,
+                        },
                       }}
                     >
-                      {[
-                        ['Items detected', fieldPatternReviewSummary.itemCount, normalizerTheme.text],
-                        ['Patterns detected', fieldPatternReviewSummary.patternCount, isDarkMode ? '#66b3ff' : '#005ecb'],
-                        ['Recognized', fieldPatternReviewSummary.recognizedPatternCount, isDarkMode ? '#99f6e4' : '#047c70'],
-                        ['Need review', fieldPatternReviewSummary.unrecognizedPatternCount, isDarkMode ? '#fbbf24' : '#b45309'],
-                      ].map(([label, value, color], index) => (
+                      <Box
+                        aria-hidden
+                        sx={{
+                          position: 'absolute',
+                          right: -24,
+                          bottom: -32,
+                          width: 86,
+                          height: 86,
+                          borderRadius: '50%',
+                          bgcolor: `${accent}16`,
+                        }}
+                      />
+                      <Stack direction="row" alignItems="flex-start" justifyContent="space-between" gap={1}>
+                        <Typography sx={{ minWidth: 0, fontSize: 11.5, fontWeight: 600, color: normalizerTheme.text }}>
+                          {label}
+                        </Typography>
                         <Box
-                          key={label}
                           sx={{
-                            px: 1.4,
-                            py: 1.05,
-                            borderRight: index < 3 ? `1px solid ${isDarkMode ? normalizerTheme.border : '#d9e2ef'}` : 'none',
-                            bgcolor: isDarkMode ? normalizerTheme.paperSoft : '#fbfdff',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            width: 32,
+                            height: 32,
+                            flexShrink: 0,
+                            borderRadius: '11px',
+                            bgcolor: `${accent}18`,
+                            color: accent,
+                            boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.28)',
                           }}
                         >
-                          <Typography sx={{ fontSize: 11.25, fontWeight: 500, color: normalizerTheme.muted }}>{label}</Typography>
-                          <Typography sx={{ mt: 0.15, fontSize: 20, fontWeight: 550, color }}>{Number(value || 0)}</Typography>
+                          <Icon sx={{ fontSize: 17 }} />
                         </Box>
-                      ))}
+                      </Stack>
+                      <Typography sx={{ mt: 0.55, fontSize: 23, lineHeight: 1.05, fontWeight: 600, color: normalizerTheme.text, fontVariantNumeric: 'tabular-nums' }}>
+                        {Number(value || 0)}
+                      </Typography>
+                      <Typography sx={{ mt: 0.65, fontSize: 10.75, color: normalizerTheme.muted }}>
+                        {helper}
+                      </Typography>
                     </Box>
-                  </Box>
-                  <Stack gap={1} sx={{ width: { xs: '100%', md: 270 }, flexShrink: 0 }}>
+                  ))}
+                  <Box
+                    sx={{
+                      gridColumn: { xs: '1 / -1', md: '1 / -1', lg: 'auto' },
+                      minHeight: 108,
+                      px: 1.5,
+                      py: 1.35,
+                      border: `1px solid ${isDarkMode ? normalizerTheme.border : '#d9e2ef'}`,
+                      borderRadius: '14px',
+                      bgcolor: isDarkMode ? normalizerTheme.paperSoft : '#ffffff',
+                      boxShadow: isDarkMode ? 'none' : '0 16px 34px -30px rgba(15,23,42,0.5)',
+                    }}
+                  >
+                    <Stack direction="row" alignItems="center" justifyContent="space-between" gap={1} sx={{ mb: 0.75 }}>
+                      <Box sx={{ minWidth: 0 }}>
+                        <Typography sx={{ fontSize: 11.5, fontWeight: 600, color: normalizerTheme.text }}>
+                          Patterns by field
+                        </Typography>
+                        <Typography sx={{ mt: 0.1, fontSize: 10.5, color: normalizerTheme.muted }}>
+                          Focus the review list
+                        </Typography>
+                      </Box>
+                      <TuneIcon sx={{ fontSize: 17, color: normalizerTheme.pageTokens.primary }} />
+                    </Stack>
                     <Autocomplete
                       size="small"
                       options={fieldPatternFieldFilterOptions}
@@ -19463,10 +19605,23 @@ const BomNormalizer = () => {
                       }}
                       getOptionLabel={(option) => option?.label || ''}
                       isOptionEqualToValue={(option, value) => option.key === value.key}
-                      renderInput={(params) => <TextField {...params} label="Patterns by field" />}
+                      renderInput={(params) => (
+                        <TextField
+                          {...params}
+                          placeholder="All mapped fields"
+                          inputProps={{ ...params.inputProps, 'aria-label': 'Patterns by field' }}
+                        />
+                      )}
+                      sx={{
+                        '& .MuiOutlinedInput-root': {
+                          height: 38,
+                          borderRadius: '10px',
+                          bgcolor: isDarkMode ? 'rgba(255,255,255,0.025)' : '#f8fafc',
+                        },
+                      }}
                     />
-                  </Stack>
-                </Stack>
+                  </Box>
+                </Box>
                 <Accordion
                   defaultExpanded={false}
                   disableGutters
@@ -19504,6 +19659,7 @@ const BomNormalizer = () => {
                       startIcon={bulkPatternControlsLoading ? <CircularProgress size={15} color="inherit" /> : <TuneIcon />}
                       disabled={!selectedFieldPatternRuleOption || !bulkPatternControlsChanged || bulkPatternControlsLoading}
                       onClick={handleApplyBulkPatternControls}
+                      sx={fieldPatternPrimaryButtonSx}
                     >
                       Apply to all patterns
                     </Button>
@@ -20262,7 +20418,7 @@ const BomNormalizer = () => {
         <DialogActions sx={{ px: 2.75, py: 1.45, justifyContent: 'space-between', gap: 1, flexWrap: 'wrap', borderTop: `1px solid ${normalizerTheme.border}`, bgcolor: isDarkMode ? '#17181d' : normalizerTheme.paperSoft }}>
           {fieldPatternReviewStage === 'patterns' ? (
             <>
-              <Button color="inherit" onClick={() => setFieldPatternReviewOpen(false)}>Close</Button>
+              <Button variant="outlined" onClick={() => setFieldPatternReviewOpen(false)} sx={fieldPatternSecondaryButtonSx}>Close</Button>
               <Button
                 variant="contained"
                 disabled={fieldPatternLoading || !fieldPatternReviewRows.length}
@@ -20273,6 +20429,7 @@ const BomNormalizer = () => {
                   fieldPatternReviewContentRef.current?.scrollTo({ top: 0, behavior: 'auto' });
                 }}
                 endIcon={<ChevronRightIcon />}
+                sx={fieldPatternPrimaryButtonSx}
               >
                 Review all rows
               </Button>
@@ -20280,10 +20437,10 @@ const BomNormalizer = () => {
           ) : (
             <>
               <Button
-                color="inherit"
+                variant="outlined"
                 startIcon={<ChevronLeftIcon />}
                 onClick={() => setFieldPatternReviewStage('patterns')}
-                sx={{ minWidth: 86 }}
+                sx={{ ...fieldPatternSecondaryButtonSx, minWidth: 86 }}
               >
                 Back
               </Button>
@@ -20292,10 +20449,8 @@ const BomNormalizer = () => {
                 disabled={fieldPatternLoading}
                 onClick={handleApplyFieldPatternReview}
                 sx={{
+                  ...fieldPatternPrimaryButtonSx,
                   minWidth: 138,
-                  bgcolor: normalizerTheme.pageTokens.primary,
-                  boxShadow: '0 12px 22px -16px rgba(0, 122, 255, 0.9)',
-                  '&:hover': { bgcolor: normalizerTheme.pageTokens.primaryHover, boxShadow: '0 12px 22px -16px rgba(0, 122, 255, 0.9)' },
                 }}
               >
                 Apply patterns
