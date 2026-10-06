@@ -4,6 +4,7 @@ Production-ready settings for Excel Template Mapper application.
 
 import os
 from pathlib import Path
+from corsheaders.defaults import default_headers
 from typing import Dict, Any
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -128,6 +129,11 @@ raw_origin_regexes = os.environ.get(
 CORS_ALLOWED_ORIGIN_REGEXES = [pattern.strip() for pattern in raw_origin_regexes.split(',') if pattern.strip()]
 
 CORS_ALLOW_ALL_ORIGINS = DEBUG  # Only allow all origins in development
+CORS_ALLOW_HEADERS = (*default_headers,
+    'x-factwise-entity-id',
+    'x-factwise-enterprise-id',
+    'x-factwise-api-url',
+)
 
 # File Upload Configuration
 # Stream large uploads to disk early to avoid memory pressure

@@ -1,5 +1,6 @@
 # models.py
 
+from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils import timezone
 import json
@@ -943,6 +944,253 @@ class BomStructurePattern(models.Model):
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
         }
+
+
+class BomFieldPattern(models.Model):
+    """One canonical backend interpretation for a detected BOM pattern."""
+
+    SOURCE_FACTWISE = 'factwise'
+    SOURCE_LEGACY = 'legacy'
+    SOURCE_USER = 'user'
+    SOURCE_CHOICES = [
+        (SOURCE_FACTWISE, 'FactWise'),
+        (SOURCE_LEGACY, 'Legacy import'),
+        (SOURCE_USER, 'User'),
+    ]
+
+    pattern_key = models.CharField(max_length=512)
+    shape = models.TextField(blank=True, default='')
+    interpretation_hash = models.CharField(max_length=64)
+    parser_rule = models.JSONField(default=dict)
+    source_pattern = models.ForeignKey(
+        'self',
+        on_delete=models.SET_NULL,
+        related_name='derived_patterns',
+        blank=True,
+        null=True,
+    )
+    source = models.CharField(max_length=16, choices=SOURCE_CHOICES)
+    created_by_user_id = models.CharField(max_length=120, blank=True, null=True)
+    created_by_entity_id = models.CharField(max_length=120, blank=True, null=True)
+    is_active = models.BooleanField(default=True)
+    usage_count = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'excel_mapper_bom_field_pattern'
+        ordering = ['pattern_key', '-updated_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['pattern_key', 'interpretation_hash'],
+                name='bom_pattern_key_interpretation_uniq',
+            ),
+            models.CheckConstraint(
+                check=(
+                    models.Q(
+                        source='factwise',
+                        created_by_user_id__isnull=True,
+                        created_by_entity_id__isnull=True,
+                    )
+                    | models.Q(
+                        source='legacy',
+                        created_by_user_id__isnull=True,
+                        created_by_entity_id__isnull=True,
+                    )
+                    | (
+                        models.Q(
+                            source='user',
+                            created_by_user_id__isnull=False,
+                            created_by_entity_id__isnull=False,
+                        )
+                        & ~models.Q(created_by_user_id='')
+                        & ~models.Q(created_by_entity_id='')
+                    )
+                ),
+                name='bom_pattern_valid_creator',
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=['pattern_key', 'is_active'],
+                name='bom_pattern_lookup_idx',
+            ),
+            models.Index(
+                fields=['created_by_entity_id', 'pattern_key'],
+                name='bom_pattern_creator_idx',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.pattern_key}:{self.interpretation_hash[:12]}'
+
+
+class BomEntityFieldPattern(models.Model):
+    """An entity's approval of one canonical BOM field pattern."""
+
+    field_pattern = models.ForeignKey(
+        BomFieldPattern,
+        on_delete=models.PROTECT,
+        related_name='entity_approvals',
+    )
+    created_by_user_id = models.CharField(max_length=120)
+    created_by_entity_id = models.CharField(max_length=120)
+    structures = models.ManyToManyField(
+        BomStructurePattern,
+        through='BomEntityPatternStructure',
+        through_fields=('entity_field_pattern', 'structure_pattern'),
+        related_name='entity_field_pattern_approvals',
+        blank=True,
+    )
+    is_active = models.BooleanField(default=True)
+    usage_count = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'excel_mapper_bom_entity_field_pattern'
+        ordering = ['created_by_entity_id', 'field_pattern__pattern_key']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['created_by_entity_id', 'field_pattern'],
+                name='bom_entity_pattern_unique',
+            ),
+            models.CheckConstraint(
+                check=(
+                    ~models.Q(created_by_user_id='')
+                    & ~models.Q(created_by_entity_id='')
+                ),
+                name='bom_entity_creator_required',
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=['created_by_entity_id', 'is_active'],
+                name='bom_entity_active_idx',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.created_by_entity_id}:{self.field_pattern}'
+
+
+class BomEntityPatternStructure(models.Model):
+    """Where an entity-approved field-pattern interpretation was confirmed."""
+
+    CONFIRMATION_APPLY = 'apply'
+    CONFIRMATION_TEMPLATE = 'template'
+    CONFIRMATION_MIGRATION = 'migration'
+    CONFIRMATION_SYSTEM = 'system'
+    CONFIRMATION_SOURCE_CHOICES = [
+        (CONFIRMATION_APPLY, 'Apply patterns'),
+        (CONFIRMATION_TEMPLATE, 'Workflow template'),
+        (CONFIRMATION_MIGRATION, 'Legacy migration'),
+        (CONFIRMATION_SYSTEM, 'System'),
+    ]
+
+    entity_field_pattern = models.ForeignKey(
+        BomEntityFieldPattern,
+        on_delete=models.PROTECT,
+        related_name='structure_links',
+    )
+    structure_pattern = models.ForeignKey(
+        BomStructurePattern,
+        on_delete=models.PROTECT,
+        related_name='entity_pattern_links',
+    )
+    pattern_key = models.CharField(max_length=512)
+    created_by_user_id = models.CharField(max_length=120)
+    created_by_entity_id = models.CharField(max_length=120)
+    updated_by_user_id = models.CharField(max_length=120, blank=True, null=True)
+    confirmation_source = models.CharField(
+        max_length=20,
+        choices=CONFIRMATION_SOURCE_CHOICES,
+    )
+    confirmation_session_id = models.CharField(max_length=120, blank=True, default='')
+    is_active = models.BooleanField(default=True)
+    version = models.PositiveIntegerField(default=1)
+    usage_count = models.PositiveIntegerField(default=0)
+    last_used_at = models.DateTimeField(blank=True, null=True)
+    deactivated_by_user_id = models.CharField(max_length=120, blank=True, null=True)
+    deactivated_at = models.DateTimeField(blank=True, null=True)
+    deactivation_reason = models.TextField(blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'excel_mapper_bom_entity_pattern_structure'
+        ordering = ['created_by_entity_id', 'pattern_key', '-updated_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['entity_field_pattern', 'structure_pattern'],
+                name='bom_ent_struct_pair_uniq',
+            ),
+            models.UniqueConstraint(
+                fields=['created_by_entity_id', 'structure_pattern', 'pattern_key'],
+                condition=models.Q(is_active=True),
+                name='bom_ent_struct_active_uniq',
+            ),
+            models.CheckConstraint(
+                check=(
+                    ~models.Q(pattern_key='')
+                    & ~models.Q(created_by_user_id='')
+                    & ~models.Q(created_by_entity_id='')
+                    & ~models.Q(confirmation_source='')
+                ),
+                name='bom_ent_struct_creator_ck',
+            ),
+            models.CheckConstraint(
+                check=(
+                    models.Q(
+                        is_active=True,
+                        deactivated_at__isnull=True,
+                        deactivated_by_user_id__isnull=True,
+                    )
+                    | models.Q(
+                        is_active=False,
+                        deactivated_at__isnull=False,
+                        deactivated_by_user_id__isnull=False,
+                    )
+                ),
+                name='bom_ent_struct_state_ck',
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=[
+                    'created_by_entity_id',
+                    'structure_pattern',
+                    'pattern_key',
+                    'is_active',
+                ],
+                name='bom_ent_struct_lookup_idx',
+            ),
+            models.Index(
+                fields=['entity_field_pattern', 'is_active'],
+                name='bom_ent_pattern_active_idx',
+            ),
+        ]
+
+    def clean(self):
+        super().clean()
+        if not self.entity_field_pattern_id:
+            return
+        entity_pattern = self.entity_field_pattern
+        if self.created_by_entity_id != entity_pattern.created_by_entity_id:
+            raise ValidationError({
+                'created_by_entity_id': 'Entity must match the entity-approved pattern.',
+            })
+        if self.pattern_key != entity_pattern.field_pattern.pattern_key:
+            raise ValidationError({
+                'pattern_key': 'Pattern key must match the canonical field pattern.',
+            })
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f'{self.created_by_entity_id}:{self.pattern_key}:{self.structure_pattern}'
 
 
 class ManufacturerDirectoryEntry(models.Model):

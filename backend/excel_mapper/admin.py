@@ -1,6 +1,9 @@
 from django.contrib import admin
 from django.utils.html import format_html
 from .models import (
+    BomEntityFieldPattern,
+    BomEntityPatternStructure,
+    BomFieldPattern,
     BomStructurePattern,
     BomWorkflowTemplate,
     DirectoryLearningEvent,
@@ -15,6 +18,148 @@ from .models import (
     ProcessingTemplate,
     ProviderCredential,
 )
+
+
+@admin.register(BomEntityPatternStructure)
+class BomEntityPatternStructureAdmin(admin.ModelAdmin):
+    list_display = (
+        'pattern_key',
+        'created_by_entity_id',
+        'structure_pattern',
+        'entity_field_pattern',
+        'confirmation_source',
+        'is_active',
+        'usage_count',
+        'updated_at',
+    )
+    list_filter = ('confirmation_source', 'is_active', 'updated_at')
+    search_fields = (
+        'pattern_key',
+        'created_by_entity_id',
+        'created_by_user_id',
+        'confirmation_session_id',
+        'structure_pattern__name',
+        'structure_pattern__signature_hash',
+    )
+    readonly_fields = (
+        'entity_field_pattern',
+        'structure_pattern',
+        'pattern_key',
+        'created_by_user_id',
+        'created_by_entity_id',
+        'updated_by_user_id',
+        'confirmation_source',
+        'confirmation_session_id',
+        'is_active',
+        'version',
+        'usage_count',
+        'last_used_at',
+        'deactivated_by_user_id',
+        'deactivated_at',
+        'deactivation_reason',
+        'created_at',
+        'updated_at',
+    )
+    list_select_related = (
+        'entity_field_pattern',
+        'entity_field_pattern__field_pattern',
+        'structure_pattern',
+    )
+    ordering = ('created_by_entity_id', 'pattern_key', '-updated_at')
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(BomEntityFieldPattern)
+class BomEntityFieldPatternAdmin(admin.ModelAdmin):
+    list_display = (
+        'field_pattern',
+        'created_by_entity_id',
+        'created_by_user_id',
+        'is_active',
+        'usage_count',
+        'updated_at',
+    )
+    list_filter = ('is_active', 'field_pattern__source', 'updated_at')
+    search_fields = (
+        'field_pattern__pattern_key',
+        'field_pattern__shape',
+        'created_by_entity_id',
+        'created_by_user_id',
+    )
+    readonly_fields = (
+        'field_pattern',
+        'created_by_entity_id',
+        'created_by_user_id',
+        'is_active',
+        'usage_count',
+        'created_at',
+        'updated_at',
+    )
+    list_select_related = ('field_pattern',)
+    ordering = ('created_by_entity_id', 'field_pattern__pattern_key')
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(BomFieldPattern)
+class BomFieldPatternAdmin(admin.ModelAdmin):
+    list_display = (
+        'pattern_key',
+        'shape',
+        'source',
+        'created_by_entity_id',
+        'created_by_user_id',
+        'is_active',
+        'usage_count',
+        'updated_at',
+    )
+    list_filter = ('source', 'is_active', 'updated_at')
+    search_fields = (
+        'pattern_key',
+        'shape',
+        'interpretation_hash',
+        'created_by_entity_id',
+        'created_by_user_id',
+    )
+    readonly_fields = (
+        'pattern_key',
+        'shape',
+        'interpretation_hash',
+        'parser_rule',
+        'source_pattern',
+        'source',
+        'created_by_user_id',
+        'created_by_entity_id',
+        'is_active',
+        'usage_count',
+        'created_at',
+        'updated_at',
+    )
+    ordering = ('pattern_key', '-updated_at')
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 @admin.register(MappingTemplate)
 class MappingTemplateAdmin(admin.ModelAdmin):

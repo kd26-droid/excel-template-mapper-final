@@ -1,3 +1,4 @@
+import math
 import re
 from collections import Counter
 from time import monotonic
@@ -192,7 +193,7 @@ class DatabaseMpnLookup:
         self._loaded = set()
         self._value_matches = {}
         self._embedded_prefix_index = None
-        self._known_trigrams = None
+        self._known_trigrams_by_length = None
         self._similarity_matches = {}
 
     def __bool__(self):
@@ -244,6 +245,7 @@ class DatabaseMpnLookup:
 
     def match_normalized_many(self, normalized_values, *, threshold=90.0):
         """Return exact or fuzzy verified-directory evidence for unique MPNs."""
+        threshold = max(0.0, min(float(threshold), 100.0))
         values = {
             str(value or "")
             for value in normalized_values or []
@@ -261,42 +263,126 @@ class DatabaseMpnLookup:
                     "matched_mpn": known[1],
                     "matched_normalized_mpn": value,
                 }
-            elif value in self._similarity_matches:
-                cached = self._similarity_matches[value]
+            else:
+                cache_key = (value, threshold)
+                cached = self._similarity_matches.get(cache_key, ...)
+                if cached is ...:
+                    unresolved.append(value)
+                    continue
                 if cached:
                     matches[value] = dict(cached)
-            else:
-                unresolved.append(value)
 
         if not unresolved or not self._known:
             return matches
 
-        if self._known_trigrams is None:
+        if self._known_trigrams_by_length is None:
             trigrams = {}
             for known_value in self._known:
-                for index in range(len(known_value) - 2):
-                    trigram = known_value[index:index + 3]
-                    trigrams.setdefault(trigram, []).append(known_value)
-            self._known_trigrams = {
-                trigram: tuple(items)
-                for trigram, items in trigrams.items()
+                known_length = len(known_value)
+                for trigram in {
+                    known_value[index:index + 3]
+                    for index in range(known_length - 2)
+                }:
+                    trigrams.setdefault((trigram, known_length), []).append(known_value)
+            self._known_trigrams_by_length = {
+                key: tuple(items)
+                for key, items in trigrams.items()
             }
 
-        threshold = max(0.0, min(float(threshold), 100.0))
         for value in unresolved:
+            cache_key = (value, threshold)
             value_length = len(value)
             if value_length < 3:
+                self._similarity_matches[cache_key] = None
                 continue
-            candidates = {
-                candidate
+            minimum_length = max(
+                1,
+                int((threshold * value_length + (200.0 - threshold) - 1) // (200.0 - threshold)),
+            ) if threshold < 200.0 else value_length
+            maximum_length = int(((200.0 - threshold) * value_length) // threshold) if threshold else max(
+                (len(candidate) for candidate in self._known),
+                default=value_length,
+            )
+            value_trigram_counts = Counter(
+                value[index:index + 3]
                 for index in range(value_length - 2)
-                for candidate in self._known_trigrams.get(value[index:index + 3], ())
-                if (
-                    2 * min(value_length, len(candidate)) * 100
-                    >= threshold * (value_length + len(candidate))
+            )
+            # fuzz.ratio is normalized Indel similarity. At the requested
+            # threshold, its maximum edit distance gives a lower bound on the
+            # number of shared trigrams. Filtering below that bound cannot
+            # remove a candidate capable of meeting the same score cutoff.
+            max_query_trigram_repetitions = max(value_trigram_counts.values(), default=1)
+            required_trigrams_by_length = {}
+            for candidate_length in range(minimum_length, maximum_length + 1):
+                maximum_indel_distance = math.floor(
+                    ((100.0 - threshold) / 100.0)
+                    * (value_length + candidate_length)
+                    + 1e-9
                 )
+                shared_multiset_lower_bound = max(
+                    1,
+                    math.ceil(
+                        (
+                            max(0, value_length - 2)
+                            + max(0, candidate_length - 2)
+                        ) / 2.0
+                        - (3 * maximum_indel_distance)
+                    ),
+                )
+                required_trigrams_by_length[candidate_length] = max(
+                    1,
+                    math.ceil(
+                        shared_multiset_lower_bound
+                        / max_query_trigram_repetitions
+                    ),
+                )
+
+            minimum_required_trigrams = min(
+                required_trigrams_by_length.values(),
+                default=1,
+            )
+            postings = []
+            for trigram in value_trigram_counts:
+                matches_for_trigram = []
+                for candidate_length in range(minimum_length, maximum_length + 1):
+                    matches_for_trigram.extend(
+                        self._known_trigrams_by_length.get(
+                            (trigram, candidate_length),
+                            (),
+                        )
+                    )
+                postings.append(matches_for_trigram)
+            postings.sort(key=len)
+
+            # A candidate sharing at least K distinct trigrams must occur in
+            # one of any N-K+1 posting lists. Excluding the K-1 largest lists
+            # keeps the candidate pool small without excluding a possible hit.
+            posting_limit = max(
+                1,
+                len(postings) - minimum_required_trigrams + 1,
+            )
+            candidate_pool = {
+                candidate
+                for matches_for_trigram in postings[:posting_limit]
+                for candidate in matches_for_trigram
             }
+            candidates = []
+            for candidate in candidate_pool:
+                candidate_length = len(candidate)
+                if (
+                    2 * min(value_length, candidate_length) * 100
+                    < threshold * (value_length + candidate_length)
+                ):
+                    continue
+                shared_distinct_trigrams = sum(
+                    1
+                    for trigram in value_trigram_counts
+                    if trigram in candidate
+                )
+                if shared_distinct_trigrams >= required_trigrams_by_length[candidate_length]:
+                    candidates.append(candidate)
             if not candidates:
+                self._similarity_matches[cache_key] = None
                 continue
             best = process.extractOne(
                 value,
@@ -305,7 +391,7 @@ class DatabaseMpnLookup:
                 score_cutoff=threshold,
             )
             if not best:
-                self._similarity_matches[value] = None
+                self._similarity_matches[cache_key] = None
                 continue
             matched_normalized, score, _index = best
             match = {
@@ -316,7 +402,7 @@ class DatabaseMpnLookup:
                 "matched_normalized_mpn": matched_normalized,
             }
             matches[value] = match
-            self._similarity_matches[value] = match
+            self._similarity_matches[cache_key] = match
         return matches
 
     def set_value_matches(self, normalized_value, matched_keys):

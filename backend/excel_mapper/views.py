@@ -48,6 +48,14 @@ from .delimited_reader import (
 )
 from .bom_header_mapper import BOMHeaderMapper
 from .services.bom_directory_learning import learn_confirmed_bom_field_patterns, learn_normalized_bom_rows
+from .services.bom_pattern_identity import (
+    BomPatternIdentityError,
+    resolve_bom_pattern_actor,
+)
+from .services.bom_pattern_repository import (
+    BomPatternResolver,
+    persist_confirmed_pattern_rules,
+)
 from .services.bom_role_inference import (
     BomSetupValidationError,
     ROLE_KEYS,
@@ -60,7 +68,6 @@ from .services.bom_role_inference import (
     load_saved_bom_field_pattern_rules,
     normalize_bom_rows,
     refresh_bom_field_pattern_review_after_teach,
-    save_bom_field_pattern_rule,
 )
 from .services.bom_structure_patterns import build_structure_profile, learn_bom_structure, match_bom_structures
 from .default_template import (
@@ -70,7 +77,15 @@ from .default_template import (
     get_sfo_reference_optional_map,
     SFO_TEMPLATE_NAME,
 )
-from .models import MappingTemplate, TagTemplate, ColumnRule, PDFSession, PDFExtractionResult, Project
+from .models import (
+    BomStructurePattern,
+    MappingTemplate,
+    TagTemplate,
+    ColumnRule,
+    PDFSession,
+    PDFExtractionResult,
+    Project,
+)
 from .editor_defaults import (apply_editor_defaults_to_rows,
                               get_editor_defaults_for_entity,
                               _saved_item_code_rule)
@@ -228,6 +243,42 @@ def _read_bom_pattern_review(token, expected_structure_signature):
     if not isinstance(payload.get('activeRules'), dict):
         raise ValueError('The Confirm Patterns review snapshot is incomplete.')
     return payload
+
+
+def _bom_pattern_resolver_for_request(
+    request,
+    *,
+    headers,
+    rows,
+    roles,
+    config,
+    source_signature=None,
+    require_actor=False,
+):
+    """Build one request-scoped resolver and reuse its batched query cache."""
+    actor = resolve_bom_pattern_actor(request, required=require_actor)
+    profile = build_structure_profile(
+        headers=headers,
+        rows=rows,
+        roles=roles,
+        config=config,
+        source_signature=source_signature or {},
+    )
+    structure = (
+        BomStructurePattern.objects.only('id').filter(
+            signature_hash=profile['fingerprint'],
+        ).first()
+        if actor
+        else None
+    )
+    return (
+        actor,
+        BomPatternResolver(
+            entity_id=actor.entity_id if actor else '',
+            structure_pattern_id=structure.id if structure else None,
+        ),
+        profile,
+    )
 
 # === Canonicalizer for header labels ===
 def _canon(s: str) -> str:
@@ -3538,6 +3589,13 @@ def bom_field_pattern_inference(request):
         # an older response, but those values must not become trusted input.
         trusted_config = _without_client_pattern_rules(config)
         trusted_options = _without_client_pattern_rules(options)
+        _actor, pattern_resolver, _profile = _bom_pattern_resolver_for_request(
+            request,
+            headers=headers,
+            rows=rows,
+            roles=roles,
+            config=trusted_config,
+        )
 
         result = build_bom_field_pattern_groups(
             headers=headers,
@@ -3546,6 +3604,7 @@ def bom_field_pattern_inference(request):
             config=trusted_config,
             selected_columns=selected_columns,
             options=trusted_options,
+            pattern_resolver=pattern_resolver,
         )
         review = result.get('review') if isinstance(result.get('review'), dict) else {}
         structure_scope = _bom_pattern_structure_scope(headers, roles, trusted_config)
@@ -3558,6 +3617,11 @@ def bom_field_pattern_inference(request):
             **result,
             'reviewReceipt': review_receipt,
         })
+    except BomPatternIdentityError as exc:
+        return Response({
+            'success': False,
+            'error': str(exc),
+        }, status=status.HTTP_401_UNAUTHORIZED)
     except BomSetupValidationError as exc:
         return Response({
             'success': False,
@@ -3588,10 +3652,29 @@ def bom_normalize(request):
             roles = {}
         if not isinstance(config, dict):
             config = {}
+        trusted_config = _without_client_pattern_rules(config)
+        _actor, pattern_resolver, _profile = _bom_pattern_resolver_for_request(
+            request,
+            headers=headers,
+            rows=rows,
+            roles=roles,
+            config=trusted_config,
+        )
         return Response({
             'success': True,
-            **normalize_bom_rows(headers, rows, roles=roles, config=config),
+            **normalize_bom_rows(
+                headers,
+                rows,
+                roles=roles,
+                config=trusted_config,
+                pattern_resolver=pattern_resolver,
+            ),
         })
+    except BomPatternIdentityError as exc:
+        return Response({
+            'success': False,
+            'error': str(exc),
+        }, status=status.HTTP_401_UNAUTHORIZED)
     except BomSetupValidationError as exc:
         return Response({
             'success': False,
@@ -3676,6 +3759,7 @@ def bom_field_pattern_apply(request):
 
         trusted_config = _without_client_pattern_rules(config)
         structure_scope = _bom_pattern_structure_scope(headers, roles, trusted_config)
+        actor = resolve_bom_pattern_actor(request, required=persist)
         try:
             confirmed_payloads = [
                 _read_bom_pattern_confirmation(token, structure_scope['signature'])
@@ -3713,38 +3797,16 @@ def bom_field_pattern_apply(request):
             source_signature=source_signature,
         )
         structure_fingerprint = structure_profile['fingerprint']
+        existing_structure = BomStructurePattern.objects.only('id').filter(
+            signature_hash=structure_fingerprint,
+        ).first()
+        pattern_resolver = BomPatternResolver(
+            entity_id=actor.entity_id if actor else '',
+            structure_pattern_id=existing_structure.id if existing_structure else None,
+        )
         scoped_groups = []
-        confirmed_rules = load_saved_bom_field_pattern_rules(structure_scope['signature'])
-        review_source = 'backend_review_receipt'
-        try:
-            reviewed_rules = _read_bom_pattern_review(
-                review_receipt,
-                structure_scope['signature'],
-            ).get('activeRules') if review_receipt else None
-        except ValueError as exc:
-            logger.warning('Could not reuse Confirm Patterns review; recomputing: %s', exc)
-            reviewed_rules = None
-        if reviewed_rules is None:
-            review_source = 'backend_recomputed'
-            refreshed = build_bom_field_pattern_groups(
-                headers=headers,
-                rows=rows,
-                roles=roles,
-                config=trusted_config,
-                options={
-                    'headerRowIndex': trusted_config.get('headerRowIndex') or 0,
-                    'includeAllRows': False,
-                    'reviewContractVersion': 3,
-                },
-            )
-            refreshed_review = refreshed.get('review') if isinstance(refreshed.get('review'), dict) else {}
-            reviewed_rules = refreshed_review.get('activeRules') or {}
-        for rule_key, reviewed_rule in reviewed_rules.items():
-            if rule_key and isinstance(reviewed_rule, dict):
-                confirmed_rules[str(rule_key)] = _merge_pattern_rules(
-                    confirmed_rules.get(str(rule_key)),
-                    reviewed_rule,
-                )
+        confirmed_rules = {}
+        review_source = 'signed_confirmation_tokens'
         for group in groups:
             if not isinstance(group, dict):
                 continue
@@ -3781,12 +3843,17 @@ def bom_field_pattern_apply(request):
         reusable_config = dict(trusted_config)
         reusable_config.pop('fieldPatternOverrides', None)
         reusable_config.pop('field_pattern_overrides', None)
-        reusable_config['fieldPatternRules'] = confirmed_rules
         applied_config = {
             **trusted_config,
             'fieldPatternRules': confirmed_rules,
         }
-        normalized = normalize_bom_rows(headers, rows, roles=roles, config=applied_config)
+        normalized = normalize_bom_rows(
+            headers,
+            rows,
+            roles=roles,
+            config=applied_config,
+            pattern_resolver=pattern_resolver,
+        )
 
         normalized_rows_by_source = {}
         for normalized_row in normalized.get('normalizedRows') or []:
@@ -3863,6 +3930,20 @@ def bom_field_pattern_apply(request):
                         structure_scope=structure_scope,
                         structure_fingerprint=structure.signature_hash,
                     )
+                    persistable_rules = {
+                        key: rule
+                        for key, rule in confirmed_rules.items()
+                        if isinstance(rule, dict)
+                        and rule
+                        and not rule.get('ephemeral')
+                        and not rule.get('automaticUnclassified')
+                    }
+                    learning_result['saved_pattern_rules'] = persist_confirmed_pattern_rules(
+                        persistable_rules,
+                        actor=actor,
+                        structure_pattern=structure,
+                        confirmation_session_id=normaliser_session_id,
+                    )
                     return structure, structure_created, learning_result
 
             structure, structure_created, learning = _retry_sqlite_locked_write(
@@ -3897,6 +3978,11 @@ def bom_field_pattern_apply(request):
                 'fieldPatternRules': confirmed_rules,
             },
         })
+    except BomPatternIdentityError as exc:
+        return Response({
+            'success': False,
+            'error': str(exc),
+        }, status=status.HTTP_401_UNAUTHORIZED)
     except BomSetupValidationError as exc:
         return Response({
             'success': False,
@@ -3914,23 +4000,11 @@ def bom_field_pattern_apply(request):
 
 @api_view(['POST'])
 def bom_field_pattern_learning(request):
-    """Persist user-confirmed MPN/MFR values from the teach popup."""
-    try:
-        groups = request.data.get('groups') or []
-        if not isinstance(groups, list):
-            return Response({
-                'success': False,
-                'error': 'groups must be a list',
-            }, status=status.HTTP_400_BAD_REQUEST)
-
-        result = learn_confirmed_bom_field_patterns(groups)
-        return Response(result)
-    except Exception as exc:
-        logger.error("BOM field pattern learning failed: %s", exc, exc_info=True)
-        return Response({
-            'success': False,
-            'error': str(exc),
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    """Retired writer: confirmed learning is atomic with Apply Patterns."""
+    return Response({
+        'success': False,
+        'error': 'Pattern learning is performed by Apply Patterns.',
+    }, status=status.HTTP_410_GONE)
 
 
 @api_view(['POST'])
@@ -4012,7 +4086,6 @@ def bom_field_pattern_teaching(request):
         if source_row is None:
             source_row = request.data.get('source_row')
         occurrence_id = request.data.get('occurrenceId') or request.data.get('occurrence_id') or ''
-        persist = request.data.get('persist', True)
         confirm_interpretation = (
             request.data.get('confirmInterpretation') is True
             or request.data.get('confirm_interpretation') is True
@@ -4047,6 +4120,10 @@ def bom_field_pattern_teaching(request):
 
         trusted_config = _without_client_pattern_rules(config)
         structure_scope = _bom_pattern_structure_scope(headers, roles, trusted_config)
+        actor = resolve_bom_pattern_actor(request, required=False)
+        pattern_resolver = BomPatternResolver(
+            entity_id=actor.entity_id if actor else '',
+        )
         try:
             reviewed_rules = _read_bom_pattern_review(
                 review_receipt,
@@ -4057,7 +4134,12 @@ def bom_field_pattern_teaching(request):
             reviewed_rules = None
         if reviewed_rules is None:
             reviewed_rules = load_saved_bom_field_pattern_rules(
-                structure_scope['signature']
+                structure_scope['signature'],
+                pattern_keys={
+                    group.get('patternKey'),
+                    group.get('shape'),
+                },
+                resolver=pattern_resolver,
             )
 
         teach_result = build_bom_field_pattern_teach_result(
@@ -4103,11 +4185,6 @@ def bom_field_pattern_teaching(request):
             taught_source_value=row.get(source_header) if source_header else '',
         )
         saved_rule = None
-        if persist:
-            saved_rule = save_bom_field_pattern_rule(
-                rule,
-                description='User-taught BOM field parser pattern',
-            )
         confirmation = None
         if confirm_interpretation:
             confirmation = _issue_bom_pattern_confirmation(
@@ -4132,6 +4209,11 @@ def bom_field_pattern_teaching(request):
             'confirmation': confirmation,
             'reviewReceipt': next_review_receipt,
         })
+    except BomPatternIdentityError as exc:
+        return Response({
+            'success': False,
+            'error': str(exc),
+        }, status=status.HTTP_401_UNAUTHORIZED)
     except Exception as exc:
         logger.error("BOM field pattern teaching failed: %s", exc, exc_info=True)
         return Response({
@@ -13775,6 +13857,13 @@ def clear_formulas(request):
 # SAVED COLUMN RULE VIEWS
 # ==============================================
 
+def _is_legacy_bom_pattern_column_rule(rule):
+    payload = rule.rule if rule and isinstance(rule.rule, dict) else {}
+    return bool(
+        str(getattr(rule, 'name', '') or '').startswith('BOM field pattern:')
+        or payload.get('rule_type') == 'bom_field_pattern'
+    )
+
 @api_view(['GET', 'POST'])
 def column_rules(request):
     """List saved column rules, or save a new one.
@@ -13784,11 +13873,14 @@ def column_rules(request):
     replayed against any session without translation.
     """
     if request.method == 'GET':
-        rules = ColumnRule.objects.all()
+        rules = [
+            rule for rule in ColumnRule.objects.all()
+            if not _is_legacy_bom_pattern_column_rule(rule)
+        ]
         return Response({
             'success': True,
             'rules': [r.get_summary() for r in rules],
-            'total': rules.count(),
+            'total': len(rules),
         })
 
     name = str(request.data.get('name') or '').strip()
@@ -13821,7 +13913,14 @@ def column_rules(request):
 def column_rule_detail(request, rule_id):
     """Delete a saved column rule."""
     try:
-        ColumnRule.objects.filter(id=rule_id).delete()
+        rule = ColumnRule.objects.filter(id=rule_id).first()
+        if rule and _is_legacy_bom_pattern_column_rule(rule):
+            return Response({
+                'success': False,
+                'error': 'BOM patterns are managed by the BOM pattern workflow.',
+            }, status=status.HTTP_404_NOT_FOUND)
+        if rule:
+            rule.delete()
         return Response({'success': True})
     except Exception as e:
         logger.error(f"Error deleting column rule {rule_id}: {e}")
