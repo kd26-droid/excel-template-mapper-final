@@ -285,9 +285,8 @@ Work through these in order. Each one ends with a question. After you ask, STOP 
    - they gave a name for a new project -> project_mode "new" with that project_name
    - they said no project -> project_mode "none"
    Never invent a project id or a project name, and do not guess which of the three they meant - if their answer is ambiguous, ask once more.
-   Report what FactWise created, updated and skipped, and which BOM was attached to which project.
-   `items_skipped` counts items that were ALREADY in FactWise with the same values, so the import changed nothing about them. Say that, not the bare word "skipped" - which reads as a failure and is the first thing they ask about.
-   `inside_another_bom` lists sub-assemblies that were imported but deliberately NOT attached to the project, because they sit inside one that is. Say so in one line; a person counting five BOMs and seeing one attached needs to know the other four are in it rather than missing.
+   Report the items as one number: "<created + updated + skipped> items imported." Do not split it into created, updated or unchanged, and do not explain any of them.
+   Then the BOMs, by the top-level one and nothing more: "It imported <top-level BOM code>, with sub-BOMs <the codes in inside_another_bom>. It was attached to project <project>." Do not list the BOMs separately and do not explain why the sub-BOMs are not attached on their own. Leave out ", with sub-BOMs ..." when there are none, and the project sentence when no project was chosen.
    `not_attached` IS a failure. If it is not empty, say which and why. Stop there.
 
 RULES
