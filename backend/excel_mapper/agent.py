@@ -25,7 +25,10 @@ a record without a human saying yes.
 import json
 import logging
 import os
+import queue
 import re
+import threading
+import time
 import uuid
 
 import requests
@@ -2664,6 +2667,27 @@ def _internal_post_local(payload):
 # conversation open indefinitely.
 MPN_WARM_BATCHES = 40
 MPN_WARM_SECONDS = 240
+# With a streaming caller the connection is kept alive by the progress lines, so
+# no gateway idle timeout applies and the loop can run until every MPN is asked.
+# Still bounded, so a wedged provider cannot hold a turn open forever.
+MPN_WARM_SECONDS_STREAMING = 900
+MPN_WARM_BATCHES_STREAMING = 400
+
+# The progress sink of the turn running on this thread, when the caller asked for
+# a stream. Thread-local rather than on `state`, because state is cached and a
+# callable does not survive that.
+_progress = threading.local()
+
+
+def _report(text):
+    """Send one progress line to a streaming caller; a no-op otherwise."""
+    sink = getattr(_progress, 'sink', None)
+    if sink is not None:
+        sink(text)
+
+
+def _streaming():
+    return getattr(_progress, 'sink', None) is not None
 
 
 def _tool_check_mpns(state, args):
@@ -2685,8 +2709,6 @@ def _tool_check_mpns(state, args):
     signal: a populated list means those providers were never reached, so their
     blank columns are not a finding.
     """
-    import time
-
     from rest_framework.test import APIRequestFactory
 
     from .mpn_views import mpn_validate, mpn_validate_warm, mpn_validation_summary
@@ -2700,7 +2722,10 @@ def _tool_check_mpns(state, args):
     started = time.monotonic()
     failures = {}
     offset, total, done = 0, None, False
-    for _ in range(MPN_WARM_BATCHES):
+    budget = MPN_WARM_SECONDS_STREAMING if _streaming() else MPN_WARM_SECONDS
+    batches = MPN_WARM_BATCHES_STREAMING if _streaming() else MPN_WARM_BATCHES
+    _report('Checking MPNs with DigiKey, Mouser and Element14...')
+    for _ in range(batches):
         response = mpn_validate_warm(_internal_post_local({
             'session_id': session_id, 'offset': offset,
         }))
@@ -2714,8 +2739,11 @@ def _tool_check_mpns(state, args):
         total = batch.get('total')
         offset = batch.get('next_offset') or offset
         done = bool(batch.get('done'))
-        if done or time.monotonic() - started > MPN_WARM_SECONDS:
+        if total:
+            _report('Checking MPNs: %d of %d' % (min(offset, total), total))
+        if done or time.monotonic() - started > budget:
             break
+    _report('Writing the MPN results into the sheet...')
 
     # --- 2. write the answers into the sheet -------------------------------
     response = mpn_validate(_internal_post_local({'session_id': session_id}))
@@ -3591,6 +3619,147 @@ def agent_download(request, conversation_id):
     return response
 
 
+def _run_turn(state, conversation_id):
+    """The model/tool loop for one message. Returns (payload, http status)."""
+    used = []
+    try:
+        for _ in range(MAX_TOOL_CALLS_PER_TURN):
+            reply = _complete(state['messages'], TOOLS)
+            calls = reply.get('tool_calls') or []
+            # Keep the assistant turn exactly as the model produced it: the tool
+            # results that follow are matched to it by tool_call_id.
+            state['messages'].append({
+                'role': 'assistant',
+                'content': reply.get('content') or '',
+                **({'tool_calls': calls} if calls else {}),
+            })
+            if not calls:
+                _save(state)
+                return {
+                    'success': True,
+                    'conversation_id': conversation_id,
+                    'reply': reply.get('content') or '',
+                    'tools_used': used,
+                    'session_id': state.get('session_id'),
+                    'mapped_session_id': state.get('mapped_session_id'),
+                    # There is a sheet worth downloading once one has been built.
+                    # The caller decides how to offer it; the model is never told
+                    # about it, so it cannot paste a link into the conversation.
+                    'download_ready': bool(state.get('mapped_session_id')),
+                    # A second file exists once FactWise has objected to something:
+                    # the same sheet with its reasons written onto the cells.
+                    'error_sheet_ready': bool(state.get('last_errors')),
+                    'error_count': len(state.get('last_errors') or []) or None,
+                    'editor_url': ('/editor/%s' % state['mapped_session_id']
+                                   if state.get('mapped_session_id') else None),
+                }, status.HTTP_200_OK
+
+            for call in calls:
+                name = (call.get('function') or {}).get('name') or ''
+                raw = (call.get('function') or {}).get('arguments') or '{}'
+                try:
+                    arguments = json.loads(raw) if isinstance(raw, str) else (raw or {})
+                except (TypeError, ValueError):
+                    arguments = {}
+                _report(TOOL_PROGRESS.get(name, 'Working...'))
+                result = _run_tool(name, arguments, state)
+                used.append({'tool': name, 'ok': bool(result.get('ok', True))})
+                logger.info('Agent %s: %s -> ok=%s', conversation_id, name,
+                            result.get('ok', True))
+                state['messages'].append({
+                    'role': 'tool',
+                    'tool_call_id': call.get('id'),
+                    'content': json.dumps(result, default=str),
+                })
+            _save(state)
+
+        _save(state)
+        return {
+            'success': False,
+            'conversation_id': conversation_id,
+            'error': 'The agent did not reach an answer for this message.',
+            'tools_used': used,
+        }, status.HTTP_504_GATEWAY_TIMEOUT
+
+    except AgentError as exc:
+        _save(state)
+        return ({'success': False, 'conversation_id': conversation_id,
+                 'error': str(exc)}, status.HTTP_502_BAD_GATEWAY)
+
+
+# What a streaming caller is shown while each tool runs. Plain words, because it
+# appears in the chat as the agent's "working on it" line.
+TOOL_PROGRESS = {
+    'read_sheet': 'Reading the sheet...',
+    'infer_columns': 'Working out the columns...',
+    'list_templates': 'Looking for saved templates...',
+    'use_template': 'Applying the template...',
+    'normalise': 'Normalising the BOM...',
+    'build_sheet': 'Building the FactWise sheet...',
+    'apply_defaults': 'Applying saved defaults...',
+    'check_with_factwise': 'Validating with FactWise...',
+    'check_mpns': 'Checking MPNs...',
+    'import_to_factwise': 'Importing into FactWise...',
+}
+
+STREAM_HEARTBEAT_SECONDS = 10
+
+
+def _stream_turn(state, conversation_id):
+    """Run the turn on a worker thread and stream its progress as NDJSON.
+
+    One JSON object per line: {"type": "progress", "text": ...} while it works,
+    then {"type": "done", "status": <http status>, ...the normal reply}. A line
+    goes out at least every STREAM_HEARTBEAT_SECONDS, which is what keeps Azure's
+    front end (it drops a response idle for ~230s) from closing a long MPN check.
+    """
+    from django.db import connection
+    from django.http import StreamingHttpResponse
+
+    lines = queue.Queue()
+
+    def work():
+        _progress.sink = lambda text: lines.put(('progress', text))
+        try:
+            payload, code = _run_turn(state, conversation_id)
+        except Exception as exc:  # pragma: no cover - surfaced to the caller
+            logger.exception('Agent %s: streamed turn failed', conversation_id)
+            payload, code = ({'success': False, 'conversation_id': conversation_id,
+                              'error': str(exc)}, 500)
+        finally:
+            _progress.sink = None
+            connection.close()
+        lines.put(('done', payload, code))
+
+    threading.Thread(target=work, daemon=True).start()
+
+    def body():
+        last = 'Working...'
+        while True:
+            try:
+                item = lines.get(timeout=STREAM_HEARTBEAT_SECONDS)
+            except queue.Empty:
+                yield json.dumps({'type': 'progress', 'text': last}) + '\n'
+                continue
+            if item[0] == 'progress':
+                last = item[1]
+                yield json.dumps({'type': 'progress', 'text': last}) + '\n'
+                continue
+            _kind, payload, code = item
+            yield json.dumps({'type': 'done', 'status': code, **payload}, default=str) + '\n'
+            return
+
+    response = StreamingHttpResponse(body(), content_type='application/x-ndjson')
+    response['Cache-Control'] = 'no-cache'
+    # nginx would otherwise hold the lines back until the whole reply is done.
+    response['X-Accel-Buffering'] = 'no'
+    # And so would GZipMiddleware, which compresses for any caller that accepts
+    # gzip (Node's fetch always does): the lines then arrive together at the end.
+    # It leaves alone a response that already states its encoding.
+    response['Content-Encoding'] = 'identity'
+    return response
+
+
 @api_view(['POST'])
 @parser_classes([MultiPartParser, FormParser, JSONParser])
 def agent_message(request):
@@ -3669,67 +3838,7 @@ def agent_message(request):
             'apply_edited_sheet.]' % (content, state.get('edited_name') or 'sheet.xlsx'))
     state['messages'].append({'role': 'user', 'content': content})
 
-    used = []
-    try:
-        for _ in range(MAX_TOOL_CALLS_PER_TURN):
-            reply = _complete(state['messages'], TOOLS)
-            calls = reply.get('tool_calls') or []
-            # Keep the assistant turn exactly as the model produced it: the tool
-            # results that follow are matched to it by tool_call_id.
-            state['messages'].append({
-                'role': 'assistant',
-                'content': reply.get('content') or '',
-                **({'tool_calls': calls} if calls else {}),
-            })
-            if not calls:
-                _save(state)
-                return Response({
-                    'success': True,
-                    'conversation_id': conversation_id,
-                    'reply': reply.get('content') or '',
-                    'tools_used': used,
-                    'session_id': state.get('session_id'),
-                    'mapped_session_id': state.get('mapped_session_id'),
-                    # There is a sheet worth downloading once one has been built.
-                    # The caller decides how to offer it; the model is never told
-                    # about it, so it cannot paste a link into the conversation.
-                    'download_ready': bool(state.get('mapped_session_id')),
-                    # A second file exists once FactWise has objected to something:
-                    # the same sheet with its reasons written onto the cells.
-                    'error_sheet_ready': bool(state.get('last_errors')),
-                    'error_count': len(state.get('last_errors') or []) or None,
-                    'editor_url': ('/editor/%s' % state['mapped_session_id']
-                                   if state.get('mapped_session_id') else None),
-                })
-
-            for call in calls:
-                name = (call.get('function') or {}).get('name') or ''
-                raw = (call.get('function') or {}).get('arguments') or '{}'
-                try:
-                    arguments = json.loads(raw) if isinstance(raw, str) else (raw or {})
-                except (TypeError, ValueError):
-                    arguments = {}
-                result = _run_tool(name, arguments, state)
-                used.append({'tool': name, 'ok': bool(result.get('ok', True))})
-                logger.info('Agent %s: %s -> ok=%s', conversation_id, name,
-                            result.get('ok', True))
-                state['messages'].append({
-                    'role': 'tool',
-                    'tool_call_id': call.get('id'),
-                    'content': json.dumps(result, default=str),
-                })
-            _save(state)
-
-        _save(state)
-        return Response({
-            'success': False,
-            'conversation_id': conversation_id,
-            'error': 'The agent did not reach an answer for this message.',
-            'tools_used': used,
-        }, status=status.HTTP_504_GATEWAY_TIMEOUT)
-
-    except AgentError as exc:
-        _save(state)
-        return Response({'success': False, 'conversation_id': conversation_id,
-                         'error': str(exc)},
-                        status=status.HTTP_502_BAD_GATEWAY)
+    if str(request.data.get('stream') or '').strip().lower() in ('1', 'true', 'yes'):
+        return _stream_turn(state, conversation_id)
+    payload, code = _run_turn(state, conversation_id)
+    return Response(payload, status=code)
