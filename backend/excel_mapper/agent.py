@@ -3704,6 +3704,86 @@ TOOL_PROGRESS = {
 
 STREAM_HEARTBEAT_SECONDS = 10
 
+# A turn started with async=1 is polled rather than streamed, for callers whose
+# host will not hold one connection open for minutes. Its state lives in the same
+# cache as the conversations, so a poll is answered by whichever worker gets it.
+TURN_ID_RE = re.compile(r'^[A-Za-z0-9_-]{1,64}$')
+TURN_RUNNING_TTL_SECONDS = 2 * 60 * 60
+TURN_DONE_TTL_SECONDS = 60 * 60
+
+
+def _turn_key(turn_id):
+    return 'bom-agent-turn:%s' % turn_id
+
+
+def _token_hash(token):
+    # Only a hash is kept: the poll proves it holds the same token without the
+    # cache ever holding a FactWise credential in the clear.
+    import hashlib
+
+    return hashlib.sha256(str(token or '').encode('utf-8')).hexdigest()
+
+
+def _start_async_turn(state, conversation_id, token):
+    """Run the turn on a background thread and answer 202 with a turn id at once."""
+    from django.db import connection
+
+    turn_id = uuid.uuid4().hex
+    key = _turn_key(turn_id)
+    owner = _token_hash(token)
+    cache.set(key, {'state': 'running', 'progress': 'Working...', 'owner': owner,
+                    'conversation_id': conversation_id}, TURN_RUNNING_TTL_SECONDS)
+
+    def report(text):
+        cache.set(key, {'state': 'running', 'progress': text, 'owner': owner,
+                        'conversation_id': conversation_id}, TURN_RUNNING_TTL_SECONDS)
+
+    def work():
+        _progress.sink = report
+        try:
+            payload, code = _run_turn(state, conversation_id)
+            entry = {'state': 'done', 'reply': {'status': code, **payload}}
+        except Exception as exc:
+            logger.exception('Agent %s: background turn %s failed', conversation_id, turn_id)
+            entry = {'state': 'failed', 'error': str(exc) or exc.__class__.__name__}
+        finally:
+            _progress.sink = None
+            connection.close()
+        entry.update({'owner': owner, 'conversation_id': conversation_id})
+        cache.set(key, json.loads(json.dumps(entry, default=str)), TURN_DONE_TTL_SECONDS)
+
+    threading.Thread(target=work, daemon=True).start()
+    return Response({'turn_id': turn_id, 'state': 'running',
+                     'conversation_id': conversation_id},
+                    status=status.HTTP_202_ACCEPTED)
+
+
+@api_view(['GET'])
+def agent_turn_status(request, turn_id):
+    """Where a turn started with async=1 has got to.
+
+    running -> {"state": "running", "progress": "..."}
+    done    -> {"state": "done", "reply": {...same fields as the streamed done line}}
+    failed  -> {"state": "failed", "error": "..."}
+    404 for an unknown turn, 403 when the bearer token is not the one it started with.
+    """
+    import hmac
+
+    if not TURN_ID_RE.match(str(turn_id or '')):
+        return Response({'error': 'Unknown turn.'}, status=status.HTTP_404_NOT_FOUND)
+    entry = cache.get(_turn_key(turn_id))
+    if not entry:
+        return Response({'error': 'Unknown turn.'}, status=status.HTTP_404_NOT_FOUND)
+    header = str(request.META.get('HTTP_AUTHORIZATION') or '')
+    token = header[7:].strip() if header.lower().startswith('bearer ') else ''
+    if not hmac.compare_digest(_token_hash(token), str(entry.get('owner') or '')):
+        return Response({'error': 'Not your turn.'}, status=status.HTTP_403_FORBIDDEN)
+    if entry.get('state') == 'done':
+        return Response({'state': 'done', 'reply': entry.get('reply') or {}})
+    if entry.get('state') == 'failed':
+        return Response({'state': 'failed', 'error': entry.get('error') or 'The turn failed.'})
+    return Response({'state': 'running', 'progress': entry.get('progress') or 'Working...'})
+
 
 def _stream_turn(state, conversation_id):
     """Run the turn on a worker thread and stream its progress as NDJSON.
@@ -3838,6 +3918,8 @@ def agent_message(request):
             'apply_edited_sheet.]' % (content, state.get('edited_name') or 'sheet.xlsx'))
     state['messages'].append({'role': 'user', 'content': content})
 
+    if str(request.data.get('async') or '').strip().lower() in ('1', 'true', 'yes'):
+        return _start_async_turn(state, conversation_id, request.data.get('token'))
     if str(request.data.get('stream') or '').strip().lower() in ('1', 'true', 'yes'):
         return _stream_turn(state, conversation_id)
     payload, code = _run_turn(state, conversation_id)
