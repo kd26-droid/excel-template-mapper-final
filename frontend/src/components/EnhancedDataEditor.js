@@ -417,6 +417,12 @@ const ITEM_CODE_SEPARATOR_FROM_MODE = {
 // Kept in sync with FW_EXPORT_VERSION_KEY in pages/Settings.js.
 const FW_EXPORT_VERSION_KEY = 'fw_default_export_version';
 const EXPORT_VERSION_4 = '4.0';
+// The hosts that are FactWise 4.0. Everything else - apps.factwise.io and the
+// 3.0 test build among them - is 3.0. A list rather than a guess because
+// nothing on the launch URL states a version: 4.0 sends an enterprise_id, but
+// it also copies that value into entity_id for 3.0's benefit, so no single
+// parameter separates them.
+const FACTWISE_40_HOSTS = ['factwise4.netlify.app'];
 const EXPORT_VERSION_3 = '3.0';
 
 const readDefaultExportVersion = () => {
@@ -444,7 +450,20 @@ const EnhancedDataEditor = () => {
     enterpriseId: factwiseEnterpriseId,
     apiUrl: factwiseApiUrl,
     token: factwiseToken,
+    fwOrigin: factwiseOrigin,
   } = useFactwise();
+  // Which FactWise embedded us. 3.0 and 4.0 both iframe this app, so only the
+  // parent's host tells them apart. Matched on hostname so a port, a path or a
+  // trailing slash cannot change the answer.
+  const isFactwise40Host = useMemo(() => {
+    try {
+      const host = new URL(String(factwiseOrigin || '')).hostname.toLowerCase();
+      return FACTWISE_40_HOSTS.includes(host);
+    } catch (_) {
+      // No origin, or not a URL: not a 4.0 launch, so the saved default decides.
+      return false;
+    }
+  }, [factwiseOrigin]);
   const synchronizer = useRef(null);
   const scrollContainerRef = useRef(null);
   const processingTemplateContext = useMemo(() => {
@@ -4567,7 +4586,20 @@ const EnhancedDataEditor = () => {
   // sheet - so there is nothing to choose: go straight to its preview, and ask
   // about the project afterwards instead.
   const openFactwiseExport = useCallback(() => {
-    if (readDefaultExportVersion() !== EXPORT_VERSION_4) {
+    // Launched by FactWise 4.0, the delivery is 4.0 - whatever the saved
+    // default says.
+    //
+    // Judged on the embedding host, not on `isEmbedded`: 3.0 iframes this app
+    // too, so "embedded" says nothing about which FactWise it is. fw_origin is
+    // the parent's own origin and is already trusted enough to validate
+    // postMessage senders.
+    //
+    // Worth overriding because the default lives in localStorage - per browser,
+    // per device. One person's leftover 3.0 decided the shape of a sheet handed
+    // to a 4.0 workspace, and nothing on screen said so. Which FactWise opened
+    // this run is a fact; the setting is a preference for runs with no such
+    // fact, and it still decides everything outside 4.0.
+    if (!isFactwise40Host && readDefaultExportVersion() !== EXPORT_VERSION_4) {
       setFactwiseExportDialogOpen(true);
       return;
     }
@@ -4575,7 +4607,7 @@ const EnhancedDataEditor = () => {
     // thing that decides whether a sheet can be imported, so running our item
     // and BOM rules here would only show a second, different opinion before it.
     openFactwisePreview('combined');
-  }, [runGuardedExport, openFactwisePreview]);
+  }, [runGuardedExport, openFactwisePreview, isFactwise40Host]);
 
   const handleExportSheetForEditing = useCallback(async () => {
     setExportingSheet(true);
