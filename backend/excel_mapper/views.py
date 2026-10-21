@@ -13796,7 +13796,18 @@ def column_rules(request):
     if not name:
         return Response({'success': False, 'error': 'A name is required'},
                         status=status.HTTP_400_BAD_REQUEST)
-    if not isinstance(rule, dict) or not rule.get('value_mode'):
+    # Two shapes live in this table. A Fill/Create Column rule is replayed
+    # against a session and needs a `value_mode` to mean anything. A BOM field
+    # pattern is a parser rule keyed by shape, written by
+    # save_bom_field_pattern_rule, and has never had one - so the check below
+    # rejected every pattern, and there was no way to put one back after it was
+    # deleted except by re-teaching the sheet it came from.
+    is_field_pattern = (
+        isinstance(rule, dict)
+        and str(rule.get('rule_type') or '').strip() == 'bom_field_pattern'
+        and (rule.get('shape') or rule.get('pattern_key'))
+    )
+    if not isinstance(rule, dict) or not (rule.get('value_mode') or is_field_pattern):
         return Response({'success': False, 'error': 'A rule with a value_mode is required'},
                         status=status.HTTP_400_BAD_REQUEST)
 

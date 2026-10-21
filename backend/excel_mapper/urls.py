@@ -166,6 +166,7 @@ from .bom_workflow_templates import (
 )
 from .bom_structure_patterns import (
     bom_structure_patterns,
+    bom_structure_pattern_detail,
     bom_structure_match,
     bom_structure_profile,
 )
@@ -290,6 +291,10 @@ urlpatterns = [
     path('agent/<str:conversation_id>/download/', agent_download, name='agent-download'),
     path('normaliser/<str:session_id>/resolve/', normaliser_resolve, name='normaliser-resolve'),
     path('bom/structures/', bom_structure_patterns, name='bom-structure-patterns'),
+    # Safe to sit above 'match/' and 'profile/': the int converter matches
+    # digits only, so a word-shaped segment can never be captured as an id.
+    path('bom/structures/<int:pattern_id>/', bom_structure_pattern_detail,
+         name='bom-structure-pattern-detail'),
     path('bom/structures/match/', bom_structure_match, name='bom-structure-match'),
     path('bom/structures/profile/', bom_structure_profile, name='bom-structure-profile'),
 

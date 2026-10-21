@@ -57,6 +57,28 @@ def bom_structure_patterns(request):
     }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
 
+@api_view(['DELETE'])
+def bom_structure_pattern_detail(request, pattern_id):
+    """Forget one learned structure.
+
+    A learned structure carries the roles AND the confirmed field patterns for
+    a sheet layout, and `bom_role_inference` merges that config in wholesale
+    whenever a new sheet matches its signature. So a structure learned from a
+    test run keeps answering for every sheet shaped like it, with its patterns
+    already applied and nothing left to review.
+
+    Deleting the ColumnRule copies does not reach this: they are a parallel
+    library read at apply time, while the auto-fill comes from here. Until now
+    there was no way to remove one at all - the endpoint listed and learned,
+    which left a bad lesson permanent.
+    """
+    deleted, _ = BomStructurePattern.objects.filter(id=pattern_id).delete()
+    if not deleted:
+        return Response({'success': False, 'error': 'No such structure'},
+                        status=status.HTTP_404_NOT_FOUND)
+    return Response({'success': True, 'deleted': deleted})
+
+
 @api_view(['POST'])
 def bom_structure_match(request):
     """Return saved source structures that resemble the current sheet."""
