@@ -113,6 +113,7 @@ class MouserClient:
                 'lifecycle': None,
                 'category': None,
                 'specs': '',
+                'manufacturer': '',
             }
             cache.set(cache_key, res, timeout=60 * 60 * 24)
             ProviderMpnCache.store_result('mouser', mpn_norm, res)
@@ -144,6 +145,7 @@ class MouserClient:
                 # options, not parametric specs - it has no parametric data on
                 # this endpoint. Carried anyway so the column says what Mouser
                 # knows rather than staying mysteriously blank.
+                'manufacturer': str(first_part.get('Manufacturer') or '').strip(),
                 'specs': format_provider_specs(
                     (attribute.get('AttributeName'), attribute.get('AttributeValue'))
                     for attribute in first_part.get('ProductAttributes') or []
@@ -160,6 +162,7 @@ class MouserClient:
                 'lifecycle': None,
                 'category': None,
                 'specs': '',
+                'manufacturer': '',
             }
             logger.debug(f"❌ MOUSER_VALIDATE: No match for {mpn_norm}")
 

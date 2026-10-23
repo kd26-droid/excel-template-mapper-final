@@ -166,3 +166,70 @@ def description_match_percent(sheet_text, provider_text):
         if any(_tokens_agree(token, other) for other in provider_tokens)
     )
     return int(round(100.0 * matched / len(sheet_tokens)))
+
+
+# --- manufacturer agreement -------------------------------------------------
+#: Company-form words that say nothing about which company it is. "WAGO" and
+#: "WAGO Corporation" are one manufacturer.
+_MANUFACTURER_SUFFIXES = {
+    'CORP', 'CORPORATION', 'INC', 'INCORPORATED', 'LTD', 'LIMITED', 'LLC',
+    'GMBH', 'CO', 'COMPANY', 'PLC', 'SA', 'AG', 'BV', 'NV', 'KK', 'PTE',
+    'PVT', 'PRIVATE', 'HOLDINGS', 'GROUP', 'INTERNATIONAL', 'INDUSTRIES',
+}
+
+#: Said in the cell when the sheet's chosen manufacturer column is empty. Not
+#: "No": we were never told what to check, which is a different answer from
+#: having checked and disagreed.
+MANUFACTURER_NOT_PROVIDED = 'No manufacturer provided'
+
+
+def _manufacturer_tokens(name):
+    out = []
+    current = []
+    for character in str(name or ''):
+        if character.isalnum():
+            current.append(character.upper())
+        elif current:
+            out.append(''.join(current))
+            current = []
+    if current:
+        out.append(''.join(current))
+    tokens = [token for token in out if token not in _MANUFACTURER_SUFFIXES]
+    # All suffix and nothing else is not a name; keep the original rather than
+    # reduce it to nothing.
+    return tokens or out
+
+
+def manufacturer_agrees(sheet_manufacturer, provider_manufacturer):
+    """'Yes', 'No', MANUFACTURER_NOT_PROVIDED, or '' when the provider is silent.
+
+    Blank beats a guess on the provider side: a part the provider never found
+    has not been judged, and writing "No" there reads as a contradiction it
+    never made.
+
+    Agreement is on words, not characters, because the same manufacturer is
+    written at several lengths - "WAGO" / "WAGO Corporation", "AVX" / "KYOCERA
+    AVX" after an acquisition. Either name's words being contained in the
+    other's is a match, which covers both without inventing an alias table.
+
+    One abbreviation is allowed: a single short word that begins the other's
+    first word, so "ST" matches "STMicroelectronics". It can be fooled - "ST"
+    would also accept "Stackpole" - but a BOM naming ST against a Stackpole
+    part number is a mismatch the MPN and description columns will show.
+    """
+    sheet_tokens = _manufacturer_tokens(sheet_manufacturer)
+    provider_tokens = _manufacturer_tokens(provider_manufacturer)
+    if not sheet_tokens:
+        return MANUFACTURER_NOT_PROVIDED
+    if not provider_tokens:
+        return ''
+    sheet_set, provider_set = set(sheet_tokens), set(provider_tokens)
+    if sheet_set <= provider_set or provider_set <= sheet_set:
+        return 'Yes'
+    if len(sheet_tokens) == 1 and len(sheet_tokens[0]) >= 2:
+        if provider_tokens[0].startswith(sheet_tokens[0]):
+            return 'Yes'
+    if len(provider_tokens) == 1 and len(provider_tokens[0]) >= 2:
+        if sheet_tokens[0].startswith(provider_tokens[0]):
+            return 'Yes'
+    return 'No'

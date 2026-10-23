@@ -2112,6 +2112,98 @@ const Settings = () => {
                   <Grid item xs={12}>
                     <Paper elevation={0} sx={{ p: 2.25, borderRadius: '14px', border: `1px solid ${t.border.subtle}`, bgcolor: t.surface.panel }}>
                       <Typography sx={{ fontSize: 16, fontWeight: 400, color: t.text.heading }}>
+                        Compare against the providers
+                      </Typography>
+                      <Typography sx={{ mt: 0.5, mb: 1.5, fontSize: 12.5, color: t.text.secondary }}>
+                        A provider can answer &quot;valid&quot; while describing a different part. These
+                        two checks say so, in each provider&apos;s own columns.
+                      </Typography>
+
+                      <FormControlLabel
+                        control={(
+                          <Switch
+                            size="small"
+                            checked={itemDirectoryDefaults.mpnCompareDescription !== false}
+                            onChange={(event) => handleItemDirectoryDefaultChange('mpnCompareDescription', event.target.checked)}
+                          />
+                        )}
+                        label={(
+                          <Box>
+                            <Typography sx={{ fontSize: 13.5, fontWeight: 500, color: t.text.heading }}>
+                              Compare description
+                            </Typography>
+                            <Typography sx={{ fontSize: 12, color: t.text.secondary }}>
+                              Adds &quot;Description Match %&quot; per provider &mdash; how much of your own
+                              description the provider confirms. 0% means the provider is describing
+                              something else.
+                            </Typography>
+                          </Box>
+                        )}
+                      />
+                      {itemDirectoryDefaults.mpnCompareDescription !== false && (
+                        <Box sx={{ mt: 1.25, mb: 2, maxWidth: 320 }}>
+                          <TextField
+                            select
+                            fullWidth
+                            size="small"
+                            label="Our description is in"
+                            value={itemDirectoryDefaults.mpnDescriptionColumn || 'Item name'}
+                            onChange={(event) => handleItemDirectoryDefaultChange('mpnDescriptionColumn', event.target.value)}
+                            sx={fieldSx}
+                            SelectProps={{ MenuProps: settingsMenuProps }}
+                          >
+                            {itemCodeSourceColumnOptions.map(option => (
+                              <MenuItem key={option} value={option}>{displayHeaderName(option, itemCodeSourceColumnOptions)}</MenuItem>
+                            ))}
+                          </TextField>
+                        </Box>
+                      )}
+
+                      <FormControlLabel
+                        control={(
+                          <Switch
+                            size="small"
+                            checked={itemDirectoryDefaults.mpnValidateManufacturer !== false}
+                            onChange={(event) => handleItemDirectoryDefaultChange('mpnValidateManufacturer', event.target.checked)}
+                          />
+                        )}
+                        label={(
+                          <Box>
+                            <Typography sx={{ fontSize: 13.5, fontWeight: 500, color: t.text.heading }}>
+                              Validate manufacturer
+                            </Typography>
+                            <Typography sx={{ fontSize: 12, color: t.text.secondary }}>
+                              Adds &quot;MFR Valid&quot; per provider &mdash; whether your manufacturer is the
+                              one that makes this part number. Reads Yes, No, or &quot;No manufacturer
+                              provided&quot;, and stays blank when the provider did not answer.
+                            </Typography>
+                          </Box>
+                        )}
+                      />
+                      {itemDirectoryDefaults.mpnValidateManufacturer !== false && (
+                        <Box sx={{ mt: 1.25, maxWidth: 320 }}>
+                          <TextField
+                            select
+                            fullWidth
+                            size="small"
+                            label="Our manufacturer is in"
+                            value={itemDirectoryDefaults.mpnManufacturerColumn || 'Tag_1'}
+                            onChange={(event) => handleItemDirectoryDefaultChange('mpnManufacturerColumn', event.target.value)}
+                            sx={fieldSx}
+                            SelectProps={{ MenuProps: settingsMenuProps }}
+                          >
+                            {itemCodeSourceColumnOptions.map(option => (
+                              <MenuItem key={option} value={option}>{displayHeaderName(option, itemCodeSourceColumnOptions)}</MenuItem>
+                            ))}
+                          </TextField>
+                        </Box>
+                      )}
+                    </Paper>
+                  </Grid>
+
+                  <Grid item xs={12}>
+                    <Paper elevation={0} sx={{ p: 2.25, borderRadius: '14px', border: `1px solid ${t.border.subtle}`, bgcolor: t.surface.panel }}>
+                      <Typography sx={{ fontSize: 16, fontWeight: 400, color: t.text.heading }}>
                         MPN validation rules
                       </Typography>
                       <Typography sx={{ mt: 0.5, mb: 2, fontSize: 12.5, color: t.text.secondary }}>

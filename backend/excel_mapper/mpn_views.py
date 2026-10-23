@@ -25,7 +25,7 @@ from .provider_credentials import (
 )
 from .views import get_session_consistent, save_session, apply_column_mappings, read_session_grid, write_session_grid
 
-from .services.provider_errors import description_match_percent
+from .services.provider_errors import description_match_percent, manufacturer_agrees
 
 logger = logging.getLogger(__name__)
 
@@ -2150,6 +2150,8 @@ def mpn_validate(request):
             # describing a different part; the percentage is what shows it.
             validation_columns.append('DigiKey Description')
             validation_columns.append('DigiKey Description Match %')
+            validation_columns.append('DigiKey Manufacturer')
+            validation_columns.append('DigiKey MFR Valid')
 
             # Only add category if there are valid results
             has_valid_results = any(r.get('valid') for r in results_map.values())
@@ -2169,7 +2171,8 @@ def mpn_validate(request):
         # run" instead of "checked nothing yet". Blank cells say the latter.
         if 'mouser' in selected_providers:
             mouser_columns = ['MPN valid (Mouser)', 'Mouser Status', 'MPNR', 'Mouser Canonical MPN',
-                              'Mouser Description', 'Mouser Description Match %']
+                              'Mouser Description', 'Mouser Description Match %',
+                              'Mouser Manufacturer', 'Mouser MFR Valid']
             has_valid_mouser_results = any(r.get('valid') for r in mouser_results_map.values())
             if has_valid_mouser_results:
                 mouser_columns.append('Mouser Category')
@@ -2180,7 +2183,8 @@ def mpn_validate(request):
         if 'element14' in selected_providers:
             element14_columns = ['MPN valid (Element14)', 'Element14 Status', 'Element14 Part Number',
                                  'Element14 Canonical MPN', 'Element14 Description',
-                                 'Element14 Description Match %']
+                                 'Element14 Description Match %',
+                                 'Element14 Manufacturer', 'Element14 MFR Valid']
             has_valid_element14_results = any(r.get('valid') for r in element14_results_map.values())
             if has_valid_element14_results:
                 element14_columns.append('Element14 Category')
@@ -2205,6 +2209,12 @@ def mpn_validate(request):
             'Mouser Description Match %': ('Mouser Description', 'Mouser Canonical MPN'),
             'Element14 Description': ('Element14 Canonical MPN', 'Element14 Part Number'),
             'Element14 Description Match %': ('Element14 Description', 'Element14 Canonical MPN'),
+            'DigiKey Manufacturer': ('DigiKey Description Match %', 'DigiKey Canonical MPN'),
+            'DigiKey MFR Valid': ('DigiKey Manufacturer', 'DigiKey Description Match %'),
+            'Mouser Manufacturer': ('Mouser Description Match %', 'Mouser Canonical MPN'),
+            'Mouser MFR Valid': ('Mouser Manufacturer', 'Mouser Description Match %'),
+            'Element14 Manufacturer': ('Element14 Description Match %', 'Element14 Canonical MPN'),
+            'Element14 MFR Valid': ('Element14 Manufacturer', 'Element14 Description Match %'),
             'DigiKey Specifications': (
                 'DigiKey Category', 'DigiKey Canonical MPN', 'DigiKey Part Number'),
             'Mouser Specifications': (
@@ -2238,29 +2248,108 @@ def mpn_validate(request):
         logger.info(f"✅ MPN_VALIDATION_COLUMNS: Added {len(columns_added)} new columns: {columns_added}")
         logger.info(f"📋 MPN_VALIDATION_HEADERS: Total headers after adding columns ({len(headers)}): {headers}")
 
-        # Where the sheet's own description lives. None when the sheet has no
-        # Item name column at all, in which case there is nothing to compare.
-        item_name_idx = headers.index('Item name') if 'Item name' in headers else None
+        # Which of the sheet's own columns the two comparisons read, and whether
+        # they run at all.
+        #
+        # Neither value is fixed: a description is usually Item name but can be
+        # Description or a notes column, and a manufacturer is almost never in
+        # a column called Manufacturer - these sheets keep it in Tag 1. Both
+        # are chosen in Settings; the defaults below are what most sheets use.
+        #
+        # On unless the entity turned them off. They only add columns - no row
+        # value is rewritten - so there is nothing to opt in to.
+        compare_descriptions = True
+        validate_manufacturer = True
+        description_column = 'Item name'
+        manufacturer_column = 'Tag_1'
+        try:
+            entity_for_compare = (
+                str(request.data.get('entity_name') or '').strip()
+                or str(request.headers.get('X-Entity-Name') or '').strip()
+                or str((info or {}).get('editor_defaults_entity_name') or '').strip()
+                or str((info or {}).get('entity_name') or '').strip()
+            )
+            from .editor_defaults import get_editor_defaults_for_entity
+            compare_defaults = (
+                getattr(get_editor_defaults_for_entity(entity_for_compare),
+                        'ui_defaults', None) or {}
+            )
+            if 'mpnCompareDescription' in compare_defaults:
+                compare_descriptions = bool(compare_defaults.get('mpnCompareDescription'))
+            if 'mpnValidateManufacturer' in compare_defaults:
+                validate_manufacturer = bool(compare_defaults.get('mpnValidateManufacturer'))
+            description_column = (
+                str(compare_defaults.get('mpnDescriptionColumn') or '').strip()
+                or description_column)
+            manufacturer_column = (
+                str(compare_defaults.get('mpnManufacturerColumn') or '').strip()
+                or manufacturer_column)
+        except Exception as compare_settings_error:
+            # A settings read that fails must not lose the validation run; the
+            # defaults above are the same answer it would have given.
+            logger.warning("Comparison settings unread: %s", compare_settings_error)
 
-        def _write_description_pair(row, provider_label, provider_description):
-            """Fill '<provider> Description' and its match percentage.
+        def _column_index(name):
+            """The sheet column by that name, however it is spelt there.
 
-            Compared against Item name as the SHEET has it, which is why this
-            runs before the autofill further down: autofill copies a provider's
-            description into a blank Item name, and comparing that back to the
-            same description would report a confident 100% on a row nobody has
-            actually described.
+            Settings stores one spelling and a sheet may carry another - "Tag 1"
+            against "Tag_1" is the usual pair - so the fallback ignores spacing
+            and case rather than silently comparing against nothing.
             """
-            text_column = '%s Description' % provider_label
-            score_column = '%s Description Match %%' % provider_label
-            if text_column in headers:
-                row[headers.index(text_column)] = provider_description or ''
-            if score_column in headers:
-                sheet_name = ''
-                if item_name_idx is not None and item_name_idx < len(row):
-                    sheet_name = str(row[item_name_idx] or '').strip()
-                score = description_match_percent(sheet_name, provider_description)
-                row[headers.index(score_column)] = '' if score is None else '%d%%' % score
+            if not name:
+                return None
+            if name in headers:
+                return headers.index(name)
+            flat = name.replace(' ', '').replace('_', '').lower()
+            for position, header in enumerate(headers):
+                if str(header).replace(' ', '').replace('_', '').lower() == flat:
+                    return position
+            return None
+
+        description_idx = _column_index(description_column)
+        manufacturer_idx = _column_index(manufacturer_column)
+        logger.info(
+            "MPN comparisons: description=%s (column %r -> %s), manufacturer=%s (column %r -> %s)",
+            compare_descriptions, description_column, description_idx,
+            validate_manufacturer, manufacturer_column, manufacturer_idx,
+        )
+
+        def _write_description_pair(row, provider_label, result):
+            """Fill the provider's description, manufacturer and the two verdicts.
+
+            Both comparisons read the sheet through the columns Settings names,
+            because a description does not always live in Item name and a
+            manufacturer almost never does - these sheets keep it in Tag 1.
+
+            This runs before the Item name autofill further down. Autofill
+            copies a provider's description into a blank Item name, so
+            comparing afterwards would report a confident hundred percent on a
+            row that was only ever filled in from the thing being compared.
+            """
+            provider_description = str((result or {}).get('description') or '')
+            provider_manufacturer = str((result or {}).get('manufacturer') or '')
+
+            def put(suffix, value):
+                column = '%s %s' % (provider_label, suffix)
+                if column in headers:
+                    row[headers.index(column)] = value
+
+            def sheet_value(index):
+                if index is None or index >= len(row):
+                    return ''
+                return str(row[index] or '').strip()
+
+            put('Description', provider_description)
+            if compare_descriptions:
+                score = description_match_percent(
+                    sheet_value(description_idx), provider_description)
+                put('Description Match %', '' if score is None else '%d%%' % score)
+
+            put('Manufacturer', provider_manufacturer)
+            if validate_manufacturer:
+                put('MFR Valid', manufacturer_agrees(
+                    sheet_value(manufacturer_idx), provider_manufacturer))
+
 
         # Update rows with validation data
         logger.info(f"🔍 MPN_DATA_POPULATION: Starting to populate {len(dict_rows)} rows with DigiKey data from {len(results_map)} results")
@@ -2325,8 +2414,7 @@ def mpn_validate(request):
                     if 'DigiKey Specifications' in headers:
                         rows[i][headers.index('DigiKey Specifications')] = (
                             validation_result.get('specs') or '')
-                    _write_description_pair(
-                        rows[i], 'DigiKey', validation_result.get('description') or '')
+                    _write_description_pair(rows[i], 'DigiKey', validation_result)
                 else:
                     # For invalid MPNs, show empty/unknown values
                     rows[i][mpn_status_idx] = 'Unknown'
@@ -2345,7 +2433,7 @@ def mpn_validate(request):
                         rows[i][category_idx] = ''
                     if 'DigiKey Specifications' in headers:
                         rows[i][headers.index('DigiKey Specifications')] = ''
-                    _write_description_pair(rows[i], 'DigiKey', '')
+                    _write_description_pair(rows[i], 'DigiKey', {})
     
             # Populate Mouser data if we have Mouser results
             if mouser_results_map and 'MPN valid (Mouser)' in headers:
@@ -2369,7 +2457,7 @@ def mpn_validate(request):
                         rows[i][mouser_cat_idx] = ''
                     if mouser_specs_idx is not None:
                         rows[i][mouser_specs_idx] = ''
-                    _write_description_pair(rows[i], 'Mouser', '')
+                    _write_description_pair(rows[i], 'Mouser', {})
                 else:
                     mouser_is_valid = mouser_result.get('valid', False)
                     rows[i][mouser_valid_idx] = 'Yes' if mouser_is_valid else 'No'
@@ -2387,8 +2475,7 @@ def mpn_validate(request):
                         if 'Mouser Specifications' in headers:
                             rows[i][headers.index('Mouser Specifications')] = (
                                 mouser_result.get('specs') or '')
-                        _write_description_pair(
-                            rows[i], 'Mouser', mouser_result.get('description') or '')
+                        _write_description_pair(rows[i], 'Mouser', mouser_result)
                     else:
                         # For invalid MPNs, show empty/unknown values
                         rows[i][mouser_status_idx] = 'Unknown'
@@ -2401,7 +2488,7 @@ def mpn_validate(request):
                             rows[i][mouser_category_idx] = ''
                         if mouser_specs_idx is not None:
                             rows[i][mouser_specs_idx] = ''
-                        _write_description_pair(rows[i], 'Mouser', '')
+                        _write_description_pair(rows[i], 'Mouser', {})
 
             # Populate Element14 data if we have Element14 results
             if element14_results_map and 'MPN valid (Element14)' in headers:
@@ -2423,7 +2510,7 @@ def mpn_validate(request):
                         rows[i][element14_cat_idx] = ''
                     if element14_specs_idx is not None:
                         rows[i][element14_specs_idx] = ''
-                    _write_description_pair(rows[i], 'Element14', '')
+                    _write_description_pair(rows[i], 'Element14', {})
                 else:
                     element14_is_valid = element14_result.get('valid', False)
                     rows[i][element14_valid_idx] = 'Yes' if element14_is_valid else 'No'
@@ -2436,8 +2523,7 @@ def mpn_validate(request):
                             rows[i][element14_cat_idx] = element14_result.get('category') or ''
                         if element14_specs_idx is not None:
                             rows[i][element14_specs_idx] = element14_result.get('specs') or ''
-                        _write_description_pair(
-                            rows[i], 'Element14', element14_result.get('description') or '')
+                        _write_description_pair(rows[i], 'Element14', element14_result)
                     else:
                         rows[i][element14_status_idx] = 'Unknown'
                         rows[i][element14_part_idx] = ''
@@ -2446,7 +2532,7 @@ def mpn_validate(request):
                             rows[i][element14_cat_idx] = ''
                         if element14_specs_idx is not None:
                             rows[i][element14_specs_idx] = ''
-                        _write_description_pair(rows[i], 'Element14', '')
+                        _write_description_pair(rows[i], 'Element14', {})
 
         # Fill a blank Item name from whichever source described the part.
         #

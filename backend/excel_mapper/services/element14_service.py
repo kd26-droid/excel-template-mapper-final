@@ -123,6 +123,7 @@ class Element14Client:
                 'lifecycle': None,
                 'category': None,
                 'specs': '',
+                'manufacturer': '',
             }
             cache.set(cache_key, res, timeout=60 * 60 * 24)
             ProviderMpnCache.store_result('element14', mpn_norm, res, self.store_id)
@@ -162,6 +163,8 @@ class Element14Client:
             'category': category if valid else None,
             # Element14 puts compliance and housekeeping flags in the same
             # array as the real specs, so they are dropped by name.
+            # brandName is the manufacturer; vendorName is who sells it.
+            'manufacturer': str(first.get('brandName') or '').strip(),
             'specs': format_provider_specs(
                 (attribute.get('attributeLabel'), attribute.get('attributeValue'))
                 for attribute in first.get('attributes') or []

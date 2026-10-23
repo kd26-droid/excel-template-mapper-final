@@ -668,6 +668,9 @@ class DigiKeyClient:
                         'category': category_info,
                         'description': product_description,
                         'specs': product_specs,
+                        'manufacturer': str(
+                            ((matched_product or {}).get('Manufacturer') or {}).get('Name')
+                            or '').strip(),
                         'site': self.site,
                         'lang': self.lang,
                         'currency': self.currency,
@@ -681,6 +684,7 @@ class DigiKeyClient:
                         'lifecycle': None,
                         'category': {'name': None, 'id': None, 'parent_id': None, 'path': None},
                         'specs': '',
+                        'manufacturer': '',
                         'site': self.site,
                         'lang': self.lang,
                         'currency': self.currency,
@@ -727,6 +731,7 @@ class DigiKeyClient:
                         'lifecycle': None,
                         'category': {'name': None, 'id': None, 'parent_id': None, 'path': None},
                         'specs': '',
+                        'manufacturer': '',
                         'site': self.site,
                         'lang': self.lang,
                         'currency': self.currency,
