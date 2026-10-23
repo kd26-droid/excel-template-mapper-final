@@ -2148,6 +2148,12 @@ def mpn_validate(request):
             has_valid_results = any(r.get('valid') for r in results_map.values())
             if has_valid_results:
                 validation_columns.append('DigiKey Category')
+                # The parametric list as the provider states it. One column per
+                # provider rather than one merged column: the three name the same
+                # spec differently (Digi-Key "Voltage - Rated", Element14
+                # "Voltage(DC)") and sometimes disagree on the value, so merging
+                # them would either duplicate every spec or silently pick a winner.
+                validation_columns.append('DigiKey Specifications')
 
         # Keyed off the provider being selected, not off it having returned
         # something — the same rule Digi-Key uses above. Gating on results meant a
@@ -2159,6 +2165,7 @@ def mpn_validate(request):
             has_valid_mouser_results = any(r.get('valid') for r in mouser_results_map.values())
             if has_valid_mouser_results:
                 mouser_columns.append('Mouser Category')
+                mouser_columns.append('Mouser Specifications')
             validation_columns.extend(mouser_columns)
             logger.info(f"📊 MOUSER_VALIDATION_COLUMNS: Adding {len(mouser_columns)} Mouser columns: {mouser_columns}")
 
@@ -2167,17 +2174,50 @@ def mpn_validate(request):
             has_valid_element14_results = any(r.get('valid') for r in element14_results_map.values())
             if has_valid_element14_results:
                 element14_columns.append('Element14 Category')
+                element14_columns.append('Element14 Specifications')
             validation_columns.extend(element14_columns)
             logger.info(f"ELEMENT14_VALIDATION_COLUMNS: Adding {len(element14_columns)} Element14 columns: {element14_columns}")
 
         logger.info(f"📊 MPN_VALIDATION_COLUMNS: Adding {len(validation_columns)} columns: {validation_columns}")
 
-        # Add columns if they don't exist
+        # Where a newly added column belongs, in preference order.
+        #
+        # Appending puts it at the far right of the sheet. That is fine on a
+        # first run, where the whole provider block is new and arrives in
+        # order - but on a re-run the other columns are already there, so only
+        # the new one is appended and it lands a dozen columns from the
+        # provider it describes. Anchored instead, so it sits in its own
+        # provider's cluster either way.
+        column_belongs_after = {
+            'DigiKey Specifications': (
+                'DigiKey Category', 'DigiKey Canonical MPN', 'DigiKey Part Number'),
+            'Mouser Specifications': (
+                'Mouser Category', 'Mouser Canonical MPN', 'MPNR'),
+            'Element14 Specifications': (
+                'Element14 Category', 'Element14 Canonical MPN', 'Element14 Part Number'),
+        }
+
+        # Add columns if they do not exist
         columns_added = []
         for col in validation_columns:
-            if col not in headers:
+            if col in headers:
+                continue
+            position = None
+            for anchor in column_belongs_after.get(col) or ():
+                if anchor in headers:
+                    position = headers.index(anchor) + 1
+                    break
+            if position is None:
                 headers.append(col)
-                columns_added.append(col)
+            else:
+                headers.insert(position, col)
+                # Rows are positional, so each one needs a blank at the same
+                # index or every value to its right shifts by one.
+                for row in rows:
+                    while len(row) < position:
+                        row.append('')
+                    row.insert(position, '')
+            columns_added.append(col)
 
         logger.info(f"✅ MPN_VALIDATION_COLUMNS: Added {len(columns_added)} new columns: {columns_added}")
         logger.info(f"📋 MPN_VALIDATION_HEADERS: Total headers after adding columns ({len(headers)}): {headers}")
@@ -2242,6 +2282,9 @@ def mpn_validate(request):
                         category_idx = headers.index('DigiKey Category')
                         category_info = validation_result.get('category', {}) or {}
                         rows[i][category_idx] = category_info.get('name') or ''
+                    if 'DigiKey Specifications' in headers:
+                        rows[i][headers.index('DigiKey Specifications')] = (
+                            validation_result.get('specs') or '')
                 else:
                     # For invalid MPNs, show empty/unknown values
                     rows[i][mpn_status_idx] = 'Unknown'
@@ -2258,6 +2301,8 @@ def mpn_validate(request):
                     if 'DigiKey Category' in headers:
                         category_idx = headers.index('DigiKey Category')
                         rows[i][category_idx] = ''
+                    if 'DigiKey Specifications' in headers:
+                        rows[i][headers.index('DigiKey Specifications')] = ''
     
             # Populate Mouser data if we have Mouser results
             if mouser_results_map and 'MPN valid (Mouser)' in headers:
@@ -2270,6 +2315,7 @@ def mpn_validate(request):
                 mpnr_idx = headers.index('MPNR')
                 mouser_canonical_idx = headers.index('Mouser Canonical MPN')
                 mouser_cat_idx = headers.index('Mouser Category') if 'Mouser Category' in headers else None
+                mouser_specs_idx = headers.index('Mouser Specifications') if 'Mouser Specifications' in headers else None
 
                 if not mouser_result:
                     # This MPN's Mouser lookup hasn't been warmed yet — keep the Mouser
@@ -2278,6 +2324,8 @@ def mpn_validate(request):
                         rows[i][ix] = ''
                     if mouser_cat_idx is not None:
                         rows[i][mouser_cat_idx] = ''
+                    if mouser_specs_idx is not None:
+                        rows[i][mouser_specs_idx] = ''
                 else:
                     mouser_is_valid = mouser_result.get('valid', False)
                     rows[i][mouser_valid_idx] = 'Yes' if mouser_is_valid else 'No'
@@ -2292,6 +2340,9 @@ def mpn_validate(request):
                         if 'Mouser Category' in headers:
                             mouser_category_idx = headers.index('Mouser Category')
                             rows[i][mouser_category_idx] = mouser_result.get('category') or ''
+                        if 'Mouser Specifications' in headers:
+                            rows[i][headers.index('Mouser Specifications')] = (
+                                mouser_result.get('specs') or '')
                     else:
                         # For invalid MPNs, show empty/unknown values
                         rows[i][mouser_status_idx] = 'Unknown'
@@ -2302,6 +2353,8 @@ def mpn_validate(request):
                         if 'Mouser Category' in headers:
                             mouser_category_idx = headers.index('Mouser Category')
                             rows[i][mouser_category_idx] = ''
+                        if mouser_specs_idx is not None:
+                            rows[i][mouser_specs_idx] = ''
 
             # Populate Element14 data if we have Element14 results
             if element14_results_map and 'MPN valid (Element14)' in headers:
@@ -2314,12 +2367,15 @@ def mpn_validate(request):
                 element14_part_idx = headers.index('Element14 Part Number')
                 element14_canonical_idx = headers.index('Element14 Canonical MPN')
                 element14_cat_idx = headers.index('Element14 Category') if 'Element14 Category' in headers else None
+                element14_specs_idx = headers.index('Element14 Specifications') if 'Element14 Specifications' in headers else None
 
                 if not element14_result:
                     for ix in [element14_valid_idx, element14_status_idx, element14_part_idx, element14_canonical_idx]:
                         rows[i][ix] = ''
                     if element14_cat_idx is not None:
                         rows[i][element14_cat_idx] = ''
+                    if element14_specs_idx is not None:
+                        rows[i][element14_specs_idx] = ''
                 else:
                     element14_is_valid = element14_result.get('valid', False)
                     rows[i][element14_valid_idx] = 'Yes' if element14_is_valid else 'No'
@@ -2330,12 +2386,16 @@ def mpn_validate(request):
                         rows[i][element14_canonical_idx] = element14_result.get('canonical_mpn') or ''
                         if element14_cat_idx is not None:
                             rows[i][element14_cat_idx] = element14_result.get('category') or ''
+                        if element14_specs_idx is not None:
+                            rows[i][element14_specs_idx] = element14_result.get('specs') or ''
                     else:
                         rows[i][element14_status_idx] = 'Unknown'
                         rows[i][element14_part_idx] = ''
                         rows[i][element14_canonical_idx] = ''
                         if element14_cat_idx is not None:
                             rows[i][element14_cat_idx] = ''
+                        if element14_specs_idx is not None:
+                            rows[i][element14_specs_idx] = ''
 
         # Fill a blank Item name from whichever source described the part.
         #

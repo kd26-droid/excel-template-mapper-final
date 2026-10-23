@@ -8,7 +8,7 @@ import re
 import requests
 from django.core.cache import cache
 
-from .provider_errors import ProviderUnavailable, classify_http_failure
+from .provider_errors import ProviderUnavailable, classify_http_failure, format_provider_specs, ELEMENT14_NON_SPEC_LABELS
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,10 @@ class Element14Client:
             'storeInfo.id': self.store_id,
             'resultsSettings.offset': 0,
             'resultsSettings.numberOfResults': 10,
-            'resultsSettings.responseGroup': 'medium',
+            # 'large', not 'medium': same call and same quota, but it is the only
+            # response group that carries attributes[] - the parametric
+            # specs - along with countryOfOrigin and the product image.
+            'resultsSettings.responseGroup': 'large',
             'callInfo.responseDataFormat': 'json',
             'callInfo.apiKey': self.api_key,
         }
@@ -93,12 +96,16 @@ class Element14Client:
         cache_key = f"element14:mpn:{self.store_id}:{mpn_norm}"
         from ..models import ProviderMpnCache
         persistent = ProviderMpnCache.get_cached_result('element14', mpn_norm, self.store_id)
-        if persistent is not None:
+            # A cached answer from before specs were collected cannot answer
+            # the question now being asked, so it is a miss, not a hit. Re-fetched
+            # once per MPN as each is next used, rather than wiping the cache and
+            # paying for every part again at once.
+        if persistent is not None and 'specs' in persistent:
             cache.set(cache_key, persistent, timeout=60 * 60 * 24)
             return persistent
 
         cached = cache.get(cache_key)
-        if cached:
+        if cached and 'specs' in cached:
             ProviderMpnCache.store_result('element14', mpn_norm, cached, self.store_id)
             return cached
 
@@ -115,6 +122,7 @@ class Element14Client:
                 'element14_part_number': None,
                 'lifecycle': None,
                 'category': None,
+                'specs': '',
             }
             cache.set(cache_key, res, timeout=60 * 60 * 24)
             ProviderMpnCache.store_result('element14', mpn_norm, res, self.store_id)
@@ -152,6 +160,14 @@ class Element14Client:
                 'discontinued': None,
             } if valid else None,
             'category': category if valid else None,
+            # Element14 puts compliance and housekeeping flags in the same
+            # array as the real specs, so they are dropped by name.
+            'specs': format_provider_specs(
+                (attribute.get('attributeLabel'), attribute.get('attributeValue'))
+                for attribute in first.get('attributes') or []
+                if str(attribute.get('attributeLabel') or '').strip().lower()
+                not in ELEMENT14_NON_SPEC_LABELS
+            ),
         }
         cache.set(cache_key, res, timeout=60 * 60 * 24)
         ProviderMpnCache.store_result('element14', mpn_norm, res, self.store_id)

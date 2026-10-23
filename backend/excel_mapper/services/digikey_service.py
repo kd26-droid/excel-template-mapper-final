@@ -18,6 +18,7 @@ from django.utils import timezone
 from django.core.cache import cache
 
 from ..models import MpnOAuthToken
+from .provider_errors import format_provider_specs
 
 logger = logging.getLogger(__name__)
 
@@ -570,6 +571,13 @@ class DigiKeyClient:
             uniq.keys(), manufacturer_id=manufacturer_id, site=self.site,
             lang=self.lang, currency=self.currency
         )
+        # An entry cached before specs were collected cannot answer the question
+        # now being asked, so it is a miss. Re-fetched once per MPN as each is
+        # next used, rather than wiping the cache and paying for every part again.
+        persistent_results = {
+            mpn: entry for mpn, entry in (persistent_results or {}).items()
+            if isinstance(entry, dict) and 'specs' in entry
+        }
         results.update(persistent_results)
         cache_hits = len(persistent_results)
 
@@ -582,7 +590,7 @@ class DigiKeyClient:
             # Fall back to short-term Django cache
             cache_key = self._cache_key(mpn_norm, manufacturer_id)
             django_cached = cache.get(cache_key)
-            if django_cached:
+            if django_cached and 'specs' in django_cached:
                 results[mpn_norm] = django_cached
                 cache_hits += 1
                 # Also store in global cache for future use
@@ -643,6 +651,13 @@ class DigiKeyClient:
                     elif isinstance(description_block, str):
                         product_description = description_block.strip()
 
+                # The parametric list, in the order Digi-Key sends it -
+                # capacitance before packaging, because that is its own ranking.
+                product_specs = format_provider_specs(
+                    (parameter.get('ParameterText'), parameter.get('ValueText'))
+                    for parameter in (matched_product or {}).get('Parameters') or []
+                )
+
                 if valid:
                     res = {
                         'valid': True,
@@ -652,6 +667,7 @@ class DigiKeyClient:
                         'lifecycle': lifecycle,
                         'category': category_info,
                         'description': product_description,
+                        'specs': product_specs,
                         'site': self.site,
                         'lang': self.lang,
                         'currency': self.currency,
@@ -664,6 +680,7 @@ class DigiKeyClient:
                         'dkpn': None,
                         'lifecycle': None,
                         'category': {'name': None, 'id': None, 'parent_id': None, 'path': None},
+                        'specs': '',
                         'site': self.site,
                         'lang': self.lang,
                         'currency': self.currency,
@@ -709,6 +726,7 @@ class DigiKeyClient:
                         'dkpn': None,
                         'lifecycle': None,
                         'category': {'name': None, 'id': None, 'parent_id': None, 'path': None},
+                        'specs': '',
                         'site': self.site,
                         'lang': self.lang,
                         'currency': self.currency,

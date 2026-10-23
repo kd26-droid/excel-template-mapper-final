@@ -7,7 +7,7 @@ import logging
 import requests
 from django.core.cache import cache
 
-from .provider_errors import ProviderUnavailable, classify_http_failure
+from .provider_errors import ProviderUnavailable, classify_http_failure, format_provider_specs
 
 logger = logging.getLogger(__name__)
 
@@ -79,14 +79,18 @@ class MouserClient:
         mpn_norm = self.normalize_mpn(mpn)
         from ..models import ProviderMpnCache
         persistent = ProviderMpnCache.get_cached_result('mouser', mpn_norm)
-        if persistent is not None:
+            # A cached answer from before specs were collected cannot answer
+            # the question now being asked, so it is a miss, not a hit. Re-fetched
+            # once per MPN as each is next used, rather than wiping the cache and
+            # paying for every part again at once.
+        if persistent is not None and 'specs' in persistent:
             cache.set(f"mouser:mpn:{mpn_norm}", persistent, timeout=60 * 60 * 24)
             return persistent
 
         # Check cache first
         cache_key = f"mouser:mpn:{mpn_norm}"
         cached = cache.get(cache_key)
-        if cached:
+        if cached and 'specs' in cached:
             ProviderMpnCache.store_result('mouser', mpn_norm, cached)
             logger.debug(f"💾 MOUSER_CACHE: HIT for {mpn_norm}")
             return cached
@@ -107,7 +111,8 @@ class MouserClient:
                 'all_canonical_mpns': [],
                 'mouser_part_number': None,
                 'lifecycle': None,
-                'category': None
+                'category': None,
+                'specs': '',
             }
             cache.set(cache_key, res, timeout=60 * 60 * 24)
             ProviderMpnCache.store_result('mouser', mpn_norm, res)
@@ -134,7 +139,15 @@ class MouserClient:
                     'endOfLife': None,  # Mouser doesn't provide this
                     'discontinued': None
                 },
-                'category': first_part.get('Category')
+                'category': first_part.get('Category'),
+                # Mouser's ProductAttributes are packaging and pack-size
+                # options, not parametric specs - it has no parametric data on
+                # this endpoint. Carried anyway so the column says what Mouser
+                # knows rather than staying mysteriously blank.
+                'specs': format_provider_specs(
+                    (attribute.get('AttributeName'), attribute.get('AttributeValue'))
+                    for attribute in first_part.get('ProductAttributes') or []
+                ),
             }
             logger.debug(f"✅ MOUSER_VALIDATE: Valid MPN {mpn_norm} -> {res['canonical_mpn']}")
         else:
@@ -145,7 +158,8 @@ class MouserClient:
                 'all_canonical_mpns': [],
                 'mouser_part_number': None,
                 'lifecycle': None,
-                'category': None
+                'category': None,
+                'specs': '',
             }
             logger.debug(f"❌ MOUSER_VALIDATE: No match for {mpn_norm}")
 
