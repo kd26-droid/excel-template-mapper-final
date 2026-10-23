@@ -25,6 +25,8 @@ from .provider_credentials import (
 )
 from .views import get_session_consistent, save_session, apply_column_mappings, read_session_grid, write_session_grid
 
+from .services.provider_errors import description_match_percent
+
 logger = logging.getLogger(__name__)
 
 #: The one column that answers "can this part be bought?" across every source.
@@ -2143,6 +2145,11 @@ def mpn_validate(request):
 
             # For canonical MPNs, only add one column (no multiple columns for invalid data)
             validation_columns.append('DigiKey Canonical MPN')
+            # What the provider says this part is, and how much of our own
+            # Item name it confirms. A provider can answer "valid" while
+            # describing a different part; the percentage is what shows it.
+            validation_columns.append('DigiKey Description')
+            validation_columns.append('DigiKey Description Match %')
 
             # Only add category if there are valid results
             has_valid_results = any(r.get('valid') for r in results_map.values())
@@ -2161,7 +2168,8 @@ def mpn_validate(request):
         # disappeared from the sheet entirely, which reads as "never part of this
         # run" instead of "checked nothing yet". Blank cells say the latter.
         if 'mouser' in selected_providers:
-            mouser_columns = ['MPN valid (Mouser)', 'Mouser Status', 'MPNR', 'Mouser Canonical MPN']
+            mouser_columns = ['MPN valid (Mouser)', 'Mouser Status', 'MPNR', 'Mouser Canonical MPN',
+                              'Mouser Description', 'Mouser Description Match %']
             has_valid_mouser_results = any(r.get('valid') for r in mouser_results_map.values())
             if has_valid_mouser_results:
                 mouser_columns.append('Mouser Category')
@@ -2170,7 +2178,9 @@ def mpn_validate(request):
             logger.info(f"📊 MOUSER_VALIDATION_COLUMNS: Adding {len(mouser_columns)} Mouser columns: {mouser_columns}")
 
         if 'element14' in selected_providers:
-            element14_columns = ['MPN valid (Element14)', 'Element14 Status', 'Element14 Part Number', 'Element14 Canonical MPN']
+            element14_columns = ['MPN valid (Element14)', 'Element14 Status', 'Element14 Part Number',
+                                 'Element14 Canonical MPN', 'Element14 Description',
+                                 'Element14 Description Match %']
             has_valid_element14_results = any(r.get('valid') for r in element14_results_map.values())
             if has_valid_element14_results:
                 element14_columns.append('Element14 Category')
@@ -2189,6 +2199,12 @@ def mpn_validate(request):
         # provider it describes. Anchored instead, so it sits in its own
         # provider's cluster either way.
         column_belongs_after = {
+            'DigiKey Description': ('DigiKey Canonical MPN', 'DigiKey Part Number'),
+            'DigiKey Description Match %': ('DigiKey Description', 'DigiKey Canonical MPN'),
+            'Mouser Description': ('Mouser Canonical MPN', 'MPNR'),
+            'Mouser Description Match %': ('Mouser Description', 'Mouser Canonical MPN'),
+            'Element14 Description': ('Element14 Canonical MPN', 'Element14 Part Number'),
+            'Element14 Description Match %': ('Element14 Description', 'Element14 Canonical MPN'),
             'DigiKey Specifications': (
                 'DigiKey Category', 'DigiKey Canonical MPN', 'DigiKey Part Number'),
             'Mouser Specifications': (
@@ -2221,6 +2237,30 @@ def mpn_validate(request):
 
         logger.info(f"✅ MPN_VALIDATION_COLUMNS: Added {len(columns_added)} new columns: {columns_added}")
         logger.info(f"📋 MPN_VALIDATION_HEADERS: Total headers after adding columns ({len(headers)}): {headers}")
+
+        # Where the sheet's own description lives. None when the sheet has no
+        # Item name column at all, in which case there is nothing to compare.
+        item_name_idx = headers.index('Item name') if 'Item name' in headers else None
+
+        def _write_description_pair(row, provider_label, provider_description):
+            """Fill '<provider> Description' and its match percentage.
+
+            Compared against Item name as the SHEET has it, which is why this
+            runs before the autofill further down: autofill copies a provider's
+            description into a blank Item name, and comparing that back to the
+            same description would report a confident 100% on a row nobody has
+            actually described.
+            """
+            text_column = '%s Description' % provider_label
+            score_column = '%s Description Match %%' % provider_label
+            if text_column in headers:
+                row[headers.index(text_column)] = provider_description or ''
+            if score_column in headers:
+                sheet_name = ''
+                if item_name_idx is not None and item_name_idx < len(row):
+                    sheet_name = str(row[item_name_idx] or '').strip()
+                score = description_match_percent(sheet_name, provider_description)
+                row[headers.index(score_column)] = '' if score is None else '%d%%' % score
 
         # Update rows with validation data
         logger.info(f"🔍 MPN_DATA_POPULATION: Starting to populate {len(dict_rows)} rows with DigiKey data from {len(results_map)} results")
@@ -2285,6 +2325,8 @@ def mpn_validate(request):
                     if 'DigiKey Specifications' in headers:
                         rows[i][headers.index('DigiKey Specifications')] = (
                             validation_result.get('specs') or '')
+                    _write_description_pair(
+                        rows[i], 'DigiKey', validation_result.get('description') or '')
                 else:
                     # For invalid MPNs, show empty/unknown values
                     rows[i][mpn_status_idx] = 'Unknown'
@@ -2303,6 +2345,7 @@ def mpn_validate(request):
                         rows[i][category_idx] = ''
                     if 'DigiKey Specifications' in headers:
                         rows[i][headers.index('DigiKey Specifications')] = ''
+                    _write_description_pair(rows[i], 'DigiKey', '')
     
             # Populate Mouser data if we have Mouser results
             if mouser_results_map and 'MPN valid (Mouser)' in headers:
@@ -2326,6 +2369,7 @@ def mpn_validate(request):
                         rows[i][mouser_cat_idx] = ''
                     if mouser_specs_idx is not None:
                         rows[i][mouser_specs_idx] = ''
+                    _write_description_pair(rows[i], 'Mouser', '')
                 else:
                     mouser_is_valid = mouser_result.get('valid', False)
                     rows[i][mouser_valid_idx] = 'Yes' if mouser_is_valid else 'No'
@@ -2343,6 +2387,8 @@ def mpn_validate(request):
                         if 'Mouser Specifications' in headers:
                             rows[i][headers.index('Mouser Specifications')] = (
                                 mouser_result.get('specs') or '')
+                        _write_description_pair(
+                            rows[i], 'Mouser', mouser_result.get('description') or '')
                     else:
                         # For invalid MPNs, show empty/unknown values
                         rows[i][mouser_status_idx] = 'Unknown'
@@ -2355,6 +2401,7 @@ def mpn_validate(request):
                             rows[i][mouser_category_idx] = ''
                         if mouser_specs_idx is not None:
                             rows[i][mouser_specs_idx] = ''
+                        _write_description_pair(rows[i], 'Mouser', '')
 
             # Populate Element14 data if we have Element14 results
             if element14_results_map and 'MPN valid (Element14)' in headers:
@@ -2376,6 +2423,7 @@ def mpn_validate(request):
                         rows[i][element14_cat_idx] = ''
                     if element14_specs_idx is not None:
                         rows[i][element14_specs_idx] = ''
+                    _write_description_pair(rows[i], 'Element14', '')
                 else:
                     element14_is_valid = element14_result.get('valid', False)
                     rows[i][element14_valid_idx] = 'Yes' if element14_is_valid else 'No'
@@ -2388,6 +2436,8 @@ def mpn_validate(request):
                             rows[i][element14_cat_idx] = element14_result.get('category') or ''
                         if element14_specs_idx is not None:
                             rows[i][element14_specs_idx] = element14_result.get('specs') or ''
+                        _write_description_pair(
+                            rows[i], 'Element14', element14_result.get('description') or '')
                     else:
                         rows[i][element14_status_idx] = 'Unknown'
                         rows[i][element14_part_idx] = ''
@@ -2396,6 +2446,7 @@ def mpn_validate(request):
                             rows[i][element14_cat_idx] = ''
                         if element14_specs_idx is not None:
                             rows[i][element14_specs_idx] = ''
+                        _write_description_pair(rows[i], 'Element14', '')
 
         # Fill a blank Item name from whichever source described the part.
         #

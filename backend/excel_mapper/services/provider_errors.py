@@ -102,3 +102,67 @@ def format_provider_specs(pairs):
         seen.add(key)
         out.append('%s: %s' % (name, value))
     return '; '.join(out)
+
+
+# --- description matching ---------------------------------------------------
+#: Words that appear in catalogue copy without saying anything about the part.
+#: Scoring them rewards a provider for being wordy.
+_DESCRIPTION_STOPWORDS = {
+    'the', 'and', 'for', 'with', 'type', 'series', 'new', 'at', 'of', 'to',
+}
+
+
+def _description_tokens(text):
+    """The meaningful pieces of a description, upper-cased.
+
+    Split on anything that is not a letter or digit, because the two sides
+    punctuate completely differently - a sheet writes
+    "CONN/SMD/Push-in CAGE/3P/1R/Female/4mm" where Digi-Key writes
+    "CONN TERM BLK 3POS 4MM PCB".
+    """
+    out = []
+    current = []
+    for character in str(text or ''):
+        if character.isalnum():
+            current.append(character.upper())
+        elif current:
+            out.append(''.join(current))
+            current = []
+    if current:
+        out.append(''.join(current))
+    return [token for token in out if token.lower() not in _DESCRIPTION_STOPWORDS]
+
+
+def _tokens_agree(left, right):
+    """Whether two description tokens mean the same thing.
+
+    Exact, or one is the start of the other - "3P" against "3POS", "CONN"
+    against "CONNECTOR". Two characters is the floor: below that a single
+    digit would match every measurement in the string.
+    """
+    if left == right:
+        return True
+    shorter, longer = (left, right) if len(left) <= len(right) else (right, left)
+    return len(shorter) >= 2 and longer.startswith(shorter)
+
+
+def description_match_percent(sheet_text, provider_text):
+    """How much of the sheet's description the provider's description confirms.
+
+    Returns 0-100, or None when either side is empty - an absent description is
+    not a nought percent match, and a column of zeroes for rows nobody has
+    described yet would read as a fleet of bad matches.
+
+    Measured against the SHEET's tokens, not the union: the question is "does
+    the provider describe the part we have", and a provider that adds packaging
+    and marketing words should not be marked down for it.
+    """
+    sheet_tokens = _description_tokens(sheet_text)
+    provider_tokens = _description_tokens(provider_text)
+    if not sheet_tokens or not provider_tokens:
+        return None
+    matched = sum(
+        1 for token in sheet_tokens
+        if any(_tokens_agree(token, other) for other in provider_tokens)
+    )
+    return int(round(100.0 * matched / len(sheet_tokens)))
