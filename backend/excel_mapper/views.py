@@ -39,6 +39,7 @@ import traceback
 import json
 import tempfile
 import shutil
+from io import BytesIO
 from copy import deepcopy
 
 from .delimited_reader import (
@@ -4380,6 +4381,57 @@ def bom_field_pattern_bulk_controls(request):
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+def _combined_upload_file(source_files, selections):
+    """Create one workbook from explicitly selected file/sheet sources."""
+    frames = []
+    selected_count_by_file = Counter(str(item.get('file_index')) for item in selections)
+    for item in selections:
+        file_index = int(item.get('file_index'))
+        if file_index < 0 or file_index >= len(source_files):
+            raise ValueError('A selected source file is unavailable.')
+        source = source_files[file_index]
+        sheet_name = str(item.get('sheet_name') or '').strip() or None
+        header_row = max(1, int(item.get('header_row') or 1))
+        frame = read_spreadsheet_or_delimited(source['path'], sheet_name=sheet_name, header=header_row - 1, dtype=object)
+        frame.columns = [str(column).strip() or f'Column {index + 1}' for index, column in enumerate(frame.columns)]
+        if 'Source file' in frame.columns or 'Source sheet' in frame.columns:
+            raise ValueError('Selected sources already contain reserved columns: Source file or Source sheet.')
+        frame['Source file'] = source['original_name']
+        if selected_count_by_file[str(file_index)] > 1:
+            frame['Source sheet'] = sheet_name or Path(source['original_name']).stem
+        frames.append(frame)
+
+    if not frames:
+        raise ValueError('Select at least two source sheets to combine.')
+    combined = pd.concat(frames, ignore_index=True, sort=False).replace({np.nan: ''})
+    content = BytesIO()
+    with pd.ExcelWriter(content, engine='openpyxl') as writer:
+        combined.to_excel(writer, index=False, sheet_name='Combined')
+    upload = SimpleUploadedFile(
+        'combined-bom.xlsx',
+        content.getvalue(),
+        content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    )
+    return hybrid_file_manager.save_upload_file(upload, 'client_combined'), list(combined.columns)
+
+
+@api_view(['GET'])
+def download_session_source_file(request, session_id):
+    """Return the exact source workbook stored for an upload session."""
+    session = get_session_consistent(session_id)
+    if not session or not session.get('client_path'):
+        return Response({'success': False, 'error': 'Session source file was not found.'}, status=status.HTTP_404_NOT_FOUND)
+    try:
+        path = hybrid_file_manager.get_file_path(session['client_path'])
+        return FileResponse(
+            open(path, 'rb'),
+            as_attachment=True,
+            filename=session.get('original_client_name') or 'source.xlsx',
+        )
+    except OSError:
+        return Response({'success': False, 'error': 'Session source file was not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+
 @api_view(['POST'])
 @parser_classes([MultiPartParser, FormParser])
 def upload_files(request):
@@ -4389,11 +4441,24 @@ def upload_files(request):
     """
     try:
         # Extract form data
-        client_file = request.FILES.get('clientFile')
+        client_files = request.FILES.getlist('clientFiles') or ([request.FILES.get('clientFile')] if request.FILES.get('clientFile') else [])
+        client_file = client_files[0] if client_files else None
         template_file = request.FILES.get('templateFile')
         sheet_name = request.data.get('sheetName')
         header_row_supplied = request.data.get('headerRow') not in (None, '')
         header_row = int(request.data.get('headerRow') or 1)
+        source_selections_raw = request.data.get('sourceSelections')
+        source_selections = []
+        use_source_file_as_bom_groups = str(request.data.get('useSourceFileAsBomGroups') or '').lower() == 'true'
+        if source_selections_raw:
+            try:
+                if isinstance(source_selections_raw, (list, tuple)) and len(source_selections_raw) == 1:
+                    source_selections_raw = source_selections_raw[0]
+                source_selections = json.loads(source_selections_raw) if isinstance(source_selections_raw, str) else source_selections_raw
+                if not isinstance(source_selections, list):
+                    raise ValueError
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return Response({'success': False, 'error': 'sourceSelections must be a list.'}, status=status.HTTP_400_BAD_REQUEST)
         default_template_metadata = get_sfo_template_metadata()
         template_sheet_name = request.data.get('templateSheetName') or default_template_metadata["template_sheet_name"]
         template_header_row = int(request.data.get('templateHeaderRow') or default_template_metadata["template_header_row"])
@@ -4441,13 +4506,13 @@ def upload_files(request):
         
         # Validate file types
         allowed_extensions = ['.xlsx', '.xls', '.xlsm', '.csv']
-        client_ext = Path(client_file.name).suffix.lower()
-        
-        if client_ext not in allowed_extensions:
-            return Response({
-                'success': False,
-                'error': f'Only Excel (.xlsx, .xls, .xlsm) and CSV files are supported for client file'
-            }, status=status.HTTP_400_BAD_REQUEST)
+        for uploaded_client_file in client_files:
+            client_ext = Path(uploaded_client_file.name).suffix.lower()
+            if client_ext not in allowed_extensions:
+                return Response({
+                    'success': False,
+                    'error': 'Only Excel (.xlsx, .xls, .xlsm) and CSV files are supported for client file'
+                }, status=status.HTTP_400_BAD_REQUEST)
         
         if template_file:
             template_ext = Path(template_file.name).suffix.lower()
@@ -4458,7 +4523,20 @@ def upload_files(request):
                 }, status=status.HTTP_400_BAD_REQUEST)
 
         # Save uploaded files
-        client_path, client_original_name = hybrid_file_manager.save_upload_file(client_file, "client")
+        saved_client_sources = []
+        for uploaded_client_file in client_files:
+            source_path, source_name = hybrid_file_manager.save_upload_file(uploaded_client_file, "client")
+            saved_client_sources.append({'path': source_path, 'original_name': source_name})
+        client_path, client_original_name = saved_client_sources[0]['path'], saved_client_sources[0]['original_name']
+        combined_sources = len(source_selections) > 1
+        if combined_sources:
+            try:
+                (client_path, client_original_name), client_headers = _combined_upload_file(saved_client_sources, source_selections)
+                sheet_name = 'Combined'
+                header_row = 1
+                header_row_supplied = True
+            except (ValueError, IndexError, KeyError) as exc:
+                return Response({'success': False, 'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         if template_file:
             template_path, template_original_name = hybrid_file_manager.save_upload_file(template_file, "template")
         else:
@@ -4575,6 +4653,8 @@ def upload_files(request):
             # authored for flat sheets. BOM generation reads this instead of
             # re-asking, so it has to survive a page reload.
             "bom_structure": bom_structure,
+            "source_selections": source_selections,
+            "use_source_file_as_bom_groups": use_source_file_as_bom_groups,
         }
         
         # Save session with universal persistence (critical for multi-worker environments)
