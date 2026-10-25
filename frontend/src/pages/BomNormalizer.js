@@ -17901,6 +17901,28 @@ const BomNormalizer = () => {
                       </FormControl>
                     </Grid>
                   </Grid>
+                  {headers.includes('Source file') && (
+                    <Box sx={{ mt: 1.25, pt: 1.25, borderTop: `1px solid ${normalizerTheme.border}` }}>
+                      <FormControlLabel
+                        control={(
+                          <Checkbox
+                            size="small"
+                            checked={config.sameGroupKeyColumn === 'Source file'}
+                            onChange={(event) => {
+                              setParserTouched(true);
+                              setConfig((prev) => ({
+                                ...prev,
+                                sameGroupKeyColumn: event.target.checked
+                                  ? 'Source file'
+                                  : (prev.sameGroupKeyColumn === 'Source file' ? '' : prev.sameGroupKeyColumn),
+                              }));
+                            }}
+                          />
+                        )}
+                        label={<Typography sx={{ fontSize: 13, fontWeight: 600, color: normalizerTheme.text }}>Use source file as BOM groups</Typography>}
+                      />
+                    </Box>
+                  )}
                   {bomLayoutActive && (
                     <Alert severity="info" sx={{ mt: 1.25 }}>
                       BOM layout is controlling row expansion. MPN/MFR arrangement, alternate layout, and quantity handling are locked because changing them would not affect this layout.

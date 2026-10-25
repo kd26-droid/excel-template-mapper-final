@@ -80,6 +80,8 @@ const getFileExtension = (fileName = '') => {
   return match ? match[0] : '';
 };
 
+const getClientFileKey = (file) => [file?.name, file?.size, file?.lastModified].join(':');
+
 const getFileStem = (fileName = '') => String(fileName || '').replace(/\.[^.]+$/, '');
 
 const unsupportedFileMessage = (fileName = 'Selected file') => (
@@ -1395,6 +1397,11 @@ const UploadFiles = () => {
   const [showAllSourceColumns, setShowAllSourceColumns] = useState(false);
   const [showAllTemplateColumns, setShowAllTemplateColumns] = useState(false);
   const [userFile, setUserFile] = useState(null);
+  const [attachedClientFiles, setAttachedClientFiles] = useState([]);
+  const [attachedClientFileSheets, setAttachedClientFileSheets] = useState({});
+  const [combineAttachedFiles, setCombineAttachedFiles] = useState(false);
+  const [selectedAttachedSources, setSelectedAttachedSources] = useState({});
+  const [selectedAttachedSourceHeaderRows, setSelectedAttachedSourceHeaderRows] = useState({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
@@ -1749,6 +1756,8 @@ const UploadFiles = () => {
       const workbook = XLSX.read(event.target.result, { type: 'binary' });
       const sheets = workbook.SheetNames;
       setUserFile(file);
+      setAttachedClientFiles([file]);
+      setAttachedClientFileSheets({ [getClientFileKey(file)]: { sheets } });
       setClientWorkbook(workbook);
       setClientSheetNames(sheets);
       setSelectedClientSheet(sheets[0] || 'Sheet_Joined');
@@ -1833,6 +1842,10 @@ const UploadFiles = () => {
     if (e) e.stopPropagation();
     if (previousClientState) {
       setUserFile(previousClientState.userFile);
+      setAttachedClientFiles(previousClientState.userFile ? [previousClientState.userFile] : []);
+      setAttachedClientFileSheets(previousClientState.userFile ? {
+        [getClientFileKey(previousClientState.userFile)]: { sheets: previousClientState.clientSheetNames || [] }
+      } : {});
       setClientWorkbook(previousClientState.clientWorkbook);
       setClientSheetNames(previousClientState.clientSheetNames);
       setSelectedClientSheet(previousClientState.selectedClientSheet);
@@ -1842,6 +1855,8 @@ const UploadFiles = () => {
       setPreviousClientState(null);
     } else {
       setUserFile(null);
+      setAttachedClientFiles([]);
+      setAttachedClientFileSheets({});
       setClientWorkbook(null);
       setClientSheetNames([]);
       setSelectedClientSheet('');
@@ -2515,16 +2530,63 @@ const UploadFiles = () => {
     };
   }, [getSheetHeaders, getSheetRecords, getSheetRecordsWithMeta, sanitizeSheetJoinConfig]);
 
+  const inspectAttachedClientFileSheets = useCallback((file) => {
+    const fileKey = getClientFileKey(file);
+    if (file.name.toLowerCase().endsWith('.pdf')) {
+      setAttachedClientFileSheets(current => ({ ...current, [fileKey]: { isPdf: true, sheets: [] } }));
+      return;
+    }
+
+    const reader = new FileReader();
+    const isCSV = file.name.toLowerCase().endsWith('.csv');
+    reader.onload = (event) => {
+      try {
+        const workbook = isCSV
+          ? readCsvWorkbook(event.target.result, { type: 'string', codepage: 65001, raw: false })
+          : XLSX.read(event.target.result, { type: 'binary' });
+        setAttachedClientFileSheets(current => ({
+          ...current,
+          [fileKey]: {
+            sheets: workbook.SheetNames || [],
+            headerRows: Object.fromEntries((workbook.SheetNames || []).map(sheetName => [sheetName, detectHeaderRow(workbook, sheetName)])),
+          }
+        }));
+      } catch (err) {
+        setAttachedClientFileSheets(current => ({ ...current, [fileKey]: { sheets: [], error: true } }));
+      }
+    };
+    reader.onerror = () => {
+      setAttachedClientFileSheets(current => ({ ...current, [fileKey]: { sheets: [], error: true } }));
+    };
+    if (isCSV) reader.readAsText(file, 'UTF-8');
+    else reader.readAsBinaryString(file);
+  }, []);
+
   const onDropUserFile = useCallback((acceptedFiles, options = {}) => {
     const restoreOptions = options && !Array.isArray(options) ? options : {};
     if (acceptedFiles.length > 0) {
-      let file = acceptedFiles[0];
-      const extension = getFileExtension(file.name);
-      if (!SUPPORTED_SOURCE_EXTENSIONS.includes(extension)) {
+      const validFiles = acceptedFiles.filter(file => SUPPORTED_SOURCE_EXTENSIONS.includes(getFileExtension(file.name)));
+      const invalidFile = acceptedFiles.find(file => !SUPPORTED_SOURCE_EXTENSIONS.includes(getFileExtension(file.name)));
+      if (invalidFile) {
         setSuccess(null);
-        setError(unsupportedFileMessage(file.name));
-        return;
+        setError(unsupportedFileMessage(invalidFile.name));
       }
+      if (!validFiles.length) return;
+
+      setAttachedClientFiles(currentFiles => {
+        const knownFiles = new Set(currentFiles.map(getClientFileKey));
+        return [...currentFiles, ...validFiles.filter(file => !knownFiles.has(getClientFileKey(file)))];
+      });
+
+      validFiles
+        .filter(candidate => getClientFileKey(candidate) !== getClientFileKey(userFile))
+        .forEach(inspectAttachedClientFileSheets);
+
+      // The backend currently accepts one clientFile. Keep the already parsed
+      // workbook active and stage later selections without changing its setup.
+      if (userFile) return;
+
+      let file = validFiles[0];
       setError(null);
       setSuccess(null);
       setUserFile(file);
@@ -2559,6 +2621,7 @@ const UploadFiles = () => {
       const isPDF = file.name.toLowerCase().endsWith('.pdf');
 
       if (isPDF) {
+        setAttachedClientFileSheets(current => ({ ...current, [getClientFileKey(file)]: { isPdf: true, sheets: [] } }));
         setProcessingPath('map');
         // For PDF files, we don't need to extract sheet names or headers
         // They will be processed by Azure OCR service
@@ -2600,6 +2663,13 @@ const UploadFiles = () => {
 
         setClientWorkbook(loadedWorkbook);
         setClientSheetNames(sheets);
+        setAttachedClientFileSheets(current => ({
+          ...current,
+          [getClientFileKey(file)]: {
+            sheets,
+            headerRows: Object.fromEntries(sheets.map(sheetName => [sheetName, detectHeaderRow(loadedWorkbook, sheetName)])),
+          },
+        }));
         setSelectedClientSheet(requestedSheet);
         setCombineSheetsMode(shouldCombineSheets);
         setSelectedClientSheets(shouldCombineSheets ? requestedSelectedSheets : []);
@@ -2671,16 +2741,29 @@ const UploadFiles = () => {
       // Persistence only happens on successful upload
       // (so files only appear when coming back from mapping).
     }
-  }, []);
+  }, [inspectAttachedClientFileSheets, userFile]);
 
   const onDropUserFileRejected = useCallback((fileRejections = []) => {
+    // Some browsers provide an empty or incorrect MIME type for legacy .xls
+    // workbooks. The filename extension is the supported-file contract shown
+    // in this screen, so let the existing parser validate those files.
+    const extensionAcceptedFiles = fileRejections
+      .map(rejection => rejection?.file)
+      .filter(file => file && SUPPORTED_SOURCE_EXTENSIONS.includes(getFileExtension(file.name)));
+    if (extensionAcceptedFiles.length) {
+      onDropUserFile(extensionAcceptedFiles);
+      return;
+    }
+
     const rejectedFile = fileRejections[0]?.file;
     setSuccess(null);
     setError(unsupportedFileMessage(rejectedFile?.name || 'Selected file'));
-  }, []);
+  }, [onDropUserFile]);
 
   const handleRemoveClientFile = useCallback(() => {
     setUserFile(null);
+    setAttachedClientFiles([]);
+    setAttachedClientFileSheets({});
     setClientWorkbook(null);
     setClientSheetNames([]);
     setSelectedClientSheet('');
@@ -2708,6 +2791,19 @@ const UploadFiles = () => {
     setSuccess(null);
     setError(null);
   }, []);
+
+  const handleRemoveAttachedClientFile = useCallback((file) => {
+    if (getClientFileKey(file) === getClientFileKey(userFile)) {
+      handleRemoveClientFile();
+      return;
+    }
+    setAttachedClientFiles(currentFiles => currentFiles.filter(item => getClientFileKey(item) !== getClientFileKey(file)));
+    setAttachedClientFileSheets(currentSheets => {
+      const nextSheets = { ...currentSheets };
+      delete nextSheets[getClientFileKey(file)];
+      return nextSheets;
+    });
+  }, [handleRemoveClientFile, userFile]);
 
   useEffect(() => {
     const initialClientFile = location.state?.initialClientFile;
@@ -2779,7 +2875,8 @@ const UploadFiles = () => {
         'text/plain': ['.csv'],
         'application/pdf': ['.pdf']
       },
-      maxFiles: 1
+      multiple: true,
+      maxFiles: 0
     });
 
   // Template file drop handler
@@ -3607,6 +3704,8 @@ const UploadFiles = () => {
 
   const applyExtractedPdfAsPrimary = (extracted, action = null, templateOptions = {}) => {
     setUserFile(extracted.file);
+    setAttachedClientFiles([extracted.file]);
+    setAttachedClientFileSheets({ [getClientFileKey(extracted.file)]: { sheets: extracted.sheetNames || [] } });
     setClientWorkbook(extracted.workbook);
     setClientSheetNames(extracted.sheetNames);
     setSelectedClientSheet(extracted.sheetNames[0] || 'PDF_Source');
@@ -3683,7 +3782,7 @@ const UploadFiles = () => {
     }, 800);
   };
 
-  const handleOpenBomNormalizer = (templateOptions = {}, passedAnswers = null) => {
+  const handleOpenBomNormalizer = async (templateOptions = {}, passedAnswers = null) => {
     if (!userFile) {
       setError('Please select a client file');
       return;
@@ -3702,6 +3801,65 @@ const UploadFiles = () => {
     // questions itself once the normalized rows are on screen. Asking twice —
     // or asking about a PDF before it has even been parsed — is just noise.
     const bomAnswers = passedAnswers || bomStructureAnswers;
+    const selectedMultiFileSources = combineAttachedFiles
+      ? Object.entries(selectedAttachedSources)
+        .filter(([, selected]) => selected)
+        .map(([key]) => {
+          const [fileIndex, ...sheetParts] = key.split(':');
+          return {
+            file_index: Number(fileIndex),
+            sheet_name: sheetParts.join(':'),
+            header_row: selectedAttachedSourceHeaderRows[key] || 1,
+          };
+        })
+      : [];
+
+    if (combineAttachedFiles && selectedMultiFileSources.length < 2) {
+      setError('Select at least two source sheets to combine');
+      return;
+    }
+
+    if (combineAttachedFiles) {
+      try {
+        setLoading(true);
+        setError(null);
+        const formData = new FormData();
+        attachedClientFiles.forEach(file => formData.append('clientFiles', file));
+        formData.append('sourceSelections', JSON.stringify(selectedMultiFileSources));
+        formData.append('sheetName', 'Combined');
+        formData.append('headerRow', '1');
+        const uploadResponse = await api.uploadFiles(formData);
+        const sessionId = uploadResponse.data?.session_id;
+        if (!sessionId) throw new Error('Combined upload did not return a session.');
+        const sourceResponse = await api.getSessionSourceFile(sessionId);
+        const combinedFile = new File([sourceResponse.data], 'combined-bom.xlsx', {
+          type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        });
+        navigate('/bom-normalizer', {
+          state: {
+            initialFile: combinedFile,
+            initialFileMode: 'workbook',
+            initialSheetName: 'Combined',
+            initialHeaderRow: 1,
+            initialSheetScope: 'single',
+            initialHeaderRowExplicit: true,
+            templateFile,
+            bomStructure: bomAnswers,
+            savedBomStructure: getSavedBomStructure(),
+            uploadSource: {
+              ...getProcessingTemplateState({ processingTemplateMode: selectedProcessingTemplateId ? 'use' : 'new', ...templateOptions }),
+              processingPath: 'normalize',
+            },
+          },
+        });
+        return;
+      } catch (err) {
+        setError(err.response?.data?.error || err.message || 'Could not prepare the combined BOM.');
+        return;
+      } finally {
+        setLoading(false);
+      }
+    }
 
     // The normalizer reads the workbook itself, so the sheet setup made here has
     // to travel with it — otherwise a combined multi-sheet source silently
@@ -3740,11 +3898,23 @@ const UploadFiles = () => {
     }
 
     const isPDF = userFile.name.toLowerCase().endsWith('.pdf');
+    const selectedMultiFileSources = combineAttachedFiles
+      ? Object.entries(selectedAttachedSources)
+        .filter(([, selected]) => selected)
+        .map(([key]) => {
+          const [fileIndex, ...sheetParts] = key.split(':');
+          return { file_index: Number(fileIndex), sheet_name: sheetParts.join(':'), header_row: selectedAttachedSourceHeaderRows[key] || 1 };
+        })
+      : [];
 
     // FactWise template upload is optional in the new flow. If it is omitted,
     // mapping will use the default/fetched FactWise template downstream.
 
     if (!isPDF && clientSheetNames.length > 0) {
+      if (combineAttachedFiles && selectedMultiFileSources.length < 2) {
+        setError('Select at least two source sheets to combine');
+        return;
+      }
       if (combineSheetsMode) {
         if (selectedClientSheets.length < 2) {
           setError('Select at least two sheets to combine');
@@ -3836,7 +4006,12 @@ const UploadFiles = () => {
       }
 
       const formData = new FormData();
-      formData.append('clientFile', uploadClientFile);
+      if (combineAttachedFiles) {
+        attachedClientFiles.forEach(file => formData.append('clientFiles', file));
+        formData.append('sourceSelections', JSON.stringify(selectedMultiFileSources));
+      } else {
+        formData.append('clientFile', uploadClientFile);
+      }
       formData.append('sheetName', uploadSheetName);
       formData.append('headerRow', uploadHeaderRow.toString());
       const uploadClientHeaders = uploadHeaderRow === clientHeaderRow
@@ -4741,9 +4916,104 @@ const UploadFiles = () => {
                       }
                     }}
                   >
-                    {userFile ? 'Change file' : 'Select files'}
+                    {userFile ? 'Add files' : 'Select files'}
                   </Button>
                 </Box>
+
+                {attachedClientFiles.length > 0 && (
+                  <Box
+                    onClick={(event) => event.stopPropagation()}
+                    sx={{
+                      mt: 1.25,
+                      px: 1.5,
+                      py: 1.25,
+                      border: `1px solid ${Nn.panelBorder}`,
+                      borderRadius: '10px',
+                      bgcolor: Nn.panelBg,
+                    }}
+                  >
+                    <Typography variant="caption" sx={{ color: Nn.muted, display: 'block', mb: 0.75 }}>
+                      {attachedClientFiles.length} client file{attachedClientFiles.length === 1 ? '' : 's'} attached. The active file is used for the current setup.
+                    </Typography>
+                    <Stack spacing={1}>
+                      {attachedClientFiles.map(file => {
+                        const isActiveFile = getClientFileKey(file) === getClientFileKey(userFile);
+                        const fileSheetInfo = attachedClientFileSheets[getClientFileKey(file)];
+                        return (
+                          <Box key={getClientFileKey(file)}>
+                            <Stack direction="row" spacing={0.75} alignItems="center" useFlexGap flexWrap="wrap">
+                              <Chip
+                                size="small"
+                                label={isActiveFile ? `${file.name} (active)` : file.name}
+                                onDelete={isActiveFile ? undefined : () => handleRemoveAttachedClientFile(file)}
+                                deleteIcon={isActiveFile ? undefined : <CloseIcon fontSize="small" />}
+                                sx={{
+                                  maxWidth: '100%',
+                                  color: isActiveFile ? Nn.text : Nn.muted,
+                                  border: `1px solid ${isActiveFile ? uploadActionColor : Nn.divider}`,
+                                  bgcolor: isActiveFile ? (isDarkMode ? 'rgba(37, 99, 235, 0.16)' : 'rgba(37, 99, 235, 0.07)') : 'transparent',
+                                  '& .MuiChip-label': { overflow: 'hidden', textOverflow: 'ellipsis' },
+                                }}
+                              />
+                              {fileSheetInfo?.isPdf ? (
+                                <Typography variant="caption" sx={{ color: Nn.muted }}>PDF sheets are available after extraction.</Typography>
+                              ) : fileSheetInfo?.error ? (
+                                <Typography variant="caption" sx={{ color: '#ef4444' }}>Could not read sheets.</Typography>
+                              ) : !fileSheetInfo ? (
+                                <Typography variant="caption" sx={{ color: Nn.muted }}>Reading sheets...</Typography>
+                              ) : (
+                                <Stack direction="row" spacing={0.5} useFlexGap flexWrap="wrap">
+                                  {fileSheetInfo.sheets.map(sheetName => (
+                                    <Chip key={`${getClientFileKey(file)}:${sheetName}`} size="small" label={sheetName} variant="outlined" sx={{ height: 22, fontSize: '0.7rem', borderColor: Nn.divider, color: Nn.muted }} />
+                                  ))}
+                                </Stack>
+                              )}
+                            </Stack>
+                          </Box>
+                        );
+                      })}
+                    </Stack>
+                    {attachedClientFiles.length > 1 && (
+                      <Box sx={{ mt: 1, pt: 1, borderTop: `1px solid ${Nn.divider}` }}>
+                        <FormControlLabel
+                          control={<Checkbox checked={combineAttachedFiles} onChange={(event) => {
+                            const enabled = event.target.checked;
+                            setCombineAttachedFiles(enabled);
+                            if (enabled) {
+                              const allSources = {};
+                              const headerRows = {};
+                              attachedClientFiles.forEach((file, fileIndex) => {
+                                (attachedClientFileSheets[getClientFileKey(file)]?.sheets || []).forEach(sheetName => {
+                                  const sourceKey = `${fileIndex}:${sheetName}`;
+                                  allSources[sourceKey] = true;
+                                  headerRows[sourceKey] = attachedClientFileSheets[getClientFileKey(file)]?.headerRows?.[sheetName] || 1;
+                                });
+                              });
+                              setSelectedAttachedSources(allSources);
+                              setSelectedAttachedSourceHeaderRows(headerRows);
+                            }
+                          }} size="small" />}
+                          label={<Typography variant="body2" sx={{ fontSize: 13, color: Nn.tableText }}>Combine selected files and sheets into one BOM</Typography>}
+                        />
+                        {combineAttachedFiles && (
+                          <Box sx={{ ml: 4, mt: 0.5 }}>
+                            {attachedClientFiles.map((file, fileIndex) => (
+                              <Box key={`combine:${getClientFileKey(file)}`} sx={{ mb: 0.5 }}>
+                                <Typography variant="caption" sx={{ color: Nn.muted }}>{file.name}</Typography>
+                                <Stack direction="row" spacing={0.5} useFlexGap flexWrap="wrap">
+                                  {(attachedClientFileSheets[getClientFileKey(file)]?.sheets || []).map(sheetName => {
+                                    const sourceKey = `${fileIndex}:${sheetName}`;
+                                    return <Stack key={sourceKey} direction="row" spacing={0.25} alignItems="center"><FormControlLabel sx={{ mr: 0 }} control={<Checkbox size="small" checked={Boolean(selectedAttachedSources[sourceKey])} onChange={(event) => setSelectedAttachedSources(current => ({ ...current, [sourceKey]: event.target.checked }))} />} label={<Typography variant="caption">{sheetName}</Typography>} /><TextField size="small" type="number" label="Header" value={selectedAttachedSourceHeaderRows[sourceKey] || 1} onChange={(event) => setSelectedAttachedSourceHeaderRows(current => ({ ...current, [sourceKey]: Math.max(1, Number(event.target.value) || 1) }))} inputProps={{ min: 1 }} sx={{ width: 92 }} /></Stack>;
+                                  })}
+                                </Stack>
+                              </Box>
+                            ))}
+                          </Box>
+                        )}
+                      </Box>
+                    )}
+                  </Box>
+                )}
 
                 {/* Client File Sheet & Columns Preview Card */}
                 {userFile && (
@@ -4767,6 +5037,25 @@ const UploadFiles = () => {
 
                     {clientSheetNames.length > 0 && (
                       <Box sx={{ pt: 1, borderTop: `1px solid ${Nn.divider}` }}>
+                        {combineAttachedFiles && (
+                          <Stack spacing={1} sx={{ mb: 1.5 }}>
+                            <Typography variant="caption" sx={{ color: Nn.muted }}>Selected source sheets</Typography>
+                            {attachedClientFiles.flatMap((file, fileIndex) => (
+                              (attachedClientFileSheets[getClientFileKey(file)]?.sheets || [])
+                                .filter(sheetName => selectedAttachedSources[`${fileIndex}:${sheetName}`])
+                                .map(sheetName => {
+                                  const sourceKey = `${fileIndex}:${sheetName}`;
+                                  return (
+                                    <Stack key={`setup:${sourceKey}`} direction={{ xs: 'column', sm: 'row' }} spacing={1} alignItems={{ sm: 'center' }}>
+                                      <Typography sx={{ minWidth: 220, fontSize: 13, color: Nn.tableText }}>{file.name} / {sheetName}</Typography>
+                                      <TextField size="small" type="number" label="Header row" value={selectedAttachedSourceHeaderRows[sourceKey] || 1} onChange={(event) => setSelectedAttachedSourceHeaderRows(current => ({ ...current, [sourceKey]: Math.max(1, Number(event.target.value) || 1) }))} inputProps={{ min: 1 }} sx={{ width: { xs: '100%', sm: 140 } }} />
+                                    </Stack>
+                                  );
+                                })
+                            ))}
+                          </Stack>
+                        )}
+                        {!combineAttachedFiles && <>
                         <Grid container spacing={1.5} sx={uploadSheetRowSx}>
                           <Grid item xs={7}>
                             {userFile.name.toLowerCase().endsWith('.csv') ? (
@@ -4839,6 +5128,7 @@ const UploadFiles = () => {
                           </Grid>
                         </Grid>
 
+
                         {clientSheetNames.length > 1 && (
                           <Box sx={{ mb: 1.5 }}>
                             <FormControlLabel
@@ -4874,6 +5164,8 @@ const UploadFiles = () => {
                             )}
                           </Box>
                         )}
+
+                        </>}
 
                         {clientHeaderPreview.length > 0 && (
                           <Box sx={{ mb: 1.5 }}>
