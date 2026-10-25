@@ -641,6 +641,9 @@ const api = {
   getRawData: (sessionId) =>
     axios.get(`${API_URL}/sessions/${sessionId}/raw-data/`),
 
+  getSessionSourceFile: (sessionId) =>
+    axios.get(`${API_URL}/sessions/${sessionId}/source-file/`, { responseType: 'blob' }),
+
   // ==========================================
   // 4️⃣ ENHANCED DOWNLOAD ENDPOINTS
   // ==========================================

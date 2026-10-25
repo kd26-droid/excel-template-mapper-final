@@ -10,6 +10,7 @@ from .views import (
     session_status,
     rebuild_template,
     upload_files,
+    download_session_source_file,
     repair_spilled_rows,
     apply_sheet_join,
     cleanup_rows,
@@ -208,6 +209,7 @@ urlpatterns = [
 
     # File upload & cleanup
     path('upload/', upload_files, name='upload-files'),
+    path('sessions/<str:session_id>/source-file/', download_session_source_file, name='download-session-source-file'),
     path('repair-spilled-rows/', repair_spilled_rows, name='repair-spilled-rows'),
     # FactWise 4.0, server-side: the 4.0 backend sends no CORS headers, so the
     # export popup cannot call it from the browser.
