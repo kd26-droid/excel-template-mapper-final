@@ -220,6 +220,44 @@ const detectRootFromParents = (records = [], levelColumn = '', codeColumn = '') 
   return { code: tops[0], name: '', uom: '' };
 };
 
+// ---- Several source files, each its own BOM --------------------------------
+//
+// The files are linked by the code the user gives each one: a file whose code
+// is a line in another file is that line's sub-BOM. Nothing else is read from
+// the files, so this holds for any customer's layout.
+//
+// The columns a row is identified by, in the order the backend tries them
+// (GROUP_LINK_CODE_COLUMNS in views.py). They must agree: a file shown here as
+// a sub-BOM has to come out of generation as one.
+const GROUP_LINK_CODE_COLUMNS = ['cpn', 'Item code', 'mpn'];
+
+const groupLinkKey = value => String(value ?? '').trim().toUpperCase();
+
+// For each group, the other groups that list its code as a line, with the row.
+//
+// A line matches on ANY column that identifies a row, not one chosen column.
+// Which column holds the part number depends on the mapping - with MPN and CPN
+// on the same source column the value lands in `mpn` and `cpn` is empty - and
+// generation reads the rows after the editor has filled `Item code`. Checking
+// one column, this step and generation disagreed about the same line.
+const linkGroupCodes = (codes = {}, recordsByGroup = {}) => {
+  const links = {};
+  Object.entries(codes).forEach(([name, code]) => {
+    const hits = [];
+    if (groupLinkKey(code)) {
+      Object.entries(recordsByGroup).forEach(([other, rows]) => {
+        if (other === name) return;
+        const index = (rows || []).findIndex(row => GROUP_LINK_CODE_COLUMNS.some(
+          column => groupLinkKey(row?.[column]) === groupLinkKey(code)
+        ));
+        if (index >= 0) hits.push({ group: other, row: index + 1 });
+      });
+    }
+    links[name] = hits;
+  });
+  return links;
+};
+
 const detectRootFromPreamble = (preambleRows = []) => {
   for (let index = 0; index < preambleRows.length - 1; index += 1) {
     const labels = (preambleRows[index] || []).map(cell => String(cell ?? '').trim());
@@ -770,6 +808,10 @@ const BomStructureDialog = ({
   getSheetRecords,
   getSheetPreambleRows,
   initialAnswers = null,
+  // Set when every "sheet" here is really one source file of a combined
+  // upload: the column naming which file each row came from. Each file is then
+  // its own BOM, and a file whose code is a line in another is its sub-BOM.
+  groupColumn = '',
   onConfirm,
   // The lists the revision branch needs, each narrowing the one before it:
   // every BOM → the projects holding that BOM → the slots it occupies in one
@@ -830,6 +872,7 @@ const BomStructureDialog = ({
   const getSheetRecordsRef = useRef(getSheetRecords);
   const getSheetPreambleRowsRef = useRef(getSheetPreambleRows);
   const initialAnswersRef = useRef(initialAnswers);
+  const groupColumnRef = useRef(groupColumn);
   const dialogFieldSx = factWiseFieldSx(fwTokens, { height: 36 });
   const dialogSelectSx = factWiseSelectFieldSx(fwTokens, { height: 36 });
   const dialogInputLabelSx = factWiseInputLabelSx(fwTokens);
@@ -1045,6 +1088,7 @@ const BomStructureDialog = ({
     getSheetRecordsRef.current = getSheetRecords;
     getSheetPreambleRowsRef.current = getSheetPreambleRows;
     initialAnswersRef.current = initialAnswers;
+    groupColumnRef.current = groupColumn;
   });
 
   // Seed once per opening: every sheet starts as a BOM candidate, and any sheet
@@ -1189,10 +1233,68 @@ const BomStructureDialog = ({
         bomHeader,
       };
     });
+
+    // One BOM per source file, and every code starts EMPTY. Nothing about a
+    // file - not its name, not its rows - reliably says what it builds, so
+    // the user names each one. Links between files are offered once a typed
+    // code matches a line elsewhere, and made only when the user confirms.
+    if (groupColumnRef.current) {
+      (sheetNamesRef.current || []).forEach((name) => {
+        seeded[name].bomHeader = {
+          ...seeded[name].bomHeader,
+          finishedGoodCode: '',
+          bomCode: '',
+          bomName: '',
+          autoDetected: false,
+          // A file is never its own root row, so there is no sheet code for
+          // the typed one to be a rename of.
+          rootSourceCode: '',
+          parentGroup: '',
+          declinedParentFor: '',
+        };
+      });
+    }
+
     setAnswers(seeded);
     setStep(0);
     setError('');
   }, [open]);
+
+  // The rows of each source file, read once per opening of a grouped upload.
+  const groupRecords = useMemo(() => {
+    if (!groupColumn || !open) return null;
+    const byGroup = {};
+    (sheetNames || []).forEach((name) => {
+      byGroup[name] = typeof getSheetRecords === 'function' ? (getSheetRecords(name) || []) : [];
+    });
+    return { byGroup };
+  }, [groupColumn, open, sheetNames, getSheetRecords]);
+
+  // Live, as the user types. `links` are SUGGESTIONS - the other files that
+  // list this file's code as a line. `parentOf` holds only links the user
+  // confirmed, and only while the code still matches the line they confirmed
+  // against; that is the tree that will be built, and nothing is nested on a
+  // match alone.
+  const groupLinks = useMemo(() => {
+    if (!groupRecords) return null;
+    const codes = {};
+    (sheetNames || []).forEach((name) => {
+      codes[name] = String(answers[name]?.bomHeader?.finishedGoodCode || '').trim();
+    });
+    const links = linkGroupCodes(codes, groupRecords.byGroup);
+    const parentOf = {};
+    const pending = [];
+    (sheetNames || []).forEach((name) => {
+      const header = answers[name]?.bomHeader || {};
+      const chosen = String(header.parentGroup || '').trim();
+      parentOf[name] = chosen && links[name].some(hit => hit.group === chosen) ? chosen : null;
+      // A suggestion still waiting for a yes or a no.
+      const declined = groupLinkKey(header.declinedParentFor) === groupLinkKey(codes[name]) && codes[name];
+      if (!parentOf[name] && links[name].length && !declined) pending.push(name);
+    });
+    const roots = (sheetNames || []).filter(name => !parentOf[name]);
+    return { codes, links, parentOf, roots, pending };
+  }, [groupRecords, sheetNames, answers]);
 
   const headersFor = useCallback(
     sheetName => (typeof getSheetHeaders === 'function' ? getSheetHeaders(sheetName) : []),
@@ -1635,6 +1737,56 @@ const BomStructureDialog = ({
       }
     }
     if (currentKey === 'finishedGood') {
+      // Several files, one tree. Checked before the per-file fields so the
+      // first thing reported is the one that decides whether there IS a tree -
+      // the same rules generation enforces, said here where they can be fixed.
+      if (groupLinks) {
+        const named = sheetsNeedingRoot.filter(name => groupLinks.codes[name]);
+        const byCode = new Map();
+        for (const name of named) {
+          const key = groupLinkKey(groupLinks.codes[name]);
+          if (byCode.has(key)) {
+            setError(`"${byCode.get(key)}" and "${name}" have the same code. Each file is its own BOM and needs its own code.`);
+            return false;
+          }
+          byCode.set(key, name);
+        }
+        // A suggested link nobody answered. Continuing would decide it for
+        // them - as "not a sub-BOM" - which is the silent kind of choice this
+        // step exists to avoid.
+        const unanswered = groupLinks.pending.find(name => sheetsNeedingRoot.includes(name));
+        if (unanswered) {
+          const where = groupLinks.links[unanswered].map(hit => hit.group).join(' and ');
+          setError(`${groupLinks.codes[unanswered]} is a line in ${where}. Say whether "${unanswered}" is its sub-BOM.`);
+          return false;
+        }
+        if (named.length === sheetsNeedingRoot.length) {
+          const roots = sheetsNeedingRoot.filter(name => !groupLinks.parentOf[name]);
+          // One upload builds one tree, with one top BOM. Several unrelated
+          // BOMs in one upload is a different feature, not something to build
+          // by accident here.
+          if (roots.length > 1) {
+            setError(`${roots.length} files are top BOMs: ${roots.join(', ')}. One upload builds one BOM tree - link the others as sub-BOMs, or upload them separately.`);
+            return false;
+          }
+          if (!roots.length) {
+            setError('Every file is a line inside another file, so there is no top BOM. The files reference each other in a loop.');
+            return false;
+          }
+          for (const start of sheetsNeedingRoot) {
+            const seen = [];
+            let current = start;
+            while (groupLinks.parentOf[current]) {
+              if (seen.includes(current)) {
+                setError(`These files list each other, so neither can be under the other: ${seen.join(' -> ')}.`);
+                return false;
+              }
+              seen.push(current);
+              current = groupLinks.parentOf[current];
+            }
+          }
+        }
+      }
       for (const name of sheetsNeedingRoot) {
         const header = answers[name]?.bomHeader || {};
         // Supplied by the revision, so there is nothing for the user to enter.
@@ -1737,6 +1889,7 @@ const BomStructureDialog = ({
     }
     return true;
   }, [currentKey, leveledSheets, sheetsNeedingRoot, answers, structureFor, assembliesFor, subBomValue,
+      groupLinks,
       reviseBom, reviseOnProject, reviseProject, reviseSlots, slotOptions,
       baseBomId, baseBomError, revisionTargetCode, revisionFinishedGoodCode,
       existingBomCodes]);
@@ -1892,8 +2045,20 @@ const BomStructureDialog = ({
         dropDocuments: false,
         bomHeader,
         subBoms,
+        // The link the user CONFIRMED: which file this one is a sub-BOM of, and
+        // that file's code. Generation builds the tree from these and checks
+        // each against the rows; it never links files on its own.
+        ...(groupLinks ? {
+          parentGroup: groupLinks.parentOf[name] || null,
+          parentBom: groupLinks.parentOf[name]
+            ? (groupLinks.codes[groupLinks.parentOf[name]] || null)
+            : null,
+        } : {}),
       };
     });
+    // Tells generation the answers are per FILE, keyed by this column's values,
+    // and that all of them are used - not just the first.
+    if (groupLinks) payload.groupColumn = groupColumn;
     onConfirm(payload);
   };
 
@@ -2322,13 +2487,135 @@ const BomStructureDialog = ({
     </>
   );
 
+  // One line per file, its sub-BOMs indented under it. `trail` stops a loop the
+  // user has not finished untangling from recursing forever; validation names
+  // the loop when they press Continue.
+  const renderGroupNode = (name, depth, trail) => {
+    const code = groupLinks.codes[name];
+    const hit = (groupLinks.links[name] || []).find(link => link.group === groupLinks.parentOf[name]);
+    const lines = groupRecords?.byGroup?.[name]?.length || 0;
+    const children = sheetsNeedingRoot.filter(
+      other => groupLinks.parentOf[other] === name && !trail.includes(other)
+    );
+    return (
+      <Box key={`${name}-${depth}`}>
+        <Box sx={{ display: 'flex', alignItems: 'baseline', gap: 0.75, pl: depth * 2.5, py: 0.3, flexWrap: 'wrap' }}>
+          <Typography sx={{ fontSize: 12.5, fontWeight: 600, color: code ? fwTokens.text : 'error.main' }}>
+            {depth ? '└ ' : ''}{code || 'not named yet'}
+          </Typography>
+          <Typography sx={{ fontSize: 12, color: fwTokens.muted }}>
+            {name} · {lines} line{lines === 1 ? '' : 's'}
+            {depth && hit ? ` · row ${hit.row} of ${hit.group}` : ''}
+          </Typography>
+        </Box>
+        {children.map(child => renderGroupNode(child, depth + 1, [...trail, name]))}
+      </Box>
+    );
+  };
+
+  // The tree as CONFIRMED so far. A file sits under another only after the
+  // user said yes to it; until then it is shown at the top, and the note says
+  // how many suggestions are still waiting.
+  const renderGroupTree = () => {
+    const tops = sheetsNeedingRoot.filter(name => !groupLinks.parentOf[name]);
+    const waiting = groupLinks.pending.filter(name => sheetsNeedingRoot.includes(name)).length;
+    const allNamed = sheetsNeedingRoot.every(name => groupLinks.codes[name]);
+    return (
+      <Box sx={{ ...bomDetailCardSx, mb: 1.5 }}>
+        <Typography sx={{ fontSize: 12.5, fontWeight: 600, color: fwTokens.text, mb: 0.6 }}>
+          BOM structure
+        </Typography>
+        {tops.map(name => renderGroupNode(name, 0, []))}
+        <Typography sx={{ fontSize: 12, color: fwTokens.muted, mt: 0.6 }}>
+          {waiting
+            ? `${waiting} suggested sub-BOM link${waiting === 1 ? '' : 's'} below - confirm or decline each.`
+            : allNamed && tops.length > 1
+              ? `${tops.length} BOMs are at the top. One upload builds one tree - link the others as sub-BOMs, or upload them separately.`
+              : 'Name each file\'s BOM. When a code is a line in another file, you will be asked whether it is that line\'s sub-BOM.'}
+        </Typography>
+      </Box>
+    );
+  };
+
+  // Under each file's fields: the question, once its code is a line in another
+  // file. Nothing is linked until the user answers yes; "no" is remembered for
+  // this code only, so typing a different code asks again.
+  const renderGroupSuggestion = (name, header) => {
+    const code = groupLinks.codes[name];
+    const hits = groupLinks.links[name] || [];
+    const confirmed = groupLinks.parentOf[name];
+    if (!code || !hits.length) return null;
+    const parentLabel = group => groupLinks.codes[group] || group;
+
+    if (confirmed) {
+      const hit = hits.find(link => link.group === confirmed) || {};
+      return (
+        <Box sx={{ mt: 1, display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
+          <Chip size="small" color="success" variant="outlined" label={`Sub-BOM of ${parentLabel(confirmed)}`} />
+          <Typography sx={{ fontSize: 12, color: fwTokens.muted }}>
+            {code} is row {hit.row} of {confirmed}
+          </Typography>
+          <Button size="small" onClick={() => patchHeader(name, { parentGroup: '' })}>
+            Undo
+          </Button>
+        </Box>
+      );
+    }
+
+    const declined = groupLinkKey(header.declinedParentFor) === groupLinkKey(code);
+    if (declined) {
+      return (
+        <Box sx={{ mt: 1, display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
+          <Typography sx={{ fontSize: 12, color: fwTokens.muted }}>
+            Kept as a separate BOM, though {code} is a line in {hits.map(hit => hit.group).join(' and ')}.
+          </Typography>
+          <Button size="small" onClick={() => patchHeader(name, { declinedParentFor: '' })}>
+            Change
+          </Button>
+        </Box>
+      );
+    }
+
+    return (
+      <Box sx={{ mt: 1, p: 1, borderRadius: 1, border: `1px solid ${fwTokens.strongBorder}` }}>
+        <Typography sx={{ fontSize: 12.5, color: fwTokens.text, mb: 0.75 }}>
+          {hits.length === 1
+            ? <><strong>{code}</strong> is a line in <strong>{hits[0].group}</strong> (row {hits[0].row}). Is this BOM a sub-BOM of <strong>{parentLabel(hits[0].group)}</strong>?</>
+            : <><strong>{code}</strong> is a line in {hits.length} files. Is this BOM a sub-BOM of one of them?</>}
+        </Typography>
+        <Box sx={{ display: 'flex', gap: 0.75, flexWrap: 'wrap' }}>
+          {hits.map(hit => (
+            <Button
+              key={`${hit.group}-${hit.row}`}
+              size="small"
+              variant="contained"
+              onClick={() => patchHeader(name, { parentGroup: hit.group, declinedParentFor: '' })}
+            >
+              {hits.length === 1 ? 'Yes, sub-BOM' : `Sub-BOM of ${parentLabel(hit.group)} (row ${hit.row})`}
+            </Button>
+          ))}
+          <Button
+            size="small"
+            variant="outlined"
+            onClick={() => patchHeader(name, { parentGroup: '', declinedParentFor: code })}
+          >
+            No, keep separate
+          </Button>
+        </Box>
+      </Box>
+    );
+  };
+
   const renderFinishedGood = () => (
     <>
       <Typography variant="body2" sx={stepCopySx}>
         {revisionTargetCode
           ? `Finished good is inherited from ${reviseBom?.bom_code || 'the selected BOM'}.`
-          : 'Confirm the finished good and BOM details.'}
+          : groupLinks
+            ? 'Give each file the code of its BOM. When a code is a line in another file, you will be asked whether it is that line\'s sub-BOM.'
+            : 'Confirm the finished good and BOM details.'}
       </Typography>
+      {groupLinks && renderGroupTree()}
       {sheetsNeedingRoot.map((name) => {
         const answer = answers[name] || blankSheetAnswer();
         const header = answer.bomHeader || blankBomHeader(name);
@@ -2352,13 +2639,23 @@ const BomStructureDialog = ({
                 <Box sx={bomDetailHeaderSx}>
                   <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.85, minWidth: 0, flex: '1 1 auto', flexWrap: 'wrap' }}>
                     <Box component="span" sx={bomLevelLabelSx}>
-                    Level 1 BOM
+                      {groupLinks
+                        ? (groupLinks.parentOf[name]
+                          ? `Sub-BOM of ${groupLinks.codes[groupLinks.parentOf[name]] || groupLinks.parentOf[name]}`
+                          : 'Top BOM')
+                        : 'Level 1 BOM'}
                     </Box>
                     <Typography variant="caption" sx={{ ...bomLevelMetaSx, color: code ? fwTokens.muted : 'error.main' }}>
-                      {code
-                        ? `${code}${(revisionFinishedGoodCode ? reviseBomFinishedGood?.name : header.itemName)
-                          ? ` — ${revisionFinishedGoodCode ? reviseBomFinishedGood.name : header.itemName}` : ''}`
-                        : 'not found in the sheet — name it below'}
+                      {groupLinks
+                        ? (code
+                          ? (groupLinks.parentOf[name]
+                            ? `${code} is row ${(groupLinks.links[name].find(hit => hit.group === groupLinks.parentOf[name]) || {}).row} of ${groupLinks.parentOf[name]}`
+                            : code)
+                          : "name this file's BOM below")
+                        : code
+                          ? `${code}${(revisionFinishedGoodCode ? reviseBomFinishedGood?.name : header.itemName)
+                            ? ` — ${revisionFinishedGoodCode ? reviseBomFinishedGood.name : header.itemName}` : ''}`
+                          : 'not found in the sheet — name it below'}
                     </Typography>
                   </Box>
                   {/* No "auto-detected" chip. Every BOM on this screen came out
@@ -2414,6 +2711,9 @@ const BomStructureDialog = ({
                         const next = { finishedGoodCode: e.target.value };
                         if (!header.bomCodeTouched) next.bomCode = e.target.value;
                         if (!header.bomNameTouched) next.bomName = e.target.value;
+                        // A confirmed sub-BOM link was a yes to THIS code being
+                        // that line. A different code is a different question.
+                        if (groupLinks) next.parentGroup = '';
                         patchHeader(name, next);
                       }}
                     />
@@ -2454,6 +2754,7 @@ const BomStructureDialog = ({
                       onChange={e => patchHeader(name, { baseQuantity: e.target.value })}
                     />
                   </Box>
+                  {groupLinks && renderGroupSuggestion(name, header)}
                 </Box>
                 {/* Each sub-assembly is its own BOM in the FactWise import and
                     needs its own code, name, base quantity and unit. The sheet
