@@ -8628,6 +8628,7 @@ def _add_combined_bom_identity_columns(session_id, rows, headers):
         if code:
             open_rows.append((level, code))
 
+    grid_levels = getattr(result, 'grid_levels', None) or {}
     width = len(output_headers)
     output_rows = []
     headers_marked = 0
@@ -8642,6 +8643,10 @@ def _add_combined_bom_identity_columns(session_id, rows, headers):
             values.extend([''] * (width - len(values)))
         alternate = alternate_of.get(position)
         pair = identity.get(position)
+        # Linked files: the tree's level, not the file's own. Alternates take it
+        # too, so they stay at their primary's level.
+        if level_index >= 0 and position in grid_levels:
+            values[level_index] = str(grid_levels[position])
         if alternate and not pair:
             # An alternate belongs to its primary's BOM, so it carries the same
             # BOM code - it is grouped by that before anything looks at it - and
@@ -18830,10 +18835,17 @@ def _link_grouped_boms(records, group_column, group_answers):
     # Top BOM first, then each tier below it, keeping every file's own row order.
     ordered = sorted(group_answers, key=lambda name: depth[name])
     linked = []
+    # The level each editor row has in the joined tree. The grid still holds
+    # every file's own levels - all 1 - and the export reads Level from the grid,
+    # so a sub-BOM's lines went out at 1 beside the Sub BOM ID that put them a
+    # tier below. One tier below the line they hang off, at any depth.
+    grid_levels = {}
     for name in ordered:
         for record in rows_of[name]:
             row = dict(record)
             row['level'] = str(depth[name] + 1)
+            if isinstance(record.get(GRID_ROW_KEY), int):
+                grid_levels[record[GRID_ROW_KEY]] = depth[name] + 1
             # The top file's rows hang off the authored finished good, which is
             # what an empty parent means to the tree builder.
             row['parent'] = '' if name == root else line_code[name]
@@ -18864,7 +18876,8 @@ def _link_grouped_boms(records, group_column, group_answers):
     # The top file's finished good is authored, never a row in any file, so
     # there is no sheet code for it to be renamed from.
     bom_header['rootSourceCode'] = ''
-    return {'records': linked, 'answer': answer, 'bom_header': bom_header}
+    return {'records': linked, 'answer': answer, 'bom_header': bom_header,
+            'grid_levels': grid_levels}
 
 
 def _hierarchy_columns(records, answer):
@@ -19211,6 +19224,7 @@ def _generate_bom_for_session(session_id, apply_dup_policy=True):
             'warnings': result.warnings,
         }, status=status.HTTP_400_BAD_REQUEST)
 
+    result.grid_levels = linked['grid_levels'] if grouped else {}
     return result, bom_header, None
 
 
