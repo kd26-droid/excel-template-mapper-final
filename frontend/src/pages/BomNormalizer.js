@@ -7028,6 +7028,11 @@ const findStrongMpnHeader = (headers = []) => {
 
 const isGenericPartHeader = (header) => /^part( number| no)?$/.test(normalizeKey(header));
 
+// Which file a row came from when several files are combined. Written by the
+// upload screen's combine (views._combined_upload_file), and read by the BOM step
+// and by generation to tell the files' BOMs apart.
+const BOM_SOURCE_FILE_COLUMN = 'Source file';
+
 const MULTI_BLOCK_META_HEADERS = [
   'Source sheet',
   'BOM block',
@@ -10321,6 +10326,9 @@ const BomNormalizer = () => {
   // question about real output instead of raw headers.
   const [bomStructureOpen, setBomStructureOpen] = useState(false);
   const [bomStructureAnswers, setBomStructureAnswers] = useState(null);
+  // The user's answer to "use source file as BOM groups". null means not
+  // answered, which defaults to on for combined files - see bomGroupColumn.
+  const [bomGroupingChoice, setBomGroupingChoice] = useState(null);
   // Answers carried over from a reused mapping template, already checked
   // against this file. The gate opens pre-filled with whatever survived.
   const [bomStructureSeed, setBomStructureSeed] = useState(null);
@@ -13782,11 +13790,41 @@ const BomNormalizer = () => {
   }, [buildNormalizerWorkflowRecipe, location.state, mergePreview, mergePreviewFilter, mergeVisibleColumns, navigate, saveReturnSnapshot, workflowTemplateInUse]);
 
   // Sheets offered to the gate: whichever the user actually normalized.
+  // A column saying which source each row came from, when there is more than
+  // one source. `Source file` is written when files are combined on the upload
+  // screen; `Source sheet` by selecting several sheets of one workbook.
+  const bomGroupCandidate = useMemo(() => {
+    const rows = normalizedRows.length ? normalizedRows : (preparedDataRows || []);
+    for (const column of [BOM_SOURCE_FILE_COLUMN, 'Source sheet']) {
+      const values = [];
+      rows.forEach((row) => {
+        const value = fmt(row?.[column]);
+        if (value && !values.includes(value)) values.push(value);
+      });
+      if (values.length > 1) return { column, values };
+    }
+    return null;
+  }, [normalizedRows, preparedDataRows]);
+
+  // Each source becomes its own BOM in the BOM step. On by default for combined
+  // FILES - combining them on the upload screen is the user saying so. Several
+  // sheets of one workbook have always been read as ONE BOM, and that stays the
+  // default until the user turns this on.
+  const bomGroupColumn = useMemo(() => {
+    if (!bomGroupCandidate) return '';
+    const enabled = bomGroupingChoice === null
+      ? bomGroupCandidate.column === BOM_SOURCE_FILE_COLUMN
+      : bomGroupingChoice;
+    return enabled ? bomGroupCandidate.column : '';
+  }, [bomGroupCandidate, bomGroupingChoice]);
+
   const bomStructureSheetNames = useMemo(
-    () => (sheetScope === 'single'
-      ? [sheetName].filter(Boolean)
-      : (selectedSheetNames || []).filter(Boolean)),
-    [sheetScope, sheetName, selectedSheetNames]
+    () => (bomGroupColumn
+      ? bomGroupCandidate.values
+      : sheetScope === 'single'
+        ? [sheetName].filter(Boolean)
+        : (selectedSheetNames || []).filter(Boolean)),
+    [bomGroupColumn, bomGroupCandidate, sheetScope, sheetName, selectedSheetNames]
   );
 
   // Once normalization has run, the gate must describe the NORMALIZED rows,
@@ -13811,15 +13849,23 @@ const BomNormalizer = () => {
   );
 
   const bomStructureRecordReader = useCallback(
-    () => (normalizedRows.length
-      ? normalizedRows
-      : rowsToObjects(sheetRows.slice(headerRowIndex + 1), headers, headerRowIndex + 2)),
-    [normalizedRows, sheetRows, headerRowIndex, headers]
+    (name) => {
+      const rows = normalizedRows.length
+        ? normalizedRows
+        : rowsToObjects(sheetRows.slice(headerRowIndex + 1), headers, headerRowIndex + 2);
+      // One source's rows only, so each BOM in the step is judged on its own
+      // lines - and so a code can be looked up in the OTHER sources' lines.
+      return bomGroupColumn ? rows.filter((row) => fmt(row?.[bomGroupColumn]) === name) : rows;
+    },
+    [normalizedRows, sheetRows, headerRowIndex, headers, bomGroupColumn]
   );
 
+  // A combined table has no title block of its own. Each file's was dropped
+  // when it was stacked, and offering one to every source would name all of
+  // them after one board.
   const bomStructurePreambleReader = useCallback(
-    () => sheetRows.slice(0, headerRowIndex),
-    [sheetRows, headerRowIndex]
+    () => (bomGroupColumn ? [] : sheetRows.slice(0, headerRowIndex)),
+    [sheetRows, headerRowIndex, bomGroupColumn]
   );
 
   const handleBomStructureConfirm = useCallback((payload) => {
@@ -17942,26 +17988,33 @@ const BomNormalizer = () => {
                       </FormControl>
                     </Grid>
                   </Grid>
-                  {headers.includes('Source file') && (
+                  {/* Shown when the rows say which file they came from and there is
+                      more than one. On, each file is its own BOM; which one sits
+                      under which is settled in the BOM step, from the code each
+                      file is given.
+                      Deliberately NOT sameGroupKeyColumn: that is the alternates
+                      key ("rows sharing this value are one line"), and pointing
+                      it at the file name folded every file into one line. */}
+                  {bomGroupCandidate && (
                     <Box sx={{ mt: 1.25, pt: 1.25, borderTop: `1px solid ${normalizerTheme.border}` }}>
-                      <FormControlLabel
-                        control={(
-                          <Checkbox
+                      <Paper elevation={0} sx={{ p: 1, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}>
+                        <Stack direction="row" alignItems="center" gap={0.5}>
+                          <Switch
                             size="small"
-                            checked={config.sameGroupKeyColumn === 'Source file'}
-                            onChange={(event) => {
-                              setParserTouched(true);
-                              setConfig((prev) => ({
-                                ...prev,
-                                sameGroupKeyColumn: event.target.checked
-                                  ? 'Source file'
-                                  : (prev.sameGroupKeyColumn === 'Source file' ? '' : prev.sameGroupKeyColumn),
-                              }));
-                            }}
+                            checked={Boolean(bomGroupColumn)}
+                            onChange={(event) => setBomGroupingChoice(event.target.checked)}
                           />
-                        )}
-                        label={<Typography sx={{ fontSize: 13, fontWeight: 600, color: normalizerTheme.text }}>Use source file as BOM groups</Typography>}
-                      />
+                          <Box>
+                            <Typography sx={{ fontSize: 12.5, fontWeight: 600 }}>
+                              Use source {bomGroupCandidate.column === BOM_SOURCE_FILE_COLUMN ? 'file' : 'sheet'} as BOM groups
+                            </Typography>
+                            <Typography sx={{ fontSize: 12, color: normalizerTheme.muted }}>
+                              {bomGroupCandidate.values.length} {bomGroupCandidate.column === BOM_SOURCE_FILE_COLUMN ? 'files' : 'sheets'} detected.
+                              {' '}Each becomes its own BOM; a BOM whose code is a line in another becomes its sub-BOM.
+                            </Typography>
+                          </Box>
+                        </Stack>
+                      </Paper>
                     </Box>
                   )}
                   {bomLayoutActive && (
@@ -21453,7 +21506,8 @@ const BomNormalizer = () => {
         getSheetHeaders={bomStructureHeaderReader}
         getSheetRecords={bomStructureRecordReader}
         getSheetPreambleRows={bomStructurePreambleReader}
-        initialAnswers={bomStructureSeed}
+        initialAnswers={bomGroupColumn ? null : bomStructureSeed}
+        groupColumn={bomGroupColumn}
         onConfirm={handleBomStructureConfirm}
       />
     </Box>

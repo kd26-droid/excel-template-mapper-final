@@ -8857,11 +8857,19 @@ def _authored_finished_goods(info):
     good is entered in the popup and lives only on the session.
     """
     goods = []
-    sheets = ((info or {}).get('bom_structure') or {}).get('sheets') or {}
+    structure = (info or {}).get('bom_structure') or {}
+    sheets = structure.get('sheets') or {}
+    grouped = bool(str(structure.get('groupColumn') or '').strip())
     for _sheet_name, answer in sheets.items():
         if not isinstance(answer, dict) or not answer.get('hasBom'):
             continue
         if answer.get('bomGenerationAvailable') is False:
+            continue
+        # In a grouped upload only the top file's finished good is authored. A
+        # sub-BOM's finished good is a line in its parent's file, so it is
+        # already a row - appending it again would list the board twice in the
+        # item directory.
+        if grouped and str(answer.get('parentBom') or '').strip():
             continue
         header = answer.get('bomHeader') or {}
         code = str(header.get('finishedGoodCode') or '').strip()
@@ -9116,7 +9124,14 @@ def _type_authored_assemblies(info, headers, rows):
 def _apply_sub_assembly_item_types(session_id, info, rows, headers):
     """Type every sub-assembly row in the item export as a Finished good."""
     sheets = ((info or {}).get('bom_structure') or {}).get('sheets') or {}
-    if not any(answer.get('hasLevels') for answer in sheets.values() if isinstance(answer, dict)):
+    # Several files linked into one tree have sub-assemblies even though every
+    # file on its own is flat - the levels come from the links, not from any
+    # sheet's answer. Checking hasLevels alone left every linked board typed as
+    # a raw material, bought in, while a BOM in the same file builds it.
+    grouped = len(_grouped_bom_answers(info)[1]) > 1
+    if not grouped and not any(
+        answer.get('hasLevels') for answer in sheets.values() if isinstance(answer, dict)
+    ):
         return rows, 0
     codes = _sub_assembly_item_codes(session_id)
     if not codes or not headers:
@@ -18653,6 +18668,205 @@ def _add_mpn_validation_columns(headers, columns):
     _place_consolidated_mpn_column(headers)
 
 
+#: Columns that identify a row, in the order _hierarchy_columns tries them. A
+#: grouped upload links its files on the same column the tree is later keyed on,
+#: so a file that links here cannot fail to link there.
+GROUP_LINK_CODE_COLUMNS = ('cpn', 'Item code', 'mpn')
+
+
+def _grouped_bom_answers(info):
+    """The per-file BOM answers of a grouped upload, or ('', {}) when it isn't one.
+
+    A grouped upload is several source files stacked into one table, with a
+    column saying which file each row came from. The popup asks one set of BOM
+    questions per file and keys the answers by that file. Only answers that
+    describe a BOM count - a file the user said has none is not a group.
+    """
+    structure = (info or {}).get('bom_structure') or {}
+    column = str(structure.get('groupColumn') or '').strip()
+    if not column:
+        return '', {}
+    answers = {}
+    for name, answer in (structure.get('sheets') or {}).items():
+        if not isinstance(answer, dict) or not answer.get('hasBom'):
+            continue
+        if answer.get('bomGenerationAvailable') is False:
+            continue
+        answers[str(name)] = answer
+    return column, answers
+
+
+def _link_grouped_boms(records, group_column, group_answers):
+    """Join several single-level BOMs - one per source file - into one tree.
+
+    Nothing in the files says how they relate; the files are linked by the code
+    the user gave each one. When that code appears as a line in another file,
+    this file is the BOM for that line. The file no other file lists is the top
+    BOM. That is the whole rule, so it holds for any customer's layout: no
+    preamble, filename convention or parent column is read.
+
+    Every row is then given the `level` and `parent` a stated-parent sheet would
+    have carried, and the tree builder takes it from there.
+
+    Returns {'records', 'answer', 'bom_header'} or {'error': message}.
+    """
+    if not records:
+        return {'error': 'There are no rows to build the BOMs from.'}
+    if group_column not in records[0]:
+        return {'error': ('The rows no longer say which file they came from (no "%s" '
+                          'column), so the files cannot be told apart. Run the BOM '
+                          'Normalizer again on the combined files.' % group_column)}
+
+    code_column = next(
+        (column for column in GROUP_LINK_CODE_COLUMNS
+         if column in records[0] and any(str(r.get(column) or '').strip() for r in records)),
+        '',
+    )
+    if not code_column:
+        return {'error': 'No part number column has any values, so the files cannot be linked.'}
+
+    def key(value):
+        return str(value or '').strip().upper()
+
+    for name, answer in group_answers.items():
+        # One file that is itself multi-level would need its own levels shifted
+        # under its parent's line, and its own parents kept. Refused rather than
+        # half-done: a wrong tree here looks exactly like a right one.
+        if answer.get('hasLevels'):
+            return {'error': ('"%s" is a multi-level BOM. Linking files together '
+                              'currently works for single-level files only.' % name)}
+
+    typed = {}
+    for name, answer in group_answers.items():
+        code = str((answer.get('bomHeader') or {}).get('finishedGoodCode') or '').strip()
+        if not code:
+            return {'error': 'No BOM code was given for "%s".' % name}
+        typed[name] = code
+    seen = {}
+    for name, code in typed.items():
+        if key(code) in seen:
+            return {'error': ('"%s" and "%s" were both given the code %s. Each file '
+                              'is its own BOM and needs its own code.'
+                              % (seen[key(code)], name, code))}
+        seen[key(code)] = name
+
+    rows_of = {name: [] for name in group_answers}
+    unclaimed = Counter()
+    for record in records:
+        name = str(record.get(group_column) or '').strip()
+        if name in rows_of:
+            rows_of[name].append(record)
+        else:
+            unclaimed[name or '(blank)'] += 1
+    if unclaimed:
+        return {'error': ('%d rows come from files with no BOM answer: %s. Every file '
+                          'needs one.' % (sum(unclaimed.values()),
+                                          ', '.join(sorted(unclaimed)[:5])))}
+
+    # Only links the user CONFIRMED. A code matching a line in another file is
+    # a suggestion in the BOM step, never a link on its own: two files can
+    # share a part number by coincidence, and nesting one under the other
+    # because a string matched is the silent restructuring nobody can explain
+    # afterwards. Each confirmed link is checked against the rows here, and the
+    # cell's own spelling kept - the tree is keyed on the cell, not the typing.
+    by_typed_code = {key(code): name for name, code in typed.items()}
+    parent_of = {}
+    line_code = {}
+    for name, code in typed.items():
+        answer = group_answers[name]
+        parent = str(answer.get('parentGroup') or '').strip()
+        if not parent and str(answer.get('parentBom') or '').strip():
+            parent = by_typed_code.get(key(answer.get('parentBom')), '')
+        if not parent:
+            parent_of[name] = None
+            line_code[name] = code
+            continue
+        if parent not in rows_of or parent == name:
+            return {'error': ('"%s" was linked under "%s", which is not another file in '
+                              'this upload.' % (name, parent))}
+        # The typed code is looked for in EVERY column that identifies a row, not
+        # only the one the tree is keyed on. Which column that is depends on what
+        # is filled: once the editor has generated item codes the tree keys on
+        # "24U751_Graco Spec.", while the user - and the BOM step, which reads
+        # the rows before the editor - knows the line as 24U751. Matching one
+        # column only, the step showed a link that generation then refused.
+        line = next(
+            (record for record in rows_of[parent]
+             if any(key(record.get(column)) == key(code)
+                    for column in GROUP_LINK_CODE_COLUMNS if column in record)),
+            None,
+        )
+        # The child hangs off the line's TREE key, whatever the user typed.
+        cell = str((line or {}).get(code_column) or '').strip()
+        if not cell:
+            return {'error': ('"%s" was linked as a sub-BOM of "%s", but %s is not a line '
+                              'in that file.' % (name, parent, code))}
+        parent_of[name] = parent
+        line_code[name] = cell
+
+    roots = [name for name, parent in parent_of.items() if parent is None]
+    if len(roots) != 1:
+        if not roots:
+            return {'error': ('Every file was linked under another, so there is no top '
+                              'BOM - the files reference each other in a loop.')}
+        # One upload builds one tree. Several unrelated BOMs in one upload is a
+        # different feature, not something to produce by leaving links out.
+        return {'error': ('%d files are top BOMs: %s. One upload builds one BOM tree - '
+                          'link the others as sub-BOMs in the BOM step, or upload them '
+                          'separately.' % (len(roots), ', '.join(roots)))}
+    root = roots[0]
+
+    depth = {}
+    for name in group_answers:
+        chain, current = [], name
+        while parent_of[current] is not None:
+            if current in chain:
+                return {'error': 'The files reference each other in a loop: %s.'
+                                 % ' -> '.join(chain + [current])}
+            chain.append(current)
+            current = parent_of[current]
+        depth[name] = len(chain)
+
+    # Top BOM first, then each tier below it, keeping every file's own row order.
+    ordered = sorted(group_answers, key=lambda name: depth[name])
+    linked = []
+    for name in ordered:
+        for record in rows_of[name]:
+            row = dict(record)
+            row['level'] = str(depth[name] + 1)
+            # The top file's rows hang off the authored finished good, which is
+            # what an empty parent means to the tree builder.
+            row['parent'] = '' if name == root else line_code[name]
+            linked.append(row)
+
+    # Each sub-BOM keeps the header the user gave its file, keyed by the line it
+    # is the BOM for - the same map the generator renames sub-assemblies through.
+    sub_boms = {}
+    for name in group_answers:
+        if name == root:
+            continue
+        header = group_answers[name].get('bomHeader') or {}
+        sub_boms[line_code[name]] = {
+            # The item this BOM builds is the LINE it hangs off - an item that
+            # exists in the item sheet. What the user typed identified that
+            # line; it is not a new item, and a finished good FactWise has no
+            # item for fails the import.
+            'finishedGoodCode': line_code[name],
+            'bomCode': str(header.get('bomCode') or '').strip() or line_code[name],
+            'bomName': str(header.get('bomName') or '').strip() or line_code[name],
+            'measurementUnit': str(header.get('measurementUnit') or '').strip(),
+            'baseQuantity': header.get('baseQuantity'),
+        }
+
+    answer = dict(group_answers[root])
+    answer.update({'hasLevels': True, 'levelColumn': 'level', 'subBoms': sub_boms})
+    bom_header = dict(answer.get('bomHeader') or {})
+    # The top file's finished good is authored, never a row in any file, so
+    # there is no sheet code for it to be renamed from.
+    bom_header['rootSourceCode'] = ''
+    return {'records': linked, 'answer': answer, 'bom_header': bom_header}
+
+
 def _hierarchy_columns(records, answer):
     """Pick the level / code columns to derive a tree from.
 
@@ -18783,8 +18997,18 @@ def _generate_bom_for_session(session_id, apply_dup_policy=True):
                                     status=status.HTTP_404_NOT_FOUND)
 
     sheets = (info.get('bom_structure') or {}).get('sheets') or {}
+
+    # Several source files, each its own BOM. The answers are keyed by file
+    # rather than by sheet, and ALL of them are used: which one is the top BOM
+    # and which are its sub-BOMs is only known once the rows are read, so it is
+    # decided below rather than here. Taking the first answer and stopping, as a
+    # single-sheet upload does, built every file's rows under one finished good
+    # and silently discarded the rest.
+    group_column, group_answers = _grouped_bom_answers(info)
+    grouped = len(group_answers) > 1
+
     answer = None
-    for _sheet_name, sheet_answer in sheets.items():
+    for _sheet_name, sheet_answer in ([] if grouped else sheets.items()):
         if not sheet_answer.get('hasBom'):
             continue
         # The user said this sheet is not tree-shaped, so no BOM is built from
@@ -18799,21 +19023,23 @@ def _generate_bom_for_session(session_id, apply_dup_policy=True):
         answer = sheet_answer
         break
 
-    if answer is None:
+    if answer is None and not grouped:
         return None, None, Response({
             'success': False,
             'error': 'No sheet in this upload was marked as containing a BOM.',
             'needs': 'bom_sheet',
         }, status=status.HTTP_400_BAD_REQUEST)
 
-    is_hierarchical = bool(answer.get('hasLevels'))
-    bom_header = answer.get('bomHeader')
+    # Grouped: the answer and header are the TOP BOM's, which is not known until
+    # the rows say which file every other file hangs under. Set after linking.
+    is_hierarchical = True if grouped else bool(answer.get('hasLevels'))
+    bom_header = None if grouped else answer.get('bomHeader')
 
     # A finished good is required either way. A flat sheet has no root at all; a
     # hierarchical sheet usually starts at level 1 and names its root in a
     # preamble above the table, which is not part of the data. Both are authored
     # in the BOM structure gate.
-    if not bom_header:
+    if not bom_header and not grouped:
         return None, None, Response({
             'success': False,
             'error': ('No finished good has been defined for this upload, so a BOM '
@@ -18927,6 +19153,23 @@ def _generate_bom_for_session(session_id, apply_dup_policy=True):
                     'source_rows': join_note.get('source_rows', 0),
                 }, status=status.HTTP_400_BAD_REQUEST)
             records = source_records
+
+    # Grouped files become one tree here, and it has to happen BEFORE the
+    # duplicate policy below. Until linking, every file's rows sit at level 1
+    # with no parent, so the policy - which buckets by parent and level - would
+    # read a terminal used in the top BOM and the same terminal used inside a
+    # sub-BOM as one part listed twice, and add them together.
+    if grouped:
+        linked = _link_grouped_boms(records, group_column, group_answers)
+        if linked.get('error'):
+            return None, None, Response({
+                'success': False,
+                'error': linked['error'],
+                'needs': 'bom_group_links',
+            }, status=status.HTTP_400_BAD_REQUEST)
+        records = linked['records']
+        answer = linked['answer']
+        bom_header = linked['bom_header']
 
     # Apply the duplicate-handling policy on the normalized records — AFTER
     # the grid ↔ source merge has succeeded, BEFORE tree derivation. Doing it
