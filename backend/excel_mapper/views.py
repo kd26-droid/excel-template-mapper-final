@@ -18781,6 +18781,7 @@ def _link_grouped_boms(records, group_column, group_answers):
     by_typed_code = {key(code): name for name, code in typed.items()}
     parent_of = {}
     line_code = {}
+    line_item = {}
     for name, code in typed.items():
         answer = group_answers[name]
         parent = str(answer.get('parentGroup') or '').strip()
@@ -18812,6 +18813,7 @@ def _link_grouped_boms(records, group_column, group_answers):
                               'in that file.' % (name, parent, code))}
         parent_of[name] = parent
         line_code[name] = cell
+        line_item[name] = str(line.get('Item code') or '').strip()
 
     roots = [name for name, parent in parent_of.items() if parent is None]
     if len(roots) != 1:
@@ -18866,8 +18868,11 @@ def _link_grouped_boms(records, group_column, group_answers):
             # The item this BOM builds is the LINE it hangs off - an item that
             # exists in the item sheet. What the user typed identified that
             # line; it is not a new item, and a finished good FactWise has no
-            # item for fails the import.
-            'finishedGoodCode': line_code[name],
+            # item for fails the import. Its item code, not its tree key: the
+            # tree keys on the CPN (24U751) while the item is 24U751_Graco
+            # Spec., and a BOM building "24U751" built nothing in the item file
+            # and left the real board typed as a raw material.
+            'finishedGoodCode': line_item.get(name) or line_code[name],
             'bomCode': str(header.get('bomCode') or '').strip() or line_code[name],
             'bomName': str(header.get('bomName') or '').strip() or line_code[name],
             'measurementUnit': str(header.get('measurementUnit') or '').strip(),
