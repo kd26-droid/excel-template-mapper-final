@@ -555,6 +555,10 @@ const EnhancedDataEditor = () => {
   // Pagination state. Paging is client-side over the full dataset, so totalPages
   // is derived from the filtered row count further down rather than stored.
   const [page, setPage] = useState(1);
+  // The page the user is on right now, for long-running loops whose closure
+  // captured an older one.
+  const pageRef = useRef(page);
+  pageRef.current = page;
   const [pageSize, setPageSize] = useState(100);
   const [pageLoading, setPageLoading] = useState(false);
   // Per-column filter text, keyed by column field. Empty/absent means no filter.
@@ -8178,6 +8182,10 @@ const EnhancedDataEditor = () => {
                       // Providers that could not be reached. Their columns come back
                       // blank, which must not be read as "no match".
                       const providerFailures = new Map();
+                      // Columns the grid already draws. A batch only needs the
+                      // full reload - which rebuilds every column and returns to
+                      // page 1 - when it brings a column the grid has not got.
+                      let knownHeaders = new Set(availableFields);
                       setMpnProgress({ done: 0, total: 0 });
                       // eslint-disable-next-line no-constant-condition
                       while (true) {
@@ -8208,11 +8216,40 @@ const EnhancedDataEditor = () => {
                             Boolean(d.done)
                           );
                           if (!shown) { setShowMpnColumns(true); shown = true; }
-                          await fetchDataSynchronized();
+                          // Straight from the server: the synchronizer's quick
+                          // fetch falls back to its last copy when slow, which
+                          // showed the count rising over a grid that did not.
+                          const latestResp = await api.getMappedDataWithSpecs(sessionId, 1, ALL_ROWS_PAGE_SIZE, true, {
+                            force_fresh: true,
+                            _fresh: Date.now(),
+                            timeoutMs: 180000,
+                            entityName: factwiseEntityName
+                          });
+                          const latest = latestResp?.data || {};
+                          const latestHeaders = latest.headers || [];
+                          if (latestHeaders.some(header => header && !knownHeaders.has(header))) {
+                            // New validation columns: build them the normal way,
+                            // once, and stay on the page the user is reading.
+                            const keepPage = pageRef.current;
+                            await fetchDataSynchronized();
+                            setPage(keepPage);
+                            knownHeaders = new Set(latestHeaders);
+                          } else if (Array.isArray(latest.data)) {
+                            // Same columns: only the values changed, so swap the
+                            // rows and leave columns, page and scroll alone.
+                            setRowData(latest.data);
+                          }
                         } catch (_) { /* keep warming even if a partial render hiccups */ }
                         if (d.done || total === 0) break;
                         offset = Number.isFinite(d.next_offset) ? d.next_offset : offset + COLD_CHUNK;
                       }
+                      // One normal reload at the end, so the finished grid is
+                      // exactly what opening the sheet would show.
+                      try {
+                        const keepPage = pageRef.current;
+                        await fetchDataSynchronized();
+                        setPage(keepPage);
+                      } catch (_) { /* the last batch's rows are already on screen */ }
                       setMpnProgress(null);
                       setMpnValidationCompleted(true);
                       // Counts are unique MPNs, not rows: the grid holds one page

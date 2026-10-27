@@ -6723,6 +6723,10 @@ def data_view(request):
         except Exception as _e:
             pass
 
+        # Files linked as sub-BOMs: the editor shows the tree's levels, as the
+        # export does.
+        info = _stamp_linked_bom_levels(session_id, info)
+
         # === DETAILED LOGGING FOR DATA_VIEW ===
         logger.info(f"📊 DATA_VIEW: Session {session_id}")
         logger.info(f"📊 DATA_VIEW: template_headers = {info.get('template_headers')}")
@@ -18878,6 +18882,53 @@ def _link_grouped_boms(records, group_column, group_answers):
     bom_header['rootSourceCode'] = ''
     return {'records': linked, 'answer': answer, 'bom_header': bom_header,
             'grid_levels': grid_levels}
+
+
+def _stamp_linked_bom_levels(session_id, info):
+    """Write a linked upload's tree levels into the editor's Level column.
+
+    The grid holds every file's own levels - all 1 - and the export already
+    corrects them, so the editor said 1 for lines the file it shipped said 2.
+    Done once per set of links rather than on every load: generation is the only
+    place the levels are known, and an edit made to Level afterwards is the
+    user's and stays until the links change.
+
+    Returns the session to serve.
+    """
+    _group_column, group_answers = _grouped_bom_answers(info)
+    if len(group_answers) < 2:
+        return info
+    stamp = json.dumps(info.get('bom_structure') or {}, sort_keys=True, default=str)
+    if info.get('linked_bom_levels_stamp') == stamp:
+        return info
+    try:
+        result, _bom_header, error_response = _generate_bom_for_session(
+            session_id, apply_dup_policy=False)
+    except Exception as exc:
+        logger.warning('Linked BOM levels: generation failed for %s (%s)', session_id, exc)
+        return info
+    info = get_session_consistent(session_id) or info
+    grid_levels = {}
+    if error_response is None and result is not None:
+        grid_levels = getattr(result, 'grid_levels', None) or {}
+    headers, rows = read_session_grid(session_id, info)
+    level_index = _grid_column_index(headers, 'Level')
+    changed = 0
+    if level_index >= 0:
+        for position, level in grid_levels.items():
+            row = rows[position - 1] if 0 < position <= len(rows) else None
+            if isinstance(row, list) and level_index < len(row) \
+                    and str(row[level_index] or '').strip() != str(level):
+                row[level_index] = str(level)
+                changed += 1
+    if changed:
+        write_session_grid(session_id, info, headers, rows)
+        logger.info('Linked BOM levels: set %d Level cell(s) in %s', changed, session_id)
+    # Stamped even when the links do not build yet, so a broken set is not
+    # regenerated on every load; fixing the links changes the stamp.
+    info['linked_bom_levels_stamp'] = stamp
+    save_session(session_id, info)
+    return info
 
 
 def _hierarchy_columns(records, answer):
