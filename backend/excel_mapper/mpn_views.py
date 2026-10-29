@@ -2293,16 +2293,23 @@ def mpn_validate(request):
             """The sheet column by that name, however it is spelt there.
 
             Settings stores one spelling and a sheet may carry another - "Tag 1"
-            against "Tag_1" is the usual pair - so the fallback ignores spacing
-            and case rather than silently comparing against nothing.
+            against "Tag_1" is the usual pair, and a template's own label is
+            "Tag (1)" - so the fallback ignores spacing, brackets and case rather
+            than silently comparing against nothing. Missing the brackets put
+            "No manufacturer provided" on every row of a sheet whose Tag (1)
+            named a manufacturer on each one.
             """
             if not name:
                 return None
             if name in headers:
                 return headers.index(name)
-            flat = name.replace(' ', '').replace('_', '').lower()
+
+            def flat(value):
+                return re.sub(r'[\s_()]', '', str(value)).lower()
+
+            wanted = flat(name)
             for position, header in enumerate(headers):
-                if str(header).replace(' ', '').replace('_', '').lower() == flat:
+                if flat(header) == wanted:
                     return position
             return None
 

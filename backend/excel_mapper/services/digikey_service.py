@@ -552,7 +552,7 @@ class DigiKeyClient:
         Result: {'valid': bool, 'canonical_mpn': str|None, 'dkpn': str|None,
                  'lifecycle': {...}}
         """
-        from ..models import GlobalMpnCache
+        from ..models import GlobalMpnCache, is_current_digikey_result
 
         results: Dict[str, Dict[str, Any]] = {}
         self.last_validation_timings = []
@@ -590,7 +590,7 @@ class DigiKeyClient:
             # Fall back to short-term Django cache
             cache_key = self._cache_key(mpn_norm, manufacturer_id)
             django_cached = cache.get(cache_key)
-            if django_cached and 'specs' in django_cached:
+            if django_cached and is_current_digikey_result(django_cached):
                 results[mpn_norm] = django_cached
                 cache_hits += 1
                 # Also store in global cache for future use

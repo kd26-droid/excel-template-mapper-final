@@ -175,6 +175,11 @@ _MANUFACTURER_SUFFIXES = {
     'CORP', 'CORPORATION', 'INC', 'INCORPORATED', 'LTD', 'LIMITED', 'LLC',
     'GMBH', 'CO', 'COMPANY', 'PLC', 'SA', 'AG', 'BV', 'NV', 'KK', 'PTE',
     'PVT', 'PRIVATE', 'HOLDINGS', 'GROUP', 'INTERNATIONAL', 'INDUSTRIES',
+    # What a company does, not who it is. Left in, "MURATA MANUFACTURING CO
+    # LTD" and Digi-Key's "Murata Electronics" shared no word but the name and
+    # read as two manufacturers.
+    'MANUFACTURING', 'ELECTRONICS', 'ELECTRONIC', 'SEMICONDUCTOR',
+    'SEMICONDUCTORS', 'TECHNOLOGY', 'TECHNOLOGIES', 'COMPONENTS', 'USA',
 }
 
 #: Said in the cell when the sheet's chosen manufacturer column is empty. Not
@@ -225,6 +230,11 @@ def manufacturer_agrees(sheet_manufacturer, provider_manufacturer):
         return ''
     sheet_set, provider_set = set(sheet_tokens), set(provider_tokens)
     if sheet_set <= provider_set or provider_set <= sheet_set:
+        return 'Yes'
+    # The same name first is the same company: providers add a division or
+    # brand after it - "Vishay General Semiconductor - Diodes Division" for
+    # VISHAY INTERTECHNOLOGY, "NXP USA Inc." for NXP SEMICONDUCTORS.
+    if sheet_tokens[0] == provider_tokens[0] and len(sheet_tokens[0]) >= 3:
         return 'Yes'
     if len(sheet_tokens) == 1 and len(sheet_tokens[0]) >= 2:
         if provider_tokens[0].startswith(sheet_tokens[0]):

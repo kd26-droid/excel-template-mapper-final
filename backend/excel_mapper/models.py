@@ -538,6 +538,19 @@ class MpnOAuthToken(models.Model):
         return f"Digi-Key OAuth token exp={self.expires_at.isoformat()}"
 
 
+def is_current_digikey_result(entry):
+    """Whether a cached Digi-Key result answers what validation now asks.
+
+    Results cached before specs, or - for a part Digi-Key found - before its
+    manufacturer was kept, are misses: a hit left the provider's Manufacturer
+    blank and its MFR Valid with nothing to compare. Re-fetched once per MPN as
+    each is next used, rather than wiping the cache and paying for every part.
+    """
+    if not isinstance(entry, dict) or 'specs' not in entry:
+        return False
+    return not entry.get('valid') or 'manufacturer' in entry
+
+
 class GlobalMpnCache(models.Model):
     """
     Global persistent cache for MPN validation results.
@@ -613,6 +626,8 @@ class GlobalMpnCache(models.Model):
                 currency=currency,
                 updated_at__gte=timezone.now() - MPN_CACHE_TTL,
             )
+            if not is_current_digikey_result(cache_entry.validation_data):
+                return None
             cache_entry.increment_access()
             return cache_entry.validation_data
         except cls.DoesNotExist:
@@ -635,7 +650,10 @@ class GlobalMpnCache(models.Model):
             currency=currency,
             updated_at__gte=timezone.now() - MPN_CACHE_TTL,
         ).only('mpn_normalized', 'validation_data')
-        return {entry.mpn_normalized: entry.validation_data for entry in entries}
+        return {
+            entry.mpn_normalized: entry.validation_data for entry in entries
+            if is_current_digikey_result(entry.validation_data)
+        }
 
     @classmethod
     def store_result(cls, mpn_norm: str, validation_data: dict, manufacturer_id: str = None,
