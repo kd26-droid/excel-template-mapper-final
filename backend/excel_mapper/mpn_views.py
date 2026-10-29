@@ -1880,40 +1880,63 @@ def mpn_validate_warm(request):
         return Response({'success': False, 'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
-#: Written on each alternate row; the primary's row stays blank.
-ALTERNATE_COMPARISON_COLUMNS = ('Similarity to primary', 'Spec differences', 'Alternate rank')
+#: Written on each alternate row, per provider; the primary's row stays blank.
+ALTERNATE_PROVIDERS = ('DigiKey', 'Mouser', 'Element14')
+
+
+def alternate_comparison_columns(provider):
+    """(similarity, differences, rank) column names for one provider."""
+    return ('%s alternate similarity to primary' % provider,
+            '%s spec differences (alternate vs primary)' % provider,
+            '%s alternate rank' % provider)
 
 
 def _compare_alternates(session_id, headers, rows):
-    """Score every alternate against its primary on the providers' specs.
+    """Score every alternate against its primary on each provider's specs.
 
     Which row is an alternate of which comes from the BOM build - the same
     answer the export writes as "Alternate for?" - so a sheet normalised with
     no alternates gets no comparison rather than a guessed one.
 
-    Specs come from one provider for both rows: Digi-Key where it has both,
-    then Mouser, then Element14. The three name specs differently, so a
-    Digi-Key spec compared against an Element14 one would always differ.
+    Each provider is scored on its own, both rows read from that provider: the
+    three name specs differently, so a Digi-Key spec compared against an
+    Element14 one would always differ. A provider with no Specifications column
+    in this run gets no columns.
 
-    Edits `headers` and `rows` in place. Returns the number of alternates scored.
+    Edits `headers` and `rows` in place. Returns the number of alternates scored
+    by at least one provider.
     """
     from .views import _generate_bom_for_session
     result, _bom_header, error_response = _generate_bom_for_session(
         session_id, apply_dup_policy=False)
     entries = [] if error_response is not None or result is None else (
         getattr(result, 'alternate_rows', None) or [])
-    if not entries or 'Item code' not in headers:
+    providers = [provider for provider in ALTERNATE_PROVIDERS
+                 if '%s Specifications' % provider in headers]
+    if not entries or not providers or 'Item code' not in headers:
         return 0
 
-    for column in ALTERNATE_COMPARISON_COLUMNS:
-        if column not in headers:
-            headers.append(column)
+    # Inside each provider's own cluster, straight after its Specifications -
+    # the column the scores are read from - rather than appended past every
+    # other provider. Dropped and re-inserted on a re-run, so they land there
+    # whatever an earlier run did, and start blank.
+    ours = {column for provider in ALTERNATE_PROVIDERS
+            for column in alternate_comparison_columns(provider)}
     width = len(headers)
     for row in rows:
         while len(row) < width:
             row.append('')
-        for column in ALTERNATE_COMPARISON_COLUMNS:
-            row[headers.index(column)] = ''
+    for position in reversed(range(len(headers))):
+        if headers[position] in ours:
+            del headers[position]
+            for row in rows:
+                del row[position]
+    for provider in providers:
+        at = headers.index('%s Specifications' % provider) + 1
+        for offset, column in enumerate(alternate_comparison_columns(provider)):
+            headers.insert(at + offset, column)
+            for row in rows:
+                row.insert(at + offset, '')
 
     code_at = headers.index('Item code')
     alternate_rows = {entry.get('grid_row') for entry in entries}
@@ -1923,42 +1946,35 @@ def _compare_alternates(session_id, headers, rows):
         if code and position not in alternate_rows:
             primary_row.setdefault(code, row)
 
-    spec_columns = [('%s Specifications' % provider, provider)
-                    for provider in ('DigiKey', 'Mouser', 'Element14')]
-    scored = {}
-    for entry in entries:
-        position = entry.get('grid_row')
-        if not isinstance(position, int) or not 0 < position <= len(rows):
-            continue
-        row = rows[position - 1]
-        primary = primary_row.get(str(entry.get('alternate_for') or '').strip())
-        if primary is None:
-            continue
-        score, differences, source = None, [], ''
-        for column, provider in spec_columns:
-            if column not in headers:
+    scored_rows = set()
+    for provider in providers:
+        similarity, differences_column, rank_column = alternate_comparison_columns(provider)
+        specs_at = headers.index('%s Specifications' % provider)
+        scored = {}
+        for entry in entries:
+            position = entry.get('grid_row')
+            if not isinstance(position, int) or not 0 < position <= len(rows):
                 continue
-            at = headers.index(column)
-            if str(primary[at] or '').strip() and str(row[at] or '').strip():
-                score, differences = compare_specs(primary[at], row[at])
-                if score is not None:
-                    source = provider
-                    break
-        if score is None:
-            row[headers.index('Spec differences')] = 'No specs to compare'
-            continue
-        row[headers.index('Similarity to primary')] = '%d%%' % score
-        row[headers.index('Spec differences')] = (
-            '%s: %s' % (source, '; '.join(differences[:4])) if differences
-            else '%s: all shared specs match' % source)
-        group = (entry.get('bom_id'), entry.get('alternate_for'))
-        scored.setdefault(group, []).append((score, row))
-
-    for group in scored.values():
-        group.sort(key=lambda item: -item[0])
-        for rank, (_score, row) in enumerate(group, start=1):
-            row[headers.index('Alternate rank')] = str(rank)
-    return sum(len(group) for group in scored.values())
+            row = rows[position - 1]
+            primary = primary_row.get(str(entry.get('alternate_for') or '').strip())
+            if primary is None:
+                continue
+            score, differences = None, []
+            if str(primary[specs_at] or '').strip() and str(row[specs_at] or '').strip():
+                score, differences = compare_specs(primary[specs_at], row[specs_at])
+            if score is None:
+                row[headers.index(differences_column)] = 'No specs to compare'
+                continue
+            row[headers.index(similarity)] = '%d%%' % score
+            row[headers.index(differences_column)] = (
+                '; '.join(differences[:4]) if differences else 'All shared specs match')
+            scored.setdefault((entry.get('bom_id'), entry.get('alternate_for')), []).append((score, row))
+            scored_rows.add(position)
+        for group in scored.values():
+            group.sort(key=lambda item: -item[0])
+            for rank, (_score, row) in enumerate(group, start=1):
+                row[headers.index(rank_column)] = str(rank)
+    return len(scored_rows)
 
 
 @api_view(['POST'])

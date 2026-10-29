@@ -240,6 +240,16 @@ const getColumnProviderMappingsFromStorage = () => {
   }
 };
 
+// Which provider wrote a validation column, from its name: 'DigiKey Status',
+// 'MPN valid (Mouser)', 'MPNR'. Null for every other column.
+const providerOfColumn = (field) => {
+  const name = String(field || '');
+  if (/^DigiKey |^MPN valid \(DigiKey\)$/.test(name)) return 'digikey';
+  if (/^Mouser |^MPN valid \(Mouser\)$|^MPNR$/.test(name)) return 'mouser';
+  if (/^Element14 |^MPN valid \(Element14\)$/.test(name)) return 'element14';
+  return null;
+};
+
 const getConfiguredMpnValidationColumns = () => {
   const selectedColumns = [];
   const labelsByField = {};
@@ -983,6 +993,10 @@ const EnhancedDataEditor = () => {
     const rowNumberColumns = [];
     const normalColumns = [];
     const selectedValidationColumns = [];
+    // Every column one provider wrote, kept together at the end in the order
+    // validation added them - status, canonical, description, specs, alternate
+    // scores - so DigiKey's answers are not split across the sheet.
+    const providerColumns = { digikey: [], mouser: [], element14: [] };
 
     columnDefs.forEach(col => {
       // Always show row number column
@@ -992,18 +1006,19 @@ const EnhancedDataEditor = () => {
       }
 
       // Filter MPN columns based on toggle - check both field and headerName
-      if (isMpnValidationColumn(col.field) || isMpnValidationColumn(col.headerName)) {
-        if (showMpnColumns && selectedValidationSet.has(col.field)) {
-          selectedValidationColumns.push({
-            ...col,
-            headerName: labelsByField[col.field] || col.headerName
-          });
-        }
-        return;
+      const isCoreValidation = isMpnValidationColumn(col.field) || isMpnValidationColumn(col.headerName);
+      if (isCoreValidation && !(showMpnColumns && selectedValidationSet.has(col.field))) return;
+      const shown = isCoreValidation
+        ? { ...col, headerName: labelsByField[col.field] || col.headerName }
+        : col;
+      const provider = providerOfColumn(col.field);
+      if (provider) {
+        providerColumns[provider].push(shown);
+      } else if (isCoreValidation) {
+        selectedValidationColumns.push(shown);
+      } else {
+        normalColumns.push(col);
       }
-
-      // Show all other columns
-      normalColumns.push(col);
     });
 
     const byField = new Map(selectedValidationColumns.map(col => [col.field, col]));
@@ -1011,7 +1026,14 @@ const EnhancedDataEditor = () => {
       .map(field => byField.get(field))
       .filter(Boolean);
 
-    return [...rowNumberColumns, ...normalColumns, ...orderedValidationColumns];
+    return [
+      ...rowNumberColumns,
+      ...normalColumns,
+      ...orderedValidationColumns,
+      ...providerColumns.digikey,
+      ...providerColumns.mouser,
+      ...providerColumns.element14,
+    ];
   }, [columnDefs, showMpnColumns, isMpnValidationColumn]);
 
   const hasMpnValidationColumns = useMemo(() => {
@@ -7767,7 +7789,7 @@ const EnhancedDataEditor = () => {
                   sx={exportFactwiseActionSx}
                   variant="contained"
                 >
-                  Export to FactWise
+                  Export
                 </Button>
                 <IconButton
                   onClick={handleManualRefresh}
@@ -9470,7 +9492,7 @@ const EnhancedDataEditor = () => {
           <Button variant="contained" onClick={() => { setExportBomOpen(false); handleExportToProject(); }} disabled={exportBomBusy}
             startIcon={<FolderOpenIcon />}
             sx={{ bgcolor: '#e65100', '&:hover': { bgcolor: '#bf360c' }, textTransform: 'none', fontWeight: 600 }}>
-            Export to FactWise
+            Export
           </Button>
           {/* Export Sheet — downloads the pre-made sheet */}
           <Button variant="contained" onClick={handleExportBomSheet} disabled={exportBomBusy}
@@ -10878,7 +10900,7 @@ const EnhancedDataEditor = () => {
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25 }}>
             <FolderOpenIcon sx={{ color: '#2563eb' }} />
             <Typography variant="h6" sx={{ fontSize: 18, fontWeight: 620, color: exportDialogTone.heading }}>
-              Export to FactWise
+              Export
             </Typography>
           </Box>
           <IconButton onClick={() => setFactwiseExportDialogOpen(false)} size="small" sx={{ color: exportDialogTone.secondary }}>
@@ -10984,7 +11006,7 @@ const EnhancedDataEditor = () => {
               {factwisePreviewType === 'bom'
                 ? 'Export BOM'
                 : factwisePreviewType === 'combined'
-                  ? 'Export Sheet (4.0)'
+                  ? 'Export Sheet'
                   : 'Export Item Directory'}
             </Typography>
           </Box>
@@ -11109,12 +11131,12 @@ const EnhancedDataEditor = () => {
                       action={<Button size="small" onClick={runFactwiseValidation}>Re-check</Button>}
                     >
                       <Typography sx={{ fontWeight: 600, fontSize: 13.5, mb: 0.75 }}>
-                        FactWise found {fwValidation.result.error_count} problem
+                        Found {fwValidation.result.error_count} problem
                         {fwValidation.result.error_count === 1 ? '' : 's'} in {fwValidation.result.row_count} rows.
                       </Typography>
                       <Typography variant="caption" sx={{ display: 'block', mb: 1 }}>
-                        Fix them in the grid, then re-check. These come from FactWise's own import,
-                        so clearing them is what makes the sheet importable.
+                        Fix them in the grid, then re-check. The sheet can be imported once
+                        these are cleared.
                       </Typography>
                       <TableContainer sx={{ maxHeight: 190, bgcolor: 'transparent' }}>
                         <Table size="small" stickyHeader>
@@ -11281,7 +11303,7 @@ const EnhancedDataEditor = () => {
                 }
               }}
             >
-              Export to FactWise
+              Export
             </Button>
           )}
         </DialogActions>
@@ -11305,7 +11327,7 @@ const EnhancedDataEditor = () => {
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25 }}>
             <FolderOpenIcon sx={{ color: '#2563eb' }} />
             <Typography variant="h6" sx={{ fontSize: 18, fontWeight: 620, color: exportDialogTone.heading }}>
-              Export to FactWise
+              Export
             </Typography>
           </Box>
           <IconButton

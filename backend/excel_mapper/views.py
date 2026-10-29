@@ -865,6 +865,9 @@ def apply_editor_defaults(request):
 
 
 _DESIGNATOR = re.compile(r'^([A-Za-z]+)(\d+)$')
+#: One position written with a suffix: J6_1 (connector J6, pin 1), U1A (gate A
+#: of U1), R1.2. Each is one part placed, so each counts once.
+_SUFFIXED_DESIGNATOR = re.compile(r'^[A-Za-z]+\d+[A-Za-z0-9_.]+$')
 _DNP_MARKER = re.compile(
     r'\b(dnp|dni|dnf|do\s*not\s*(populate|place|fit|install)|not\s*(fitted|populated|placed))\b',
     re.IGNORECASE)
@@ -893,7 +896,7 @@ def count_reference_designators(cell):
                     count += last - first + 1
                     continue
             count += sum(1 for part in (start_text, end_text) if _DESIGNATOR.match(part))
-        elif _DESIGNATOR.match(token):
+        elif _DESIGNATOR.match(token) or _SUFFIXED_DESIGNATOR.match(token):
             count += 1
     return count
 

@@ -789,7 +789,7 @@ export default function FactwiseProjectExportDialog({
         }}
       >
         <Typography variant="h6" component="h2" sx={{ fontWeight: 500 }}>
-          Export to Factwise Project
+          Export to Project
         </Typography>
         {!isRunning && (
           <IconButton size="small" onClick={onClose}>

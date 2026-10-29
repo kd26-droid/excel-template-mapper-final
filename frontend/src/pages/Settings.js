@@ -166,8 +166,8 @@ const cleanText = (value) => String(value ?? '').trim();
 const serverSettingsToItemDirectoryDefaults = (settings, currentDefaults = {}) => {
   const rule = settings?.item_code_rule || {};
   // The whole panel as it was last saved. This is the authority when present:
-  // the browser copy is a cache, and a new machine â€” or a deploy on a new
-  // origin â€” has no cache at all. `base` falls back to the browser copy only
+  // the browser copy is a cache, and a new machine — or a deploy on a new
+  // origin — has no cache at all. `base` falls back to the browser copy only
   // for rows saved before `ui_defaults` existed.
   const savedUi = settings?.ui_defaults && typeof settings.ui_defaults === 'object'
     ? settings.ui_defaults
@@ -191,7 +191,7 @@ const serverSettingsToItemDirectoryDefaults = (settings, currentDefaults = {}) =
     measurementUnit: preferServer(settings?.measurement_unit, base.measurementUnit),
     itemCodePrefix: preferServer(rule.prefix, base.itemCodePrefix),
     // Only the two modes the typed column can express are inferred from it.
-    // Anything else â€” copy, join, if / else â€” comes back from ui_defaults, and
+    // Anything else — copy, join, if / else — comes back from ui_defaults, and
     // an unknown mode stays unset rather than being guessed into 'serial'.
     itemCodeContentType: hasSavedUi
       ? (savedUi.itemCodeContentType || '')
@@ -220,8 +220,8 @@ const itemDirectoryDefaultsToServerSettings = (defaults) => {
   const fixedValue = cleanText(defaults.itemCodeDefaultValue);
   return {
     // The typed fields below are the ones the server applies to rows on its
-    // own. This carries the rest of the panel â€” the item code modes the typed
-    // rule cannot express, and the pinned column rules â€” so a fresh browser
+    // own. This carries the rest of the panel — the item code modes the typed
+    // rule cannot express, and the pinned column rules — so a fresh browser
     // gets everything back, not the handful of columns the table happens to
     // have.
     ui_defaults: defaults,
@@ -251,7 +251,7 @@ const itemDirectoryDefaultsToServerSettings = (defaults) => {
 
 const normalizeItemDirectoryDefaultsForSave = (defaults) => ({
   ...defaults,
-  // A row added but never filled in is not a rule â€” it should not survive Save.
+  // A row added but never filled in is not a rule — it should not survive Save.
   autoColumnRules: normalizeAutoColumnRules(defaults).filter(isFilledAutoColumnRule),
   // Saved as chosen. Defaulting to 'serial' here is what made an untouched
   // install generate item codes.
@@ -344,11 +344,11 @@ const normalizeItemCodeConditionalBranches = (defaults = {}) => {
 // Global default for BOM duplicate handling. Stored in localStorage so the
 // choice survives across sessions. The editor's BomDuplicatePolicyBanner
 // seeds this into a fresh session's server-side policy on first open when
-// the session has none of its own â€” that way exports honour the user's
+// the session has none of its own — that way exports honour the user's
 // preferred default without a manual click per session.
 //
 // One question, so one switch. It used to be a pair of radios, and the two
-// options were the same policy under two names â€” whichever you picked, the
+// options were the same policy under two names — whichever you picked, the
 // export was identical.
 //
 // Off does NOT mean "silently keep two rows": FactWise refuses a BOM that lists
@@ -368,7 +368,7 @@ const BomDuplicatePolicyDefaultSection = ({ t, panelSx, sectionHeaderSx }) => {
       // stored values from the radio version land on the same behaviour they
       // already had rather than silently flipping to unresolved duplicates.
       return window.localStorage.getItem(GLOBAL_DUP_POLICY_KEY) !== POLICY_KEEP;
-    } catch (_) { /* localStorage disabled â€” fall through */ }
+    } catch (_) { /* localStorage disabled — fall through */ }
     return GLOBAL_DUP_POLICY_DEFAULT === POLICY_AGGREGATE;
   });
   const [savedAt, setSavedAt] = React.useState(0);
@@ -407,13 +407,13 @@ const BomDuplicatePolicyDefaultSection = ({ t, panelSx, sectionHeaderSx }) => {
               <Typography variant="caption" sx={{ color: t.text.secondary }}>
                 {aggregate
                   ? 'The same item listed more than once at one level becomes a single row, with the quantities added together.'
-                  : 'Those rows are left as they are. FactWise does not accept a part listed twice in one BOM, so the export will report them and stop â€” resolve each one in the editor.'}
+                  : 'Those rows are left as they are. FactWise does not accept a part listed twice in one BOM, so the export will report them and stop — resolve each one in the editor.'}
               </Typography>
             </Box>
           }
         />
         <Typography variant="caption" sx={{ color: t.text.secondary, display: 'block', mt: 1.5 }}>
-          {savedAt ? 'Saved. Applies to sheets you open from now on.' : 'Change to update immediately â€” no save button.'}
+          {savedAt ? 'Saved. Applies to sheets you open from now on.' : 'Saves as soon as you pick an option.'}
           {' '}Whatever this is set to, the banner above the grid in the editor lets you set an exact quantity for any individual group.
         </Typography>
       </Box>
@@ -442,7 +442,7 @@ const ExportVersionDefaultSection = ({ t, panelSx, sectionHeaderSx, settingsMenu
     try {
       const stored = window.localStorage.getItem(FW_EXPORT_VERSION_KEY);
       return stored === EXPORT_VERSION_4 ? EXPORT_VERSION_4 : EXPORT_VERSION_DEFAULT;
-    } catch (_) { /* localStorage disabled â€” fall through */ }
+    } catch (_) { /* localStorage disabled — fall through */ }
     return EXPORT_VERSION_DEFAULT;
   });
   const [savedAt, setSavedAt] = React.useState(0);
@@ -474,17 +474,17 @@ const ExportVersionDefaultSection = ({ t, panelSx, sectionHeaderSx, settingsMenu
       <Box sx={{ p: 2.5 }}>
         <FormControl size="small" sx={{ minWidth: 220 }}>
           <Select value={version} onChange={handleChange} MenuProps={settingsMenuProps}>
-            <MenuItem value={EXPORT_VERSION_3}>3.0 â€” item and BOM as separate sheets</MenuItem>
-            <MenuItem value={EXPORT_VERSION_4}>4.0 â€” one combined sheet</MenuItem>
+            <MenuItem value={EXPORT_VERSION_3}>3.0 — item and BOM as separate sheets</MenuItem>
+            <MenuItem value={EXPORT_VERSION_4}>4.0 — one combined sheet</MenuItem>
           </Select>
         </FormControl>
         <Typography variant="body2" sx={{ color: t.text.secondary, mt: 1.75 }}>
           {version === EXPORT_VERSION_4
             ? 'One sheet carrying the item columns and the BOM structure columns (Level, Quantity, BOM Qty) together, plus the Finished good code and BOM code FactWise needs to place each line.'
-            : 'Two files: an item directory, and a BOM sheet laid out the way FactWiseâ€™s revision import reads it.'}
+            : 'Two files: an item directory, and a BOM sheet laid out the way FactWise’s revision import reads it.'}
         </Typography>
         <Typography variant="caption" sx={{ color: t.text.secondary, display: 'block', mt: 1.25 }}>
-          {savedAt ? 'Saved.' : 'Change to update immediately â€” no save button.'}
+          {savedAt ? 'Saved.' : 'Saves as soon as you pick an option.'}
         </Typography>
       </Box>
     </Paper>
@@ -532,7 +532,7 @@ const Settings = () => {
     const seen = new Set();
     // The FactWise template, not the last sheet someone opened. Settings has no
     // session, and sourcing it from one meant this list carried whatever that
-    // sheet had grown â€” Tag_1â€¦Tag_8, Tag_1__2, and other per-sheet artefacts.
+    // sheet had grown — Tag_1…Tag_8, Tag_1__2, and other per-sheet artefacts.
     // Anything already saved in a rule is kept on the end so an existing choice
     // never disappears from its own dropdown.
     return [...FACTWISE_TEMPLATE_COLUMNS, ...savedColumns]
@@ -549,7 +549,7 @@ const Settings = () => {
     [itemDirectoryDefaults]
   );
 
-  // â”€â”€â”€ SAVED COLUMN RULES â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ─── SAVED COLUMN RULES ───────────────────────────────────────────────────
   // Same builder the editor's Fill / Create Column dialog uses; saving one
   // stores the rule payload so any session can replay it by name.
   const [columnRules, setColumnRules] = useState([]);
@@ -568,7 +568,7 @@ const Settings = () => {
 
   useEffect(() => { loadColumnRules(); }, [loadColumnRules]);
 
-  // Arriving from the dashboard's Edit button â€” load that rule into the
+  // Arriving from the dashboard's Edit button — load that rule into the
   // builder and scroll to it, so Edit lands somewhere useful.
   const settingsLocation = useLocation();
   const requestedRuleId = settingsLocation.state?.editColumnRuleId;
@@ -614,7 +614,7 @@ const Settings = () => {
 
   // When embedded inside Factwise, distributor credentials are managed in
   // Factwise Admin and silently synced into this app's own store. Hide the
-  // "API Providers" panel â€” the rest of Settings still works as normal.
+  // "API Providers" panel — the rest of Settings still works as normal.
   const {
     isEmbedded: isFactwiseEmbedded,
     entityName: factwiseEntityName,
@@ -626,7 +626,7 @@ const Settings = () => {
   } = useFactwise();
 
   // The only screen that needs the entity list, so it is the only one that
-  // asks for it â€” once, when it opens.
+  // asks for it — once, when it opens.
   useEffect(() => { loadEntities?.(); }, [loadEntities]);
 
   const readyCount = useMemo(
@@ -659,7 +659,7 @@ const Settings = () => {
   useEffect(() => {
     const cleanEntityName = String(factwiseEntityName || '').trim();
     const cleanEntityId = String(factwiseEntityId || '').trim();
-    // An id alone is enough now â€” FactWise does not always send the name, and
+    // An id alone is enough now — FactWise does not always send the name, and
     // waiting for one meant the saved panel was never fetched on those launches.
     if (!cleanEntityName && !cleanEntityId) return;
     let cancelled = false;
@@ -682,7 +682,7 @@ const Settings = () => {
         writeItemDirectoryDefaults(next);
 
         // Defaults are stored per entity name. When the resolved entity changes
-        // â€” which it does the moment a wrong name is corrected â€” the old row is
+        // — which it does the moment a wrong name is corrected — the old row is
         // stranded under the old key and the settings look lost. Re-save what
         // is still in the browser under the entity now in force.
         //
@@ -2068,7 +2068,7 @@ const Settings = () => {
                                 }}
                               />
                               <Typography variant="caption" sx={{ display: 'block', color: t.text.secondary, mt: -0.5, ml: 3.75 }}>
-                                Always on â€” Item code must be unique, so every row needs its own number.
+                                Always on — Item code must be unique, so every row needs its own number.
                               </Typography>
                             </Grid>
                           </>
@@ -2099,7 +2099,7 @@ const Settings = () => {
                               Fill a blank Item name from the MPN sources
                             </Typography>
                             <Typography sx={{ fontSize: 12, color: t.text.secondary }}>
-                              Runs after MPN validation, and only where Item name is empty â€” a name
+                              Runs after MPN validation, and only where Item name is empty — a name
                               your sheet supplied is never replaced. Takes DigiKey first, then Mouser,
                               then Element14.
                             </Typography>
@@ -2287,7 +2287,7 @@ const Settings = () => {
                       </Typography>
                       <Typography sx={{ mt: 0.5, mb: 2, fontSize: 12.5, color: t.text.secondary }}>
                         Which rows are sent to DigiKey, Mouser and Element14. A row left
-                        out is not checked at all â€” its source columns stay blank and its
+                        out is not checked at all — its source columns stay blank and its
                         verdict reads Unknown, which is what blank already means.
                       </Typography>
                       <Grid container spacing={1.5}>
@@ -2401,15 +2401,15 @@ const Settings = () => {
                         Prefill columns with a saved rule
                       </Typography>
                       <Typography sx={{ mt: 0.5, mb: 2, fontSize: 12.5, color: t.text.secondary }}>
-                        Pin a rule from Column Rules below to a column â€” Tag (2), Tag (3), anything
-                        â€” and it runs on every sheet as it opens, instead of being re-applied by hand
+                        Pin a rule from Column Rules below to a column — Tag (2), Tag (3), anything
+                        — and it runs on every sheet as it opens, instead of being re-applied by hand
                         from Fill / Create Column. A rule is skipped on sheets that do not carry its column.
                       </Typography>
 
                       {autoColumnRules.length === 0 && (
                         <Typography sx={{ fontSize: 12.5, color: t.text.secondary, mb: 1.5 }}>
                           {columnRules.length === 0
-                            ? 'No rules saved yet â€” create one under Column Rules below, then pin it here.'
+                            ? 'No rules saved yet — create one under Column Rules below, then pin it here.'
                             : 'Nothing pinned yet.'}
                         </Typography>
                       )}
@@ -2540,7 +2540,7 @@ const Settings = () => {
                             {saved.name}
                           </Typography>
                           <Typography sx={{ fontSize: 11.5, color: t.text.secondary }} noWrap>
-                            {saved.target_column ? `${saved.target_column} Â· ` : ''}{saved.value_mode} Â· used {saved.usage_count}x
+                            {saved.target_column ? `${saved.target_column} · ` : ''}{saved.value_mode} · used {saved.usage_count}x
                           </Typography>
                         </Box>
                         <Box sx={{ display: 'flex', gap: 0.5 }}>
