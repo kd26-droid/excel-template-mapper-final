@@ -25,7 +25,7 @@ from .provider_credentials import (
 )
 from .views import get_session_consistent, save_session, apply_column_mappings, read_session_grid, write_session_grid
 
-from .services.provider_errors import description_match_percent, manufacturer_agrees
+from .services.provider_errors import compare_specs, description_match_percent, manufacturer_agrees
 
 logger = logging.getLogger(__name__)
 
@@ -1880,6 +1880,87 @@ def mpn_validate_warm(request):
         return Response({'success': False, 'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+#: Written on each alternate row; the primary's row stays blank.
+ALTERNATE_COMPARISON_COLUMNS = ('Similarity to primary', 'Spec differences', 'Alternate rank')
+
+
+def _compare_alternates(session_id, headers, rows):
+    """Score every alternate against its primary on the providers' specs.
+
+    Which row is an alternate of which comes from the BOM build - the same
+    answer the export writes as "Alternate for?" - so a sheet normalised with
+    no alternates gets no comparison rather than a guessed one.
+
+    Specs come from one provider for both rows: Digi-Key where it has both,
+    then Mouser, then Element14. The three name specs differently, so a
+    Digi-Key spec compared against an Element14 one would always differ.
+
+    Edits `headers` and `rows` in place. Returns the number of alternates scored.
+    """
+    from .views import _generate_bom_for_session
+    result, _bom_header, error_response = _generate_bom_for_session(
+        session_id, apply_dup_policy=False)
+    entries = [] if error_response is not None or result is None else (
+        getattr(result, 'alternate_rows', None) or [])
+    if not entries or 'Item code' not in headers:
+        return 0
+
+    for column in ALTERNATE_COMPARISON_COLUMNS:
+        if column not in headers:
+            headers.append(column)
+    width = len(headers)
+    for row in rows:
+        while len(row) < width:
+            row.append('')
+        for column in ALTERNATE_COMPARISON_COLUMNS:
+            row[headers.index(column)] = ''
+
+    code_at = headers.index('Item code')
+    alternate_rows = {entry.get('grid_row') for entry in entries}
+    primary_row = {}
+    for position, row in enumerate(rows, start=1):
+        code = str(row[code_at] or '').strip()
+        if code and position not in alternate_rows:
+            primary_row.setdefault(code, row)
+
+    spec_columns = [('%s Specifications' % provider, provider)
+                    for provider in ('DigiKey', 'Mouser', 'Element14')]
+    scored = {}
+    for entry in entries:
+        position = entry.get('grid_row')
+        if not isinstance(position, int) or not 0 < position <= len(rows):
+            continue
+        row = rows[position - 1]
+        primary = primary_row.get(str(entry.get('alternate_for') or '').strip())
+        if primary is None:
+            continue
+        score, differences, source = None, [], ''
+        for column, provider in spec_columns:
+            if column not in headers:
+                continue
+            at = headers.index(column)
+            if str(primary[at] or '').strip() and str(row[at] or '').strip():
+                score, differences = compare_specs(primary[at], row[at])
+                if score is not None:
+                    source = provider
+                    break
+        if score is None:
+            row[headers.index('Spec differences')] = 'No specs to compare'
+            continue
+        row[headers.index('Similarity to primary')] = '%d%%' % score
+        row[headers.index('Spec differences')] = (
+            '%s: %s' % (source, '; '.join(differences[:4])) if differences
+            else '%s: all shared specs match' % source)
+        group = (entry.get('bom_id'), entry.get('alternate_for'))
+        scored.setdefault(group, []).append((score, row))
+
+    for group in scored.values():
+        group.sort(key=lambda item: -item[0])
+        for rank, (_score, row) in enumerate(group, start=1):
+            row[headers.index('Alternate rank')] = str(rank)
+    return sum(len(group) for group in scored.values())
+
+
 @api_view(['POST'])
 def mpn_validate(request):
     """Validate MPNs for a session and persist results.
@@ -2611,6 +2692,15 @@ def mpn_validate(request):
         # found at Mouser and nowhere else counts once valid and twice invalid,
         # which reads as mostly-bad when it is a part you can buy. These are per
         # row, and one source confirming it is enough.
+        # How close each alternate is to the part it stands in for. Only on the
+        # run that saves: the batches before it are partial, and the BOM build
+        # this needs is too slow to repeat per batch.
+        if not cache_only or str(request.data.get('persist_results', '')).lower() in ('1', 'true', 'yes', 'on'):
+            try:
+                _compare_alternates(session_id, headers, rows)
+            except Exception as compare_error:
+                logger.warning("Alternate comparison skipped: %s", compare_error)
+
         consolidated_counts = {'Valid': 0, 'Invalid': 0, 'Unknown': 0}
         try:
             if CONSOLIDATED_MPN_COLUMN in headers:

@@ -104,6 +104,59 @@ def format_provider_specs(pairs):
     return '; '.join(out)
 
 
+# --- alternate comparison ---------------------------------------------------
+#: Specs that decide whether a part can stand in for another. A mismatch on
+#: one of these outweighs three on mounting notes or temperature grades.
+_KEY_SPEC_WORDS = ('capacitance', 'resistance', 'inductance', 'voltage',
+                   'tolerance', 'package', 'case', 'current', 'power', 'frequency')
+#: How the part is shipped, not what it is. Mouser's specs are often only this,
+#: and comparing it would score two identical resistors on their reels.
+_SHIPPING_SPECS = {'packaging', 'standard pack qty', 'factory pack quantity'}
+
+
+def parse_provider_specs(cell):
+    """{lower-case name: (name, value)} from a `name: value; name: value` cell."""
+    specs = {}
+    for part in str(cell or '').split(';'):
+        name, sep, value = part.partition(':')
+        name, value = name.strip(), value.strip()
+        if sep and name and value and name.lower() not in _SHIPPING_SPECS:
+            specs.setdefault(name.lower(), (name, value))
+    return specs
+
+
+def compare_specs(primary_cell, alternate_cell):
+    """(similarity percent or None, differences) between two parts' specs.
+
+    Only specs both parts state are compared - one provider listing more about
+    a part says nothing about the other. Key specs (value, voltage, tolerance,
+    package...) count three times. Values are compared ignoring case and
+    spacing, so "0.1 µF" and "0.1µF" agree.
+    """
+    primary = parse_provider_specs(primary_cell)
+    alternate = parse_provider_specs(alternate_cell)
+    shared = [key for key in primary if key in alternate]
+    if not shared:
+        return None, []
+
+    def flat(value):
+        return ''.join(str(value).lower().split())
+
+    total = matched = 0
+    differences = []
+    for key in shared:
+        weight = 3 if any(word in key for word in _KEY_SPEC_WORDS) else 1
+        total += weight
+        name, primary_value = primary[key]
+        alternate_value = alternate[key][1]
+        if flat(primary_value) == flat(alternate_value):
+            matched += weight
+        else:
+            differences.append((weight, '%s: %s vs %s' % (name, alternate_value, primary_value)))
+    differences.sort(key=lambda item: -item[0])
+    return round(100 * matched / total), [text for _weight, text in differences]
+
+
 # --- description matching ---------------------------------------------------
 #: Words that appear in catalogue copy without saying anything about the part.
 #: Scoring them rewards a provider for being wordy.
