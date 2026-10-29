@@ -1969,6 +1969,15 @@ const api = {
    * Fill blank cells in the named columns with a default value, preserving all
    * existing columns (unlike update-session-data which rebuilds to template cols).
    */
+  // Quantity from reference designators, as the entity's Settings say. The
+  // server decides everything, including whether it already ran.
+  applyRefdesQuantity: (sessionId, entityName = '') => {
+    return axios.post(`${API_URL}/editor-defaults/refdes-quantity/`, {
+      session_id: sessionId,
+      entity_name: entityName
+    }, { timeout: 0 });
+  },
+
   fillRequiredDefaults: (sessionId, defaults) => {
     return axios.post(`${API_URL}/transforms/fill-required-defaults/`, {
       session_id: sessionId,

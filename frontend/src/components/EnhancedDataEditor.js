@@ -1668,6 +1668,22 @@ const EnhancedDataEditor = () => {
         }
       }
 
+      if (savedDefaults.refdesQtyEnabled) {
+        const resp = await api.applyRefdesQuantity(sessionId, factwiseEntityName);
+        const count = Number(resp.data?.changed || 0);
+        if (count > 0) {
+          changed = true;
+          const dnp = Number(resp.data?.dnp_rows || 0);
+          showSnackbar(
+            `Quantity set from reference designators on ${count} row${count === 1 ? '' : 's'}`
+              + (dnp ? ` (${dnp} DNP set to 0).` : '.'),
+            'info'
+          );
+        } else if (resp.data?.reason && resp.data.reason !== 'already applied') {
+          showSnackbar(`Quantity from reference designators skipped: ${resp.data.reason}`, 'warning');
+        }
+      }
+
       if (changed) {
         setDefaultValues(prev => ({ ...prev, ...defaults }));
         showSnackbar('Applied saved Item Directory defaults to blank editor cells.', 'success');

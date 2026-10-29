@@ -2203,6 +2203,85 @@ const Settings = () => {
 
                   <Grid item xs={12}>
                     <Paper elevation={0} sx={{ p: 2.25, borderRadius: '14px', border: `1px solid ${t.border.subtle}`, bgcolor: t.surface.panel }}>
+                      <FormControlLabel
+                        control={(
+                          <Switch
+                            size="small"
+                            checked={Boolean(itemDirectoryDefaults.refdesQtyEnabled)}
+                            onChange={(event) => handleItemDirectoryDefaultChange('refdesQtyEnabled', event.target.checked)}
+                          />
+                        )}
+                        label={(
+                          <Box>
+                            <Typography sx={{ fontSize: 13.5, fontWeight: 500, color: t.text.heading }}>
+                              Quantity from reference designators
+                            </Typography>
+                            <Typography sx={{ fontSize: 12, color: t.text.secondary }}>
+                              When a sheet opens, Quantity becomes the number of designators in the
+                              row &mdash; R1, R2, R5 is 3 and C1-C4 is 4. A row marked DNP (do not
+                              populate) gets 0. Rows with no designators keep their quantity.
+                            </Typography>
+                          </Box>
+                        )}
+                      />
+                      {itemDirectoryDefaults.refdesQtyEnabled && (
+                        <Grid container spacing={1.5} sx={{ mt: 0.5 }}>
+                          <Grid item xs={12} sm={4}>
+                            <TextField
+                              select
+                              fullWidth
+                              size="small"
+                              label="Reference designators are in"
+                              value={itemDirectoryDefaults.refdesColumn || ''}
+                              onChange={(event) => handleItemDirectoryDefaultChange('refdesColumn', event.target.value)}
+                              sx={fieldSx}
+                              SelectProps={{ MenuProps: settingsMenuProps }}
+                            >
+                              {itemCodeSourceColumnOptions.map(option => (
+                                <MenuItem key={option} value={option}>{displayHeaderName(option, itemCodeSourceColumnOptions)}</MenuItem>
+                              ))}
+                            </TextField>
+                          </Grid>
+                          <Grid item xs={12} sm={4}>
+                            <TextField
+                              select
+                              fullWidth
+                              size="small"
+                              label="Check for DNP in"
+                              value={itemDirectoryDefaults.refdesDnpColumn || ''}
+                              onChange={(event) => handleItemDirectoryDefaultChange('refdesDnpColumn', event.target.value)}
+                              helperText="The designator column is always checked too."
+                              sx={fieldSx}
+                              SelectProps={{ MenuProps: settingsMenuProps }}
+                            >
+                              <MenuItem value=""><em>Designator column only</em></MenuItem>
+                              {itemCodeSourceColumnOptions.map(option => (
+                                <MenuItem key={option} value={option}>{displayHeaderName(option, itemCodeSourceColumnOptions)}</MenuItem>
+                              ))}
+                            </TextField>
+                          </Grid>
+                          <Grid item xs={12} sm={4}>
+                            <TextField
+                              select
+                              fullWidth
+                              size="small"
+                              label="Quantity rows to update"
+                              value={itemDirectoryDefaults.refdesQtyMode || 'override'}
+                              onChange={(event) => handleItemDirectoryDefaultChange('refdesQtyMode', event.target.value)}
+                              sx={fieldSx}
+                              SelectProps={{ MenuProps: settingsMenuProps }}
+                            >
+                              <MenuItem value="override">Override every quantity</MenuItem>
+                              <MenuItem value="fill_empty">Fill empty quantities only</MenuItem>
+                            </TextField>
+                          </Grid>
+                        </Grid>
+                      )}
+                    </Paper>
+                  </Grid>
+
+                  <Grid item xs={12}>
+                    <Paper elevation={0} sx={{ p: 2.25, borderRadius: '14px', border: `1px solid ${t.border.subtle}`, bgcolor: t.surface.panel }}>
                       <Typography sx={{ fontSize: 16, fontWeight: 400, color: t.text.heading }}>
                         MPN validation rules
                       </Typography>

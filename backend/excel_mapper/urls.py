@@ -66,6 +66,7 @@ from .views import (
     normaliser_answers,
     normaliser_continue,
     apply_editor_defaults,
+    apply_refdes_quantity,
     normaliser_run,
     normaliser_resolve,
 
@@ -282,6 +283,7 @@ urlpatterns = [
     path('normaliser/<str:session_id>/continue/', normaliser_continue, name='normaliser-continue'),
     # The Settings panel's Item Directory Defaults, applied in one call.
     path('editor-defaults/apply/', apply_editor_defaults, name='apply-editor-defaults'),
+    path('editor-defaults/refdes-quantity/', apply_refdes_quantity, name='apply-refdes-quantity'),
     # The whole normaliser in one call: a file in, a normalised session out,
     # stopping only where a person is genuinely needed.
     path('normaliser/run/', normaliser_run, name='normaliser-run'),
