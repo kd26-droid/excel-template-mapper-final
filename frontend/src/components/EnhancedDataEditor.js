@@ -585,6 +585,14 @@ const EnhancedDataEditor = () => {
   const [createColumnTarget, setCreateColumnTarget] = useState('Item name');
   const [createColumnNewName, setCreateColumnNewName] = useState('');
   const [createColumnContentType, setCreateColumnContentType] = useState('concat');
+  // Count references: what splits one reference from the next, and what marks
+  // a range. Comma and hyphen are what nearly every BOM uses.
+  const [refDelimiter, setRefDelimiter] = useState(',');
+  const [refDelimiterCustom, setRefDelimiterCustom] = useState('');
+  const [refRange, setRefRange] = useState('-');
+  const [refRangeCustom, setRefRangeCustom] = useState('');
+  const createColumnIsQuantity = /\b(quantity|qty)\b/i.test(
+    createColumnTab === 0 ? createColumnTarget : createColumnNewName);
   // What the remove mode takes out. Named toggles rather than a text box: the
   // commonest thing to remove is a space, and a space typed into a field is
   // invisible - the box looks empty whether it holds one or not, and there is
@@ -1687,22 +1695,6 @@ const EnhancedDataEditor = () => {
             throw new Error(resp.data?.error || `Could not apply saved rule "${match.name}"`);
           }
           changed = changed || Number(resp.data?.changed || 0) > 0;
-        }
-      }
-
-      if (savedDefaults.refdesQtyEnabled) {
-        const resp = await api.applyRefdesQuantity(sessionId, factwiseEntityName);
-        const count = Number(resp.data?.changed || 0);
-        if (count > 0) {
-          changed = true;
-          const dnp = Number(resp.data?.dnp_rows || 0);
-          showSnackbar(
-            `Quantity set from reference designators on ${count} row${count === 1 ? '' : 's'}`
-              + (dnp ? ` (${dnp} DNP set to 0).` : '.'),
-            'info'
-          );
-        } else if (resp.data?.reason && resp.data.reason !== 'already applied') {
-          showSnackbar(`Quantity from reference designators skipped: ${resp.data.reason}`, 'warning');
         }
       }
 
@@ -3051,6 +3043,19 @@ const EnhancedDataEditor = () => {
       showSnackbar('Select a source column', 'warning');
       return;
     }
+    if (createColumnContentType === 'count_refs' && !createColumnIsQuantity) {
+      showSnackbar('Counting references fills a quantity column - pick Quantity to fill.', 'warning');
+      return;
+    }
+    if (createColumnContentType === 'count_refs' && !createColumnFirst) {
+      showSnackbar('Select the column the references are in', 'warning');
+      return;
+    }
+    if (createColumnContentType === 'count_refs'
+        && ((refDelimiter === 'custom' && !refDelimiterCustom) || (refRange === 'custom' && !refRangeCustom))) {
+      showSnackbar('Type the custom delimiter or range character', 'warning');
+      return;
+    }
     if (createColumnContentType === 'conditional' && conditionalBranches.some(branch => !branch.column)) {
       showSnackbar('Select a source column for every condition', 'warning');
       return;
@@ -3122,7 +3127,7 @@ const EnhancedDataEditor = () => {
         target_mode: createColumnTab === 0 ? 'existing' : 'new',
         target_column: target,
         value_mode: createColumnContentType,
-        source_columns: createColumnContentType === 'copy'
+        source_columns: (createColumnContentType === 'copy' || createColumnContentType === 'count_refs')
           ? [createColumnFirst]
           : (createColumnContentType === 'concat' ? [createColumnFirst, createColumnSecond] : []),
         separator: createColumnSeparator,
@@ -3133,6 +3138,12 @@ const EnhancedDataEditor = () => {
         serial_start: factwiseSerialStart,
         serial_padding: factwiseSerialPadding,
         serial_increment: effectiveSerialIncrement,
+        ...(createColumnContentType === 'count_refs'
+          ? {
+            ref_delimiter: refDelimiter === 'custom' ? refDelimiterCustom : refDelimiter,
+            ref_range: refRange === 'custom' ? refRangeCustom : refRange,
+          }
+          : {}),
         ...(createColumnContentType === 'remove'
           ? {
             // One entry per character. Typing " -" means remove spaces AND
@@ -3172,6 +3183,11 @@ const EnhancedDataEditor = () => {
     createColumnSecond,
     createColumnSeparator,
     createColumnMode,
+    createColumnIsQuantity,
+    refDelimiter,
+    refDelimiterCustom,
+    refRange,
+    refRangeCustom,
     dataColumnFields,
     defaultValue,
     condElse,
@@ -6984,6 +7000,7 @@ const EnhancedDataEditor = () => {
                   <MenuItem value="concat">Join two columns</MenuItem>
                   <MenuItem value="conditional">Use an if / else condition</MenuItem>
                   <MenuItem value="serial">Generate a serial sequence</MenuItem>
+                  {createColumnIsQuantity && <MenuItem value="count_refs">Count references</MenuItem>}
                   <MenuItem value="saved_rule">Apply a saved rule</MenuItem>
                   {/* Reads the column it writes, so it is only offered for a
                       column that already exists. */}
@@ -7085,6 +7102,61 @@ const EnhancedDataEditor = () => {
               <Grid item xs={12}>
                 <TextField fullWidth size="small" label="Value" value={defaultValue} onChange={(e) => setDefaultValue(e.target.value)} />
               </Grid>
+            )}
+
+            {createColumnContentType === 'count_refs' && (
+              <>
+                <Grid item xs={12}>
+                  <FormControl fullWidth size="small">
+                    <InputLabel>Count from</InputLabel>
+                    <Select label="Count from" value={createColumnFirst} onChange={(e) => setCreateColumnFirst(e.target.value)}>
+                      {columnDefs.filter(c => c.field && c.field !== '__row_number__').map(c => (
+                        <MenuItem key={c.field} value={c.field}>{columnLabel(c.field, c.headerName)}</MenuItem>
+                      ))}
+                    </Select>
+                  </FormControl>
+                </Grid>
+                <Grid item xs={12} sm={refDelimiter === 'custom' ? 3 : 6}>
+                  <FormControl fullWidth size="small">
+                    <InputLabel>Delimiter</InputLabel>
+                    <Select label="Delimiter" value={refDelimiter} onChange={(e) => setRefDelimiter(e.target.value)}>
+                      <MenuItem value=",">Comma ( , )</MenuItem>
+                      <MenuItem value=";">Semicolon ( ; )</MenuItem>
+                      <MenuItem value=" ">Space</MenuItem>
+                      <MenuItem value="/">Slash ( / )</MenuItem>
+                      <MenuItem value="|">Pipe ( | )</MenuItem>
+                      <MenuItem value="custom">Other...</MenuItem>
+                    </Select>
+                  </FormControl>
+                </Grid>
+                {refDelimiter === 'custom' && (
+                  <Grid item xs={12} sm={3}>
+                    <TextField fullWidth size="small" label="Delimiter" value={refDelimiterCustom} onChange={(e) => setRefDelimiterCustom(e.target.value)} />
+                  </Grid>
+                )}
+                <Grid item xs={12} sm={refRange === 'custom' ? 3 : 6}>
+                  <FormControl fullWidth size="small">
+                    <InputLabel>Range</InputLabel>
+                    <Select label="Range" value={refRange} onChange={(e) => setRefRange(e.target.value)}>
+                      <MenuItem value="-">Hyphen ( C1-C4 )</MenuItem>
+                      <MenuItem value=":">Colon ( C1:C4 )</MenuItem>
+                      <MenuItem value="~">Tilde ( C1~C4 )</MenuItem>
+                      <MenuItem value="custom">Other...</MenuItem>
+                    </Select>
+                  </FormControl>
+                </Grid>
+                {refRange === 'custom' && (
+                  <Grid item xs={12} sm={3}>
+                    <TextField fullWidth size="small" label="Range" value={refRangeCustom} onChange={(e) => setRefRangeCustom(e.target.value)} />
+                  </Grid>
+                )}
+                <Grid item xs={12}>
+                  <Typography variant="caption" sx={{ color: 'text.secondary' }}>
+                    Quantity becomes the number of references - R1, R2, R5 is 3 and C1-C4 is 4.
+                    Rows with no references keep their quantity.
+                  </Typography>
+                </Grid>
+              </>
             )}
 
             {createColumnContentType === 'copy' && (

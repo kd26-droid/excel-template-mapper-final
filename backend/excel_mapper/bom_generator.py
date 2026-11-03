@@ -431,6 +431,17 @@ def generate_flat_bom(records, bom_header):
             for name, value in zip(names, values):
                 row['%s%s' % (name, suffix)] = value
 
+            # Which line each alternate stands in for, the same record the
+            # multi-level path keeps. Without it a flat sheet's alternates were
+            # in the BOM but nothing downstream could tell whose they were.
+            result.alternate_rows.append({
+                'grid_row': grid_row_of(alternate),
+                'alternate_for': _text(primary.get(F_ITEM_CODE)),
+                'finished_good': finished_good,
+                'bom_id': bom_id,
+                'level': 1,
+            })
+
         result.bom_rows.append(row)
         # The primary is the row this BOM line came from; its alternates were
         # folded sideways into the same line and have no line of their own.

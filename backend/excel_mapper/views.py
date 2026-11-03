@@ -868,128 +868,39 @@ _DESIGNATOR = re.compile(r'^([A-Za-z]+)(\d+)$')
 #: One position written with a suffix: J6_1 (connector J6, pin 1), U1A (gate A
 #: of U1), R1.2. Each is one part placed, so each counts once.
 _SUFFIXED_DESIGNATOR = re.compile(r'^[A-Za-z]+\d+[A-Za-z0-9_.]+$')
-_DNP_MARKER = re.compile(
-    r'\b(dnp|dni|dnf|do\s*not\s*(populate|place|fit|install)|not\s*(fitted|populated|placed))\b',
-    re.IGNORECASE)
 
 
-def count_reference_designators(cell):
-    """How many parts a reference designator cell places: R1, R2, R5 is 3.
+def count_reference_designators(cell, delimiter=',', range_marker='-'):
+    """How many parts a reference cell places: R1, R2, R5 is 3.
 
-    Ranges count every position in them - C1-C4 and C1-4 are both 4. A token
-    that is not a designator (a stray "DNP", a note) counts as nothing rather
-    than as one, and a range that does not read as one counts its two ends.
+    References are split on `delimiter` (and on spaces, which sheets put after
+    it). A range counts every position in it - with "-", C1-C4 and C1-4 are
+    both 4. A token that is not a reference (a note, "Refer design") counts as
+    nothing rather than as one, and a range that does not read as one counts
+    its two ends.
     """
-    text = re.sub(r'\s*-\s*', '-', str(cell or '').strip())
+    delimiter = delimiter or ','
+    range_marker = range_marker or '-'
+    text = str(cell or '').strip()
+    # "R1 - R3" is one range; the spaces around the marker are not delimiters.
+    text = re.sub(r'\s*%s\s*' % re.escape(range_marker), range_marker, text)
     count = 0
-    for token in re.split(r'[,;\s/]+', text):
-        if not token:
-            continue
-        if '-' in token:
-            start_text, _, end_text = token.partition('-')
-            start = _DESIGNATOR.match(start_text)
-            end = _DESIGNATOR.match(end_text) or re.match(r'^()(\d+)$', end_text)
-            if start and end and (not end.group(1)
-                                  or end.group(1).upper() == start.group(1).upper()):
-                first, last = int(start.group(2)), int(end.group(2))
-                if 0 <= last - first < 1000:
-                    count += last - first + 1
-                    continue
-            count += sum(1 for part in (start_text, end_text) if _DESIGNATOR.match(part))
-        elif _DESIGNATOR.match(token) or _SUFFIXED_DESIGNATOR.match(token):
-            count += 1
+    for piece in text.split(delimiter):
+        for token in piece.split():
+            if range_marker in token:
+                start_text, _, end_text = token.partition(range_marker)
+                start = _DESIGNATOR.match(start_text)
+                end = _DESIGNATOR.match(end_text) or re.match(r'^()(\d+)$', end_text)
+                if start and end and (not end.group(1)
+                                      or end.group(1).upper() == start.group(1).upper()):
+                    first, last = int(start.group(2)), int(end.group(2))
+                    if 0 <= last - first < 1000:
+                        count += last - first + 1
+                        continue
+                count += sum(1 for part in (start_text, end_text) if _DESIGNATOR.match(part))
+            elif _DESIGNATOR.match(token) or _SUFFIXED_DESIGNATOR.match(token):
+                count += 1
     return count
-
-
-@api_view(['POST'])
-def apply_refdes_quantity(request):
-    """Set each row's Quantity from its reference designators, per Settings.
-
-    Off unless the entity turned it on. A row marked do-not-populate gets 0; a
-    row with no designators keeps its quantity. "Fill empty" only writes blank
-    quantities; "Override" replaces whatever the sheet said.
-
-    Runs once per session for a given set of settings. Run on every open, an
-    override would undo every quantity the user corrected by hand since.
-    """
-    session_id = str(request.data.get('session_id') or '').strip()
-    info = get_session_consistent(session_id) if session_id else None
-    if not info:
-        return Response({'success': False, 'error': 'Invalid session'},
-                        status=status.HTTP_404_NOT_FOUND)
-    entity_name = (str(request.data.get('entity_name') or '').strip()
-                   or str(info.get('editor_defaults_entity_name') or '').strip()
-                   or str(info.get('entity_name') or '').strip())
-    settings_obj = get_editor_defaults_for_entity(entity_name) if entity_name else None
-    ui = getattr(settings_obj, 'ui_defaults', None) or {}
-    if not ui.get('refdesQtyEnabled'):
-        return Response({'success': True, 'applied': False, 'changed': 0})
-
-    designator_column = str(ui.get('refdesColumn') or '').strip()
-    dnp_column = str(ui.get('refdesDnpColumn') or '').strip()
-    mode = 'fill_empty' if ui.get('refdesQtyMode') == 'fill_empty' else 'override'
-    stamp = json.dumps([designator_column, dnp_column, mode])
-    if info.get('refdes_qty_stamp') == stamp:
-        return Response({'success': True, 'applied': False, 'changed': 0,
-                         'reason': 'already applied'})
-
-    headers, rows = read_session_grid(session_id, info)
-
-    def column_index(name):
-        # Settings stores Tag_1 where a sheet may say Tag (1).
-        wanted = re.sub(r'[\s_()]', '', name).lower()
-        for position, header in enumerate(headers or []):
-            if name and re.sub(r'[\s_()]', '', str(header)).lower() == wanted:
-                return position
-        return -1
-
-    designator_index = column_index(designator_column)
-    dnp_index = column_index(dnp_column)
-    quantity_index = column_index('Quantity')
-    if designator_index < 0 or quantity_index < 0:
-        return Response({'success': True, 'applied': False, 'changed': 0,
-                         'reason': 'This sheet has no %s column.' % (
-                             designator_column or 'reference designator'
-                             if designator_index < 0 else 'Quantity')})
-
-    def same_number(a, b):
-        try:
-            return float(a) == float(b)
-        except (TypeError, ValueError):
-            return str(a).strip() == str(b).strip()
-
-    changed = dnp_rows = 0
-    for row in rows:
-        if not isinstance(row, list):
-            continue
-        while len(row) < len(headers):
-            row.append('')
-        designators = row[designator_index]
-        marked = (dnp_index >= 0 and _DNP_MARKER.search(str(row[dnp_index] or ''))) \
-            or _DNP_MARKER.search(str(designators or ''))
-        if marked:
-            value = '0'
-        else:
-            count = count_reference_designators(designators)
-            if not count:
-                continue
-            value = str(count)
-        current = str(row[quantity_index] or '').strip()
-        if mode == 'fill_empty' and current:
-            continue
-        if not same_number(current, value):
-            row[quantity_index] = value
-            changed += 1
-            dnp_rows += 1 if marked else 0
-
-    if changed:
-        write_session_grid(session_id, info, headers, rows)
-    info['refdes_qty_stamp'] = stamp
-    save_session(session_id, info)
-    logger.info('Reference designator quantity on %s: %d changed (%d DNP), mode %s',
-                session_id, changed, dnp_rows, mode)
-    return Response({'success': True, 'applied': True, 'changed': changed,
-                     'dnp_rows': dnp_rows, 'mode': mode})
 
 
 def _internal_post(payload):
@@ -14898,7 +14809,7 @@ def apply_column_value_rule(headers, rows, raw_rule, locked_item_codes=None):
         value_mode = 'join'
     source_columns = [str(value or '').strip() for value in (rule.get('source_columns') or []) if str(value or '').strip()]
     source_indexes = [_grid_column_index(output_headers, source) for source in source_columns]
-    if value_mode in {'copy', 'join'} and (not source_indexes or any(index < 0 for index in source_indexes)):
+    if value_mode in {'copy', 'join', 'count_refs'} and (not source_indexes or any(index < 0 for index in source_indexes)):
         missing = [source for source, index in zip(source_columns, source_indexes) if index < 0]
         raise ValueError(f'Source column not found: {", ".join(missing) or "select a source column"}')
 
@@ -15122,6 +15033,17 @@ def apply_column_value_rule(headers, rows, raw_rule, locked_item_codes=None):
                     generated = generated.replace(fragment, '')
             if rule.get('trim_ends') is not False:
                 generated = generated.strip()
+        elif value_mode == 'count_refs':
+            # The quantity a reference list implies. A row with no references
+            # keeps its quantity: an empty cell says nothing about how many.
+            count = count_reference_designators(
+                row[source_indexes[0]], rule.get('ref_delimiter') or ',',
+                rule.get('ref_range') or '-')
+            if count:
+                generated = str(count)
+            else:
+                should_write = False
+                generated = row[target_index]
         elif value_mode == 'join':
             values = [str(row[index] or '').strip() for index in source_indexes]
             generated = str(rule.get('separator') or '').join(value for value in values if value)
