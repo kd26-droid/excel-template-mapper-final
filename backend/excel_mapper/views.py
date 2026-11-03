@@ -9243,12 +9243,20 @@ def _dedupe_item_rows(rows, headers):
         return rows, []
 
     width = len(headers)
+    from .bom_validation import is_validation_column
+    # Columns MPN validation filled in are left out of the comparison: they
+    # follow from the part, so they cannot be what makes two rows different
+    # parts - but they DO differ when the rows differ elsewhere (a match % is
+    # scored against each row's own Item name), and were reported as conflicts.
+    compared = [position for position, header in enumerate(headers)
+                if not is_validation_column(header)]
 
     def signature(row):
         # Padded to the header count so a row with trailing blanks trimmed off
         # still matches the identical row that kept them.
         cells = [str(cell or '').strip() for cell in row[:width]]
-        return tuple(cells + [''] * (width - len(cells)))
+        cells += [''] * (width - len(cells))
+        return tuple(cells[position] for position in compared)
 
     first_seen = {}
     conflicts = []
