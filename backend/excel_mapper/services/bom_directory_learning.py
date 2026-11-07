@@ -9,7 +9,6 @@ from .mpn_pattern_library import (
     load_mpn_mfr_lookup,
     load_mpn_pattern_library,
 )
-from .bom_role_inference import save_bom_field_pattern_rule
 
 
 def _field_value(fields, key):
@@ -68,6 +67,11 @@ def _clear_directory_caches():
 def _structure_for_fingerprint(structure_fingerprint):
     if not structure_fingerprint:
         return None
+    try:
+        from excel_mapper.models import BomStructurePattern
+        return BomStructurePattern.objects.filter(signature_hash=structure_fingerprint).first()
+    except Exception:
+        return None
 
 
 def _global_reusable_pattern_rule(rule):
@@ -93,11 +97,6 @@ def _global_reusable_pattern_rule(rule):
         reusable["visualPattern"] = visual_pattern
         reusable.pop("visual_pattern", None)
     return reusable
-    try:
-        from excel_mapper.models import BomStructurePattern
-        return BomStructurePattern.objects.filter(signature_hash=structure_fingerprint).first()
-    except Exception:
-        return None
 
 
 def learn_normalized_bom_rows(
@@ -141,31 +140,6 @@ def learn_confirmed_bom_field_patterns(groups, structure_scope=None, structure_f
     for group in groups or []:
         if not isinstance(group, dict) or group.get("confirmed") is False:
             continue
-        rule = group.get("rule")
-        if isinstance(rule, dict):
-            rule = {
-                **rule,
-                "structureScope": structure_scope,
-                "structureSignature": structure_signature,
-                "structureFingerprint": structure_fingerprint,
-            }
-            saved_rule = save_bom_field_pattern_rule(
-                rule,
-                description="User-confirmed BOM field parser pattern",
-            )
-            if saved_rule:
-                saved_pattern_rules.append(saved_rule)
-            # Only semantic pattern identities are safe across arbitrary sheet
-            # structures. Shape-only cleanup rules (for example strip-prefix)
-            # remain scoped to the structure where the user taught them.
-            if clean(rule.get("patternKey") or rule.get("pattern_key")):
-                global_rule = save_bom_field_pattern_rule(
-                    _global_reusable_pattern_rule(rule),
-                    description="Globally reusable user-confirmed BOM field parser pattern",
-                    library_scope="global",
-                )
-                if global_rule:
-                    saved_pattern_rules.append(global_rule)
         for row in group.get("rows") or []:
             entries = row.get("entries") if isinstance(row, dict) else []
             source_row = row.get("sourceRow") if isinstance(row, dict) else None

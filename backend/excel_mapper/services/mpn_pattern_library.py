@@ -1016,7 +1016,7 @@ def _score_mpn_candidate(value):
     }
 
 
-@lru_cache(maxsize=16384)
+@lru_cache(maxsize=65536)
 def _score_mpn_value_cached(_version, text):
     if not text:
         return {"score": 0.0, "matched": False, "reason": "blank"}
