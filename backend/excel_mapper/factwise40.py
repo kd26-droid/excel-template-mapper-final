@@ -222,6 +222,40 @@ def _unwrap(response):
     return payload, None
 
 
+def _count_committed_boms(request, session_id, enterprise_id, roots):
+    """Count the top-level BOMs a successful commit created, for the caller's entity.
+
+    The same roots a project is given: a sub-assembly is inside its parent's
+    tree, not a BOM of its own. Never raises - the commit already happened.
+    """
+    from .services import bom_creation_ledger
+    from .views import get_session_consistent
+
+    try:
+        entity_id, _ = bom_creation_ledger.identity_from_request(
+            request, get_session_consistent(session_id) if session_id else {})
+        bom_creation_ledger.record_bom_creation(
+            entity_id=entity_id, enterprise_id=enterprise_id, session_id=session_id,
+            event='factwise40_commit', bom_codes=roots)
+    except Exception as exc:  # pragma: no cover - bookkeeping only
+        logger.warning('BOM count after 4.0 commit skipped: %s', exc)
+
+
+def _bom_limit_body(request, session_id, roots):
+    """The refusal body when committing would exceed the entity's plan, else None."""
+    from .services import bom_creation_ledger
+    from .views import get_session_consistent
+
+    entity_id, _ = bom_creation_ledger.identity_from_request(
+        request, get_session_consistent(session_id) if session_id else {})
+    try:
+        bom_creation_ledger.check_bom_allowance(entity_id, roots)
+    except bom_creation_ledger.BomLimitReached as exc:
+        logger.info('FactWise 4.0 commit refused for entity %s: plan limit reached', entity_id)
+        return exc.as_response_body()
+    return None
+
+
 @api_view(['POST'])
 @parser_classes([MultiPartParser, FormParser])
 def factwise40_validate(request):
@@ -269,6 +303,17 @@ def factwise40_validate(request):
     path = '/enterprises/%s/bulk-imports/%s/%s' % (enterprise_id, import_type, action)
     headers = {'Authorization': 'Bearer %s' % token}
 
+    # A commit creates the BOM in FactWise, so the entity's monthly plan is
+    # checked BEFORE it is sent - refusing afterwards would leave a BOM in
+    # FactWise that the plan did not allow.
+    if action == 'commit':
+        session_id = str(request.data.get('session_id') or '').strip()
+        bom_codes = _sheet_bom_codes(sheet[1])
+        roots = root_bom_codes(session_id, bom_codes)
+        limit_body = _bom_limit_body(request, session_id, roots)
+        if limit_body is not None:
+            return Response(limit_body, status=status.HTTP_403_FORBIDDEN)
+
     response, error = _send('POST', api_url, path, headers, files={'file': sheet})
     if error is not None:
         return error
@@ -281,14 +326,12 @@ def factwise40_validate(request):
                     payload.get('created'), payload.get('updated'))
         # Returned alongside the outcome because the caller has to find the BOM
         # that was just created, and commit does not name it.
-        bom_codes = _sheet_bom_codes(sheet[1])
+        _count_committed_boms(request, session_id, enterprise_id, roots)
         return Response({'success': True, 'result': payload,
                          'bom_codes': bom_codes,
                          # What a project should carry. Needs the session the
                          # sheet came from; without one, every code.
-                         'root_bom_codes': root_bom_codes(
-                             str(request.data.get('session_id') or '').strip(),
-                             bom_codes)})
+                         'root_bom_codes': roots})
 
     # A count alone cannot be acted on: "885 problems" is the same line whether
     # one column is wrong on every row or 885 things are. The grouping is what

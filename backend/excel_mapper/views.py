@@ -48,6 +48,7 @@ from .delimited_reader import (
     read_delimited_text_safely,
 )
 from .bom_header_mapper import BOMHeaderMapper
+from .services import bom_creation_ledger
 from .services.bom_directory_learning import learn_confirmed_bom_field_patterns, learn_normalized_bom_rows
 from .services.bom_role_inference import (
     BomSetupValidationError,
@@ -9683,13 +9684,26 @@ def download_file(request, session_id=None):
                 'error': 'Session not found'
             }, status=status.HTTP_404_NOT_FOUND)
         mappings = info.get("mappings")
-        
+
         if not mappings:
             return Response({
                 'success': False,
                 'error': 'No mappings found'
             }, status=status.HTTP_400_BAD_REQUEST)
-        
+
+        # The 4.0 combined sheet is this download with export_type 'raw'. So is
+        # "export sheet for editing", which is not a BOM being made - only the
+        # caller knows which, so only a caller-named count_as is counted (and
+        # limited). Checked before the file is built.
+        count_as = request.data.get('count_as') if request.method == 'POST' else None
+        counted_bom_codes = []
+        if bom_creation_ledger.countable_event(count_as):
+            counted_bom_codes = [code for code in
+                                 [bom_creation_ledger.session_top_level_bom_code(session_id)] if code]
+            limit_response = _bom_limit_response(request, session_id, count_as, counted_bom_codes)
+            if limit_response is not None:
+                return limit_response
+
         def _download_rows(value):
             if isinstance(value, dict):
                 rows = value.get('data') or value.get('rows')
@@ -10577,9 +10591,12 @@ def download_file(request, session_id=None):
         response['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
         response['Pragma'] = 'no-cache'
         response['Expires'] = '0'
-        
+
+        if counted_bom_codes:
+            _count_bom_leaving_mapper(request, session_id, count_as, counted_bom_codes)
+
         return response
-        
+
     except Exception as e:
         # With the traceback. "Download failed: 'list' object has no attribute
         # 'get'" names a Python type and nothing else — not the column, not the
@@ -19701,6 +19718,11 @@ def download_bom_sheet(request, session_id):
     if error_response is not None:
         return error_response
 
+    bom_codes = [bom_creation_ledger.top_level_bom_code(_bom_header)]
+    limit_response = _bom_limit_response(request, session_id, request.GET.get('count_as'), bom_codes)
+    if limit_response is not None:
+        return limit_response
+
     workbook = openpyxl.Workbook()
     sheet = workbook.active
     sheet.title = 'BOM Data'
@@ -19730,7 +19752,58 @@ def download_bom_sheet(request, session_id):
     )
     response['Content-Disposition'] = 'attachment; filename="factwise_bom.xlsx"'
     workbook.save(response)
+    _count_bom_leaving_mapper(request, session_id, request.GET.get('count_as'), bom_codes)
     return response
+
+
+def _bom_limit_response(request, session_id, count_as, bom_codes):
+    """A 403 when this BOM would be new and the entity's monthly plan is used up.
+
+    None when the download may go ahead: it is not a BOM leaving the mapper,
+    the BOM was already counted (re-use is always allowed), the entity has
+    allowance left, or there is no entity to limit. Checked BEFORE the file is
+    built so a refused BOM never leaves the mapper.
+    """
+    if not bom_creation_ledger.countable_event(count_as):
+        return None
+    entity_id, _ = bom_creation_ledger.identity_from_request(
+        request, get_session_consistent(session_id) or {})
+    try:
+        bom_creation_ledger.check_bom_allowance(entity_id, [code for code in bom_codes if code])
+    except bom_creation_ledger.BomLimitReached as exc:
+        logger.info('BOM refused for entity %s (%s): plan limit reached', entity_id, exc.new_codes)
+        return Response(exc.as_response_body(), status=status.HTTP_403_FORBIDDEN)
+    return None
+
+
+def _count_bom_leaving_mapper(request, session_id, count_as, bom_codes):
+    """Count a BOM toward its entity when the caller says it is leaving the mapper.
+
+    Only a caller-named, countable ``count_as`` records anything: the same
+    download endpoints also serve editing exports and previews, which are not
+    a BOM being made. Never raises.
+    """
+    event = bom_creation_ledger.countable_event(count_as)
+    if not event:
+        return
+    try:
+        entity_id, enterprise_id = bom_creation_ledger.identity_from_request(
+            request, get_session_consistent(session_id) or {})
+        bom_creation_ledger.record_bom_creation(
+            entity_id=entity_id, enterprise_id=enterprise_id, session_id=session_id,
+            event=event, bom_codes=[code for code in bom_codes if code])
+    except Exception as exc:  # bookkeeping must not fail the download
+        logger.warning('BOM count skipped for %s: %s', session_id, exc)
+
+
+@api_view(['GET'])
+def bom_creation_stats(request):
+    """How many BOMs an entity has produced through the mapper, and which."""
+    entity_id = str(request.GET.get('entity_id') or '').strip()
+    if not entity_id:
+        return Response({'success': False, 'error': 'entity_id is required'},
+                        status=status.HTTP_400_BAD_REQUEST)
+    return Response({'success': True, **bom_creation_ledger.entity_bom_stats(entity_id)})
 
 
 

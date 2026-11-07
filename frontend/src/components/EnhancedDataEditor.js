@@ -53,7 +53,7 @@ import {
   ToggleButton,
   ToggleButtonGroup
 } from '@mui/material';
-import { Pagination } from '@mui/material';
+import { Pagination, Portal } from '@mui/material';
 import {
   Save as SaveIcon,
   TableRows as TableRowsIcon,
@@ -4497,6 +4497,8 @@ const EnhancedDataEditor = () => {
       form.append('session_id', sessionId);
       form.append('api_url', factwiseApiUrl);
       form.append('enterprise_id', factwiseEnterpriseId);
+      // Whose BOM count a successful commit adds to. The backend counts it.
+      if (factwiseEntityId) form.append('entity_id', factwiseEntityId);
       form.append('token', factwiseToken);
       form.append('import_type', 'item');
       const committed = await api.factwise40Validate(form);
@@ -4589,10 +4591,11 @@ const EnhancedDataEditor = () => {
       });
       fetchDataSynchronized();
     } catch (e) {
-      setExportRun({ status: 'failed', step: '', error: e?.message || 'The export did not finish.', summary: null });
+      const limitMessage = await api.bomLimitError(e);
+      setExportRun({ status: 'failed', step: '', error: limitMessage || e?.message || 'The export did not finish.', summary: null });
     }
   }, [sessionId, getCurrentExportColumnOrder, factwiseApiUrl, factwiseEnterpriseId, factwiseToken,
-      factwise40, projectMode, projectName, projectEntityId, existingProjectId,
+      factwiseEntityId, factwise40, projectMode, projectName, projectEntityId, existingProjectId,
       projectChoices.projects, fetchDataSynchronized]);
 
   const openFactwisePreview = useCallback((type) => {
@@ -4736,10 +4739,15 @@ const EnhancedDataEditor = () => {
 
     try {
       setFactwisePreviewDownloading(format);
+      // The BOM sheet and 4.0's combined sheet are a BOM leaving the mapper, so
+      // they count toward the entity's BOM total. The item directory is not.
+      const bomCount = factwisePreviewType === 'bom' || factwisePreviewType === 'combined'
+        ? { countAs: 'sheet_export', entityId: factwiseEntityId, enterpriseId: factwiseEnterpriseId }
+        : null;
       // A BOM is not the mapped grid — it is generated from the normalized rows
       // into the FactWise BOM schema, so it comes from its own endpoint.
       const response = factwisePreviewType === 'bom'
-        ? await api.downloadDemoBomSheet(sessionId)
+        ? await api.downloadDemoBomSheet(sessionId, bomCount)
         : await api.downloadProcessedFile(
             sessionId,
             format === 'csv' ? 'csv' : 'excel',
@@ -4750,7 +4758,8 @@ const EnhancedDataEditor = () => {
             // together in one sheet, with the Finished good code and BOM code
             // the combined importer needs to place each line.
             factwisePreviewType === 'combined' ? 'raw' : 'item',
-            duplicateHighlightFieldRef.current ? [duplicateHighlightFieldRef.current] : []
+            duplicateHighlightFieldRef.current ? [duplicateHighlightFieldRef.current] : [],
+            bomCount
           );
       const contentDisposition = response.headers?.['content-disposition'];
       let filename = `factwise_${label}_${sessionId}.${extension}`;
@@ -4776,11 +4785,12 @@ const EnhancedDataEditor = () => {
         'success'
       );
     } catch (e) {
-      showSnackbar(e.message || 'Failed to download export file', 'error');
+      const limitMessage = await api.bomLimitError(e);
+      showSnackbar(limitMessage || e.message || 'Failed to download export file', 'error');
     } finally {
       setFactwisePreviewDownloading('');
     }
-  }, [factwisePreviewType, getCurrentExportColumnOrder, sessionId, showSnackbar]);
+  }, [factwisePreviewType, getCurrentExportColumnOrder, sessionId, showSnackbar, factwiseEntityId, factwiseEnterpriseId]);
 
   const handleDirectoryExport = useCallback(async (type = factwisePreviewType) => {
     // 4.0's combined sheet takes the ITEM hand-off route - it is one sheet, not
@@ -5869,7 +5879,11 @@ const EnhancedDataEditor = () => {
   const handleExportBomSheet = useCallback(async () => {
     setExportBomBusy(true);
     try {
-      const resp = await api.downloadDemoBomSheet(sessionId);
+      const resp = await api.downloadDemoBomSheet(sessionId, {
+        countAs: 'sheet_export',
+        entityId: factwiseEntityId,
+        enterpriseId: factwiseEnterpriseId,
+      });
       const blob = new Blob([resp.data], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -5886,7 +5900,7 @@ const EnhancedDataEditor = () => {
     } finally {
       setExportBomBusy(false);
     }
-  }, [sessionId, showSnackbar]);
+  }, [sessionId, showSnackbar, factwiseEntityId, factwiseEnterpriseId]);
 
   const handleApplyAltCols = useCallback(async () => {
     const pairs = (altColsPairs || []).filter(p => p.target && p.source);
@@ -6813,8 +6827,16 @@ const EnhancedDataEditor = () => {
       },
     },
   };
+  // Short toasts stay one-line pills. A long one (a refusal that says why and
+  // what to do, like the monthly BOM plan limit) wraps instead of being cut to
+  // "...", which left only the first few words readable.
+  const snackbarIsLong = String(snackbar.message || '').length > 60;
   const snackbarAlertSx = factWiseToastAlertSx(fwPageTokens, snackbar.severity, {
     boxShadow: isDarkMode ? '0 18px 44px -24px rgba(0,0,0,0.82)' : '0 18px 42px -28px rgba(15,23,42,0.24)',
+    ...(snackbarIsLong ? {
+      borderRadius: '14px',
+      sx: { '& .MuiAlert-message': { whiteSpace: 'normal', overflow: 'visible', lineHeight: 1.45 } },
+    } : {}),
   });
   const dialogFieldSx = factWiseFieldSx(fwPageTokens, { height: 36 });
   const dialogSelectSx = factWiseSelectFieldSx(fwPageTokens, { height: 36 });
@@ -11988,6 +12010,11 @@ const EnhancedDataEditor = () => {
       </Dialog>
 
       {/* Snackbar for notifications */}
+      {/* Portalled to <body>, beside the dialogs. Inside the page it lives in
+          the page's stacking context, which sits under every dialog however
+          high its own zIndex - so a message raised while a dialog was open
+          (a BOM over the monthly plan, a failed download) was never seen. */}
+      <Portal>
       <Snackbar
         open={snackbar.open}
         autoHideDuration={3500}
@@ -12012,6 +12039,7 @@ const EnhancedDataEditor = () => {
           {snackbar.message}
         </Alert>
       </Snackbar>
+      </Portal>
 
       {/* Export / Import — one entry point, both halves of the same round trip.
           Export writes the grid exactly as it is; import reads that file back

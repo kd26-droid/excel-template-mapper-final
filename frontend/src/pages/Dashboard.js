@@ -48,6 +48,7 @@ import {
 } from '@mui/icons-material';
 import api, { setGlobalLoaderCallback } from '../services/api';
 import { useThemeContext } from '../utils/ThemeContext';
+import { useFactwise } from '../contexts/FactwiseContext';
 import {
   buildFactWisePageTokens,
   factWiseCardSx,
@@ -645,6 +646,25 @@ const Dashboard = () => {
     fetchData();
   }, []);
 
+  // BOMs this entity has produced through the mapper, against its monthly
+  // plan. The backend owns the count and the plan; this only displays them.
+  // With no entity (the app opened outside FactWise) nothing is counted.
+  const { entityId: factwiseEntityId } = useFactwise();
+  const [bomUsage, setBomUsage] = useState(null);
+  useEffect(() => {
+    if (!factwiseEntityId) {
+      setBomUsage(null);
+      return undefined;
+    }
+    let cancelled = false;
+    api.getBomCreationStats(factwiseEntityId)
+      .then((res) => { if (!cancelled) setBomUsage(res.data || null); })
+      .catch((err) => console.error('Error fetching BOM usage:', err));
+    return () => { cancelled = true; };
+  }, [factwiseEntityId]);
+  const bomMonth = bomUsage?.this_month || null;
+  const bomLimitReached = Boolean(bomMonth && bomMonth.limit !== null && bomMonth.remaining === 0);
+
   // Filtered Sessions
   const filteredSessions = useMemo(() => {
     let list = uploads.filter(u =>
@@ -906,6 +926,55 @@ const Dashboard = () => {
                   />
                 </Box>
                 <Grid container spacing={1}>
+                  <Grid item xs={12}>
+                    {/* BOMs made this month against the entity's plan. Amber at the limit. */}
+                    <Box
+                      data-testid="bom-usage-tile"
+                      sx={{
+                        p: 1.25,
+                        borderRadius: '10px',
+                        bgcolor: bomLimitReached
+                          ? (isDarkMode ? 'rgba(245, 158, 11, 0.12)' : 'rgba(245, 158, 11, 0.1)')
+                          : (isDarkMode ? 'rgba(14, 165, 233, 0.08)' : 'rgba(2, 132, 199, 0.06)'),
+                        border: bomLimitReached
+                          ? '1px solid rgba(245, 158, 11, 0.45)'
+                          : (isDarkMode ? '1px solid rgba(14, 165, 233, 0.22)' : '1px solid rgba(2, 132, 199, 0.2)'),
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        gap: 1,
+                      }}
+                    >
+                      <Box sx={{ minWidth: 0 }}>
+                        <Typography variant="caption" fontWeight="600" sx={{ color: bomLimitReached ? (isDarkMode ? '#fbbf24' : '#b45309') : (isDarkMode ? '#7dd3fc' : '#0369a1'), fontSize: '9.5px', display: 'block', mb: 0.25 }}>
+                          BOMs this month
+                        </Typography>
+                        <Typography variant="h6" fontWeight="600" sx={{ color: Ze.text, fontFamily: 'var(--fw-font-stack)', fontSize: '17px', lineHeight: 1.25 }}>
+                          {!bomMonth
+                            ? '—'
+                            : bomMonth.limit === null
+                              ? bomMonth.used
+                              : `${bomMonth.used} / ${bomMonth.limit}`}
+                        </Typography>
+                      </Box>
+                      <Box sx={{ textAlign: 'right', minWidth: 0 }}>
+                        <Typography variant="caption" sx={{ color: Ze.muted, fontSize: '10.5px', display: 'block' }}>
+                          {!bomMonth
+                            ? 'Open from FactWise to see your plan'
+                            : bomLimitReached
+                              ? `${bomMonth.plan} · limit reached`
+                              : bomMonth.limit === null
+                                ? `${bomMonth.plan} plan`
+                                : `${bomMonth.plan} · ${bomMonth.remaining} left`}
+                        </Typography>
+                        {bomUsage && (
+                          <Typography variant="caption" sx={{ color: Ze.muted, fontSize: '10.5px', display: 'block' }}>
+                            {`${bomUsage.bom_count} BOM${bomUsage.bom_count === 1 ? '' : 's'} all time`}
+                          </Typography>
+                        )}
+                      </Box>
+                    </Box>
+                  </Grid>
                   <Grid item xs={4}>
                     <Box sx={{ p: 1.25, bgcolor: isDarkMode ? 'rgba(59, 130, 246, 0.08)' : 'rgba(37, 99, 235, 0.06)', borderRadius: '10px', border: isDarkMode ? '1px solid rgba(59, 130, 246, 0.2)' : '1px solid rgba(37, 99, 235, 0.2)' }}>
                       <Typography variant="caption" fontWeight="600" sx={{ color: isDarkMode ? '#93c5fd' : '#1d4ed8', fontSize: '9.5px', display: 'block', mb: 0.25 }}>

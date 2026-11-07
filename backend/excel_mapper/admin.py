@@ -1,6 +1,9 @@
 from django.contrib import admin
 from django.utils.html import format_html
 from .models import (
+    BomCreationRecord,
+    BomPlan,
+    EntityBomPlan,
     BomStructurePattern,
     BomWorkflowTemplate,
     DirectoryLearningEvent,
@@ -23,6 +26,43 @@ class MappingTemplateAdmin(admin.ModelAdmin):
     search_fields = ('name', 'description', 'session_id')
     readonly_fields = ('created_at', 'updated_at', 'session_id')
     ordering = ('-created_at',)
+
+
+@admin.register(BomCreationRecord)
+class BomCreationRecordAdmin(admin.ModelAdmin):
+    list_display = ('entity_id', 'bom_code', 'first_event', 'created_at',
+                    'use_count', 'last_event', 'last_used_at')
+    list_filter = ('first_event', 'last_event')
+    search_fields = ('entity_id', 'enterprise_id', 'bom_code')
+    readonly_fields = [field.name for field in BomCreationRecord._meta.fields]
+    ordering = ('-created_at',)
+
+
+@admin.register(BomPlan)
+class BomPlanAdmin(admin.ModelAdmin):
+    list_display = ('name', 'limit_display', 'entity_count', 'updated_at')
+    search_fields = ('name',)
+
+    @admin.display(description='New BOMs per month')
+    def limit_display(self, obj):
+        return 'Unlimited' if obj.monthly_bom_limit is None else obj.monthly_bom_limit
+
+    @admin.display(description='Entities on plan')
+    def entity_count(self, obj):
+        return obj.entities.count()
+
+
+@admin.register(EntityBomPlan)
+class EntityBomPlanAdmin(admin.ModelAdmin):
+    list_display = ('entity_id', 'plan', 'used_this_month', 'note', 'updated_at')
+    list_filter = ('plan',)
+    search_fields = ('entity_id', 'note')
+    autocomplete_fields = ('plan',)
+
+    @admin.display(description='New BOMs this month')
+    def used_this_month(self, obj):
+        from .services.bom_creation_ledger import monthly_usage
+        return monthly_usage(obj.entity_id)['used']
 
 
 @admin.register(GlobalMpnCache)

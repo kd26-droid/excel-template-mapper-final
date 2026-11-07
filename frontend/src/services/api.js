@@ -92,6 +92,22 @@ const ensureSession = async () => {
   return null;
 };
 
+/**
+ * Request fields that make a download count as a BOM produced by the entity.
+ * `bomCount` is { countAs: 'sheet_export' | 'factwise30_handoff', entityId,
+ * enterpriseId }; null (every editing export and preview) sends nothing, and
+ * the backend counts nothing. The backend decides which BOM and whether it is
+ * new - one BOM per entity + top-level BOM code.
+ */
+const bomCountParams = (bomCount) => {
+  if (!bomCount?.countAs) return {};
+  return {
+    count_as: bomCount.countAs,
+    ...(bomCount.entityId ? { entity_id: bomCount.entityId } : {}),
+    ...(bomCount.enterpriseId ? { enterprise_id: bomCount.enterpriseId } : {}),
+  };
+};
+
 const api = {
   // ==========================================
   // GENERIC HTTP METHODS
@@ -653,7 +669,7 @@ const api = {
    * @param {string} sessionId - Session ID
    * @param {string} format - File format ('excel' or 'csv')
    */
-  downloadProcessedFile: (sessionId, format = 'excel', columnOrder = null, exportType = 'item', highlightDuplicateColumns = []) =>
+  downloadProcessedFile: (sessionId, format = 'excel', columnOrder = null, exportType = 'item', highlightDuplicateColumns = [], bomCount = null) =>
     axios.post(`${API_URL}/download/`, {
       session_id: sessionId,
       format: format,
@@ -663,7 +679,10 @@ const api = {
       export_type: exportType,
       // Repeated values in these columns are shaded amber in the xlsx, the same
       // way the editor grid flags them. Item code is always checked.
-      highlight_duplicate_columns: highlightDuplicateColumns
+      highlight_duplicate_columns: highlightDuplicateColumns,
+      // Only a BOM leaving the mapper counts toward the entity's BOM total; an
+      // editing export or a preview passes nothing. See bomCountParams.
+      ...bomCountParams(bomCount),
     }, {
       responseType: 'blob'
     }),
@@ -1610,8 +1629,37 @@ const api = {
   },
 
   /** Download the BOM this app generated from the user's own normalized rows. */
-  downloadDemoBomSheet: (sessionId) =>
-    axios.get(`${API_URL}/bom/download/${sessionId}/`, { responseType: 'blob', timeout: 0 }),
+  downloadDemoBomSheet: (sessionId, bomCount = null) =>
+    axios.get(`${API_URL}/bom/download/${sessionId}/`, {
+      params: bomCountParams(bomCount),
+      responseType: 'blob',
+      timeout: 0,
+    }),
+
+  /**
+   * How many BOMs an entity has produced through the mapper, and which, plus
+   * this month's plan usage ({ plan, limit, used, remaining, month, resets_at };
+   * limit/remaining null = unlimited).
+   */
+  getBomCreationStats: (entityId) =>
+    axios.get(`${API_URL}/bom/creation-stats/`, { params: { entity_id: entityId } }),
+
+  /**
+   * The backend's message when a NEW BOM was refused because the entity's
+   * monthly plan is used up, or null for any other error. BOM sheet downloads
+   * ask for a blob, so the refusal's JSON arrives as a Blob and is read here.
+   */
+  bomLimitError: async (error) => {
+    const response = error?.response;
+    if (response?.status !== 403) return null;
+    let body = response.data;
+    try {
+      if (body instanceof Blob) body = JSON.parse(await body.text());
+    } catch (_) {
+      return null;
+    }
+    return body?.code === 'bom_limit_reached' ? (body.error || 'Monthly BOM limit reached.') : null;
+  },
 
   /** Generated BOM as JSON: headers, rows, item rows, stats, warnings. */
   generateBomSheet: (sessionId) =>

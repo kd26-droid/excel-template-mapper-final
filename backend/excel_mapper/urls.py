@@ -51,6 +51,7 @@ from .views import (
     bom_revision_handoff,
     bom_duplicate_policy,
     download_bom_sheet,
+    bom_creation_stats,
     validate_bom_sheet,
     demo_bom_tree,
     expand_alternate_columns,
@@ -266,6 +267,8 @@ urlpatterns = [
     path('bom/revision-handoff/<str:session_id>/', bom_revision_handoff,
          name='bom-revision-handoff'),
     path('bom/download/<str:session_id>/', download_bom_sheet, name='download-bom-sheet'),
+    # GET ?entity_id= : how many BOMs that entity has produced through the mapper.
+    path('bom/creation-stats/', bom_creation_stats, name='bom-creation-stats'),
     path('bom/validate/<str:session_id>/', validate_bom_sheet, name='validate-bom-sheet'),
     path('bom/roles/infer/', bom_role_inference, name='bom-role-inference'),
     path('bom/field-patterns/infer/', bom_field_pattern_inference, name='bom-field-pattern-inference'),

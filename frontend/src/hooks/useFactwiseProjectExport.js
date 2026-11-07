@@ -558,13 +558,23 @@ function clearCheckpoint(sessionId) {
 // EnhancedDataEditor's fetchDataSynchronized) so the mapper's local state, its
 // column order, AND the BE session are all in sync — otherwise a user who just
 // filled required warnings could see us upload the pre-fill snapshot.
-async function buildFile(sessionId, columnOrder, exportType, prefix, refreshHost) {
+async function buildFile(sessionId, columnOrder, exportType, prefix, refreshHost, entityId = null) {
   if (refreshHost) {
     try { await refreshHost(); } catch (_) { /* best-effort */ }
   }
-  const response = exportType === 'bom'
-    ? await api.downloadDemoBomSheet(sessionId)
-    : await api.downloadProcessedFile(sessionId, 'excel', columnOrder, 'item');
+  // The BOM sheet built here is the one handed to FactWise 3.0, so it counts
+  // toward the entity's BOM total. A retry of the same BOM does not add to it.
+  let response;
+  try {
+    response = exportType === 'bom'
+      ? await api.downloadDemoBomSheet(sessionId, { countAs: 'factwise30_handoff', entityId })
+      : await api.downloadProcessedFile(sessionId, 'excel', columnOrder, 'item');
+  } catch (error) {
+    // A new BOM over the entity's monthly plan is refused before it is built;
+    // surface the plan's own message instead of "status code 403".
+    const limitMessage = await api.bomLimitError(error);
+    throw limitMessage ? new Error(limitMessage) : error;
+  }
   const blob = new Blob([response.data], {
     type: response.headers?.['content-type']
       || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -754,7 +764,7 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
       }
 
       const columnOrder = getColumnOrder?.() || null;
-      let file = await buildFile(sessionId, columnOrder, 'bom', 'bom', refreshHost);
+      let file = await buildFile(sessionId, columnOrder, 'bom', 'bom', refreshHost, entityId);
 
       const saved = loadCheckpoint(sessionId) || {};
       const originalReviseId = saved.reviseEnterpriseBomId || null;
@@ -1088,7 +1098,7 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
       });
       return { ok: false };
     }
-  }, [patch, sessionId, getColumnOrder, refreshHost]);
+  }, [patch, sessionId, getColumnOrder, refreshHost, entityId]);
 
   // -------- Project creation (only when mode === NEW) --------
   // Uses the template_id the dialog wrote to the checkpoint. That dialog offers

@@ -881,6 +881,111 @@ class EditorDefaultSettings(models.Model):
         return f"Editor defaults for {self.entity_name}"
 
 
+class BomCreationRecord(models.Model):
+    """One BOM an entity has produced through the mapper: the count per entity.
+
+    FactWise cannot answer "how many BOMs has this entity made": 4.0's
+    enterprise_boms is keyed by enterprise and records the creating user, never
+    the entity. So the mapper keeps its own ledger, written by the backend at
+    the moment a BOM leaves it.
+
+    A BOM counts once, the first time it is either exported as a sheet or
+    created in FactWise. Identity is (entity, top-level BOM code): exporting it
+    again, committing what was already exported, or re-running it with edited
+    lines does not add a row - it bumps ``use_count`` and the ``last_*``
+    fields. Sub-assemblies are inside their parent's tree, so only the
+    top-level code is recorded.
+    """
+
+    EVENT_SHEET_EXPORT = 'sheet_export'
+    EVENT_FACTWISE30_HANDOFF = 'factwise30_handoff'
+    EVENT_FACTWISE40_COMMIT = 'factwise40_commit'
+    EVENT_CHOICES = [
+        (EVENT_SHEET_EXPORT, 'BOM sheet exported'),
+        (EVENT_FACTWISE30_HANDOFF, 'BOM sheet handed to FactWise 3.0'),
+        (EVENT_FACTWISE40_COMMIT, 'BOM created in FactWise 4.0'),
+    ]
+
+    entity_id = models.CharField(max_length=120, db_index=True)
+    enterprise_id = models.CharField(max_length=120, blank=True, default='')
+    # As the user typed it the first time; ``bom_key`` is what identity uses,
+    # so `ABC-100` and `abc-100 ` are one BOM.
+    bom_code = models.CharField(max_length=255)
+    bom_key = models.CharField(max_length=255)
+    first_event = models.CharField(max_length=32, choices=EVENT_CHOICES)
+    first_session_id = models.CharField(max_length=120, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    last_event = models.CharField(max_length=32, choices=EVENT_CHOICES)
+    last_session_id = models.CharField(max_length=120, blank=True, default='')
+    last_used_at = models.DateTimeField(auto_now=True)
+    # Every export/commit of this BOM, the first included. Not the count -
+    # the count is the number of rows.
+    use_count = models.PositiveIntegerField(default=1)
+
+    class Meta:
+        db_table = 'excel_mapper_bom_creation_record'
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(fields=['entity_id', 'bom_key'],
+                                    name='uq_bom_creation_entity_bom_key'),
+        ]
+
+    def __str__(self):
+        return f"{self.entity_id}:{self.bom_code}"
+
+    def to_dict(self):
+        return {
+            'bom_code': self.bom_code,
+            'first_event': self.first_event,
+            'created_at': self.created_at.isoformat(),
+            'last_event': self.last_event,
+            'last_used_at': self.last_used_at.isoformat(),
+            'use_count': self.use_count,
+        }
+
+
+class BomPlan(models.Model):
+    """How many NEW BOMs an entity on this plan may produce per calendar month.
+
+    Edited in Django admin. ``monthly_bom_limit`` blank means unlimited. A BOM
+    uses a month's allowance only in the month it is first counted (see
+    BomCreationRecord); exporting or committing it again never does.
+    """
+
+    name = models.CharField(max_length=80, unique=True)
+    monthly_bom_limit = models.PositiveIntegerField(
+        null=True, blank=True,
+        help_text='New BOMs per calendar month (IST). Leave blank for unlimited.')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'excel_mapper_bom_plan'
+        ordering = ['monthly_bom_limit', 'name']
+
+    def __str__(self):
+        limit = 'unlimited' if self.monthly_bom_limit is None else f'{self.monthly_bom_limit}/month'
+        return f'{self.name} ({limit})'
+
+
+class EntityBomPlan(models.Model):
+    """The plan an entity is on. An entity with no row here is unlimited."""
+
+    entity_id = models.CharField(max_length=120, unique=True)
+    plan = models.ForeignKey(BomPlan, on_delete=models.PROTECT, related_name='entities')
+    note = models.CharField(max_length=255, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'excel_mapper_entity_bom_plan'
+        ordering = ['entity_id']
+        verbose_name = 'entity BOM plan'
+
+    def __str__(self):
+        return f'{self.entity_id} → {self.plan.name}'
+
+
 class IntermediateArtifact(models.Model):
     """Durable file snapshot for merge, normalization, and mapping checkpoints."""
 
