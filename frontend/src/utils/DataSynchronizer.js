@@ -337,7 +337,7 @@ class DataSynchronizer {
    * Fast data fetch with strict 3s budget. Returns cached data if server is slow.
    * @param {number} budgetMs - Maximum milliseconds to wait for fresh data
    */
-  async fetchDataFast(budgetMs = 3000) {
+  async fetchDataFast(budgetMs = 3000, onFirstPage = null) {
     const started = Date.now();
     this.emit('start', { operation: 'fetchDataFast' });
     try {
@@ -348,6 +348,15 @@ class DataSynchronizer {
       let aggregated = firstResponse.data;
       console.info("DATA VIEW HEADERS (fetchDataFast):", Array.isArray(aggregated.headers) ? aggregated.headers.join(", ") : aggregated.headers);
       const totalPages = Math.max(1, aggregated?.pagination?.total_pages || 1);
+      // Hand the first page over while the rest load, so a large sheet shows
+      // its opening rows in seconds instead of after every page has arrived.
+      if (totalPages > 1 && typeof onFirstPage === 'function') {
+        try {
+          onFirstPage({ ...aggregated, data: [...(aggregated.data || [])] });
+        } catch (firstPageError) {
+          console.warn('Showing the first page failed:', firstPageError);
+        }
+      }
       if (totalPages > 1) {
         for (let p = 2; p <= totalPages; p++) {
           const pageResp = await api.getMappedDataWithSpecs(this.sessionId, p, 1000, true, { force_fresh: true, _fresh: Date.now() });
