@@ -499,6 +499,12 @@ const EnhancedDataEditor = () => {
 
   // ─── STATE MANAGEMENT ───────────────────────────────────────────────────────
   const [loading, setLoading] = useState(true);
+  // Set while a large sheet is on screen but its remaining rows are still
+  // loading: { loaded, total }. Edits are refused until it clears, because
+  // saving posts the grid as the whole sheet and would drop the unloaded rows.
+  const [partialLoad, setPartialLoad] = useState(null);
+  const partialLoadRef = useRef(null);
+  const initialLoadDoneRef = useRef(false);
   const [syncStatus, setSyncStatus] = useState({ inProgress: false, operation: null });
   const [syncProgress, setSyncProgress] = useState(0);
   const [error, setError] = useState(null);
@@ -1725,7 +1731,7 @@ const EnhancedDataEditor = () => {
   // grid's shape or its filled-cell count has changed since the last one.
   const defaultsAttemptRef = useRef('');
   useEffect(() => {
-    if (!sessionId || pageLoading) return;
+    if (!sessionId || pageLoading || partialLoadRef.current) return;
     if (!Array.isArray(rowData) || rowData.length === 0) return;
     if (itemDirectoryDefaultsAppliedRef.current[sessionId]) return;
 
@@ -1946,8 +1952,40 @@ const EnhancedDataEditor = () => {
     
     try {
       
+      // On the first load of a large sheet, show the first page as soon as
+      // it arrives and keep loading the rest behind it.
+      const showFirstPage = initialLoadDoneRef.current ? null : (first) => {
+        const firstHeaders = (first.headers || []).filter(h => h && String(h).trim() !== '');
+        const firstRows = Array.isArray(first.data) ? first.data : [];
+        const total = Number(first.pagination?.total_rows) || firstRows.length;
+        setColumnDefs([
+          {
+            headerName: '#',
+            field: '__row_number__',
+            valueGetter: 'node.rowIndex + 1',
+            width: 80,
+            pinned: 'left',
+            editable: false,
+            filter: false,
+            sortable: false,
+            resizable: false,
+          },
+          ...firstHeaders.map(h => ({
+            headerName: deriveDisplayName(h, firstHeaders),
+            field: h,
+            tooltipField: h,
+          })),
+        ]);
+        setRowData(firstRows);
+        setTotalRows(total);
+        setVisibleRange({ start: 0, end: firstRows.length });
+        partialLoadRef.current = { loaded: firstRows.length, total };
+        setPartialLoad(partialLoadRef.current);
+        setLoading(false);
+      };
+
       // Fetch with extended budget to warm caches and validate session
-      const syncResult = await synchronizer.current.fetchDataFast(12000);
+      const syncResult = await synchronizer.current.fetchDataFast(12000, showFirstPage);
       if (syncResult.fromCache) {
         showSnackbar('Showing recent data while syncing latest changes…', 'warning');
         setSyncNotice(prev => ({ ...prev, visible: true }));
@@ -2200,6 +2238,10 @@ const EnhancedDataEditor = () => {
       // Use paginated fetch for rows to keep UI light
       await fetchPageData(1, pageSize);
       setTotalRows(data.pagination?.total_rows || data.data?.length || 0);
+      // Every row is in the grid now, so editing is safe again.
+      partialLoadRef.current = null;
+      setPartialLoad(null);
+      initialLoadDoneRef.current = true;
 
       // Initialize default widths for new columns if not present
       setColumnWidths(prev => {
@@ -5813,6 +5855,10 @@ const EnhancedDataEditor = () => {
   // whatever happened to land in that position.
   const handleDeleteSingleRow = useCallback(async (rowIndex) => {
     if (delBusy) return;
+    if (partialLoadRef.current) {
+      showSnackbar('The rest of the sheet is still loading - deleting unlocks when every row is in.', 'info');
+      return;
+    }
     const row = rowData[rowIndex];
     if (!row) return;
     setDelBusy(true);
@@ -6204,6 +6250,10 @@ const EnhancedDataEditor = () => {
   }, [sessionId, showSnackbar]);
 
   const handleCellEdit = useCallback((rowIndex, columnRef, newValue) => {
+    if (partialLoadRef.current) {
+      showSnackbar('The rest of the sheet is still loading - editing unlocks when every row is in.', 'info');
+      return;
+    }
     const newRowData = [...rowData];
     const colKey = typeof columnRef === 'string' ? columnRef : columnDefs[columnRef]?.field;
     if (colKey && newRowData[rowIndex]) {
@@ -8179,6 +8229,7 @@ const EnhancedDataEditor = () => {
               </Menu>
               <TextField
                 value={rowSearchTerm}
+                disabled={Boolean(partialLoad)}
                 onChange={(e) => { setRowSearchTerm(e.target.value); setPage(1); }}
                 placeholder={`Search all ${totalRows.toLocaleString()} rows...`}
                 size="small"
@@ -8635,7 +8686,23 @@ const EnhancedDataEditor = () => {
                   : <>Duplicate <strong>{columnLabel(dupHighlight.field, dupHighlight.field)}</strong> values are highlighted in amber ({dupHighlight.values.size} value{dupHighlight.values.size === 1 ? '' : 's'}). Edit them so each is unique, then export again.</>}
               </Alert>
             )}
-            {pageLoading && <LinearProgress sx={{ mb: 1 }} />}
+            {partialLoad && (
+              <Alert severity="info" sx={{ mb: 1, borderRadius: '10px', '& .MuiAlert-message': { width: '100%' } }}>
+                <Typography sx={{ fontSize: 13, fontWeight: 500 }}>
+                  {`Showing the first ${partialLoad.loaded.toLocaleString()} of ${partialLoad.total.toLocaleString()} rows - loading the rest`}
+                  {syncProgress > 0 && syncProgress < 100 ? ` (${syncProgress}%)` : ''}.
+                </Typography>
+                <Typography variant="caption" sx={{ display: 'block' }}>
+                  Editing, deleting and search unlock when every row is in.
+                </Typography>
+                <LinearProgress
+                  variant={syncProgress > 0 && syncProgress < 100 ? 'determinate' : 'indeterminate'}
+                  value={syncProgress}
+                  sx={{ mt: 0.75 }}
+                />
+              </Alert>
+            )}
+            {pageLoading && !partialLoad && <LinearProgress sx={{ mb: 1 }} />}
             <div style={tableScrollStyle}>
               <table style={tableBaseStyle}>
                 <colgroup>
