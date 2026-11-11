@@ -348,12 +348,15 @@ export async function fetchFactwiseEntities() {
         enterprise_id: enterpriseId,
         token,
       }, { timeout: 0 });
-      const rows = Array.isArray(data?.result) ? data.result : [];
+      const result = data?.result;
+      const rows = Array.isArray(result)
+        ? result
+        : (result?.items || result?.results || result?.data || result?.entities || []);
       return {
         success: true,
         entities: rows
           .map(row => ({
-            id: String(row?.entity_id || '').trim(),
+            id: String(row?.entity_id || row?.entityId || row?.id || '').trim(),
             // 4.0 names an entity twice; the display name is the one meant for
             // people, and it is what has to match FactWise's own lookup when
             // this lands in an exported "Procurement entity name" cell.

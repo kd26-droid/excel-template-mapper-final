@@ -9,6 +9,7 @@ from rest_framework.test import APIRequestFactory
 
 from excel_mapper.services.bom_pattern_identity import (
     BomPatternIdentityError,
+    local_bom_pattern_actor,
     resolve_bom_pattern_actor,
 )
 
@@ -68,11 +69,46 @@ class BomPatternIdentityTests(SimpleTestCase):
     def test_entity_not_available_to_token_is_rejected(self, get):
         get.return_value = Mock(
             status_code=200,
-            json=lambda: [{"entity_id": "entity-b"}],
+            json=lambda: [{"entity_id": "entity-b"}, {"entity_id": "entity-c"}],
         )
         with self.assertRaises(BomPatternIdentityError):
             resolve_bom_pattern_actor(
                 self._request("dev.enterprise-a.user-a"),
+                required=True,
+            )
+
+    @patch("excel_mapper.services.bom_pattern_identity.requests.get")
+    def test_enterprise_launch_resolves_single_available_entity(self, get):
+        get.return_value = Mock(
+            status_code=200,
+            json=lambda: {"items": [{"entity_id": "entity-a"}]},
+        )
+
+        actor = resolve_bom_pattern_actor(
+            self._request(
+                "dev.enterprise-a.user-a",
+                entity_id="stale-launch-entity",
+                enterprise_id="enterprise-a",
+            ),
+            required=True,
+        )
+
+        self.assertEqual(actor.entity_id, "entity-a")
+
+    @patch("excel_mapper.services.bom_pattern_identity.requests.get")
+    def test_enterprise_launch_with_multiple_entities_requires_selection(self, get):
+        get.return_value = Mock(
+            status_code=200,
+            json=lambda: [{"entity_id": "entity-a"}, {"entity_id": "entity-b"}],
+        )
+
+        with self.assertRaises(BomPatternIdentityError):
+            resolve_bom_pattern_actor(
+                self._request(
+                    "dev.enterprise-a.user-a",
+                    entity_id="enterprise-a",
+                    enterprise_id="enterprise-a",
+                ),
                 required=True,
             )
 
@@ -81,3 +117,16 @@ class BomPatternIdentityTests(SimpleTestCase):
         self.assertIsNone(resolve_bom_pattern_actor(request, required=False))
         with self.assertRaises(BomPatternIdentityError):
             resolve_bom_pattern_actor(request, required=True)
+
+    def test_local_actor_keeps_signed_in_launch_ownership(self):
+        actor = local_bom_pattern_actor(
+            self._request(
+                "dev.enterprise-a.user-a",
+                entity_id="launch-entity-a",
+                enterprise_id="enterprise-a",
+            )
+        )
+
+        self.assertEqual(actor.user_id, "user-a")
+        self.assertEqual(actor.entity_id, "launch-entity-a")
+        self.assertEqual(actor.enterprise_id, "enterprise-a")

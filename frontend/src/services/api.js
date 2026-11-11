@@ -22,6 +22,40 @@ const API_URL = resolveApiUrl();
 const CREDENTIAL_SCOPE_KEY = 'mpn_provider_credential_scope_id';
 const VALIDATION_PROVIDERS_KEY = 'mpn_validation_providers';
 const COLUMN_PROVIDER_MAPPINGS_KEY = 'mpn_column_provider_mappings';
+const FACTWISE_SESSION_KEYS = {
+  token: 'fw_embedded_token',
+  entityId: 'fw_entity_id',
+  apiUrl: 'fw_api_url',
+  enterpriseId: 'fw_enterprise_id',
+  verifiedPatternEntityId: 'fw_pattern_verified_entity_id',
+};
+
+const bomPatternIdentityHeaders = (requestUrl) => {
+  const url = String(requestUrl || '');
+  if (!url.startsWith(`${API_URL}/bom/field-patterns/`) || typeof window === 'undefined') {
+    return {};
+  }
+
+  const token = String(window.localStorage.getItem(FACTWISE_SESSION_KEYS.token) || '').trim();
+  const entityId = String(window.localStorage.getItem(FACTWISE_SESSION_KEYS.entityId) || '').trim();
+  const apiUrl = String(window.localStorage.getItem(FACTWISE_SESSION_KEYS.apiUrl) || '').trim();
+  const enterpriseId = String(window.localStorage.getItem(FACTWISE_SESSION_KEYS.enterpriseId) || '').trim();
+  const verifiedEntityId = String(
+    window.localStorage.getItem(FACTWISE_SESSION_KEYS.verifiedPatternEntityId) || ''
+  ).trim();
+  const isPatternApply = url.endsWith('/bom/field-patterns/apply/');
+  // Infer stays read-only until the entity is confirmed. Apply sends the
+  // launch value to the backend, which can safely resolve it only when the
+  // FactWise membership list has exactly one entity.
+  if (!token || !entityId || !apiUrl || (!isPatternApply && verifiedEntityId !== entityId)) return {};
+
+  return {
+    Authorization: `Bearer ${token}`,
+    'X-FactWise-Entity-Id': entityId,
+    'X-FactWise-Api-Url': apiUrl,
+    ...(enterpriseId ? { 'X-FactWise-Enterprise-Id': enterpriseId } : {}),
+  };
+};
 
 const getProviderCredentialScopeId = () => {
   if (typeof window === 'undefined') return null;
@@ -2497,7 +2531,8 @@ axios.interceptors.request.use(
     // Add common headers
     config.headers = {
       ...config.headers,
-      'X-Requested-With': 'XMLHttpRequest'
+      'X-Requested-With': 'XMLHttpRequest',
+      ...bomPatternIdentityHeaders(config.url),
     };
     
     return config;

@@ -83,7 +83,13 @@ def _validated_api_url(value):
 
 def _entity_ids(payload):
     if isinstance(payload, dict):
-        rows = payload.get("results") or payload.get("data") or payload.get("entities") or []
+        rows = (
+            payload.get("items")
+            or payload.get("results")
+            or payload.get("data")
+            or payload.get("entities")
+            or []
+        )
     else:
         rows = payload
     if not isinstance(rows, list):
@@ -140,10 +146,18 @@ def _validate_with_factwise(*, api_url, enterprise_id, entity_id, token):
         raise BomPatternIdentityError(
             "FactWise returned an invalid identity response."
         ) from exc
-    if entity_id not in _entity_ids(payload):
-        raise BomPatternIdentityError(
-            "The selected entity is not available to the signed-in FactWise user."
-        )
+    entity_ids = _entity_ids(payload)
+    if entity_id in entity_ids:
+        return entity_id
+
+    # A stale launch value cannot select the wrong owner when the signed-in
+    # account has exactly one eligible entity. That sole entity is the owner.
+    if len(entity_ids) == 1:
+        return next(iter(entity_ids))
+
+    raise BomPatternIdentityError(
+        "The selected entity is not available to the signed-in FactWise user."
+    )
 
 
 def resolve_bom_pattern_actor(request, *, required=False):
@@ -180,7 +194,7 @@ def resolve_bom_pattern_actor(request, *, required=False):
     if isinstance(cached, dict):
         return BomPatternActor(**cached)
 
-    _validate_with_factwise(
+    verified_entity_id = _validate_with_factwise(
         api_url=api_url,
         enterprise_id=enterprise_id,
         entity_id=entity_id,
@@ -189,7 +203,7 @@ def resolve_bom_pattern_actor(request, *, required=False):
 
     actor = BomPatternActor(
         user_id=user_id,
-        entity_id=entity_id,
+        entity_id=verified_entity_id,
         enterprise_id=enterprise_id,
     )
     timeout = DEFAULT_ACTOR_CACHE_SECONDS
@@ -197,3 +211,22 @@ def resolve_bom_pattern_actor(request, *, required=False):
         timeout = max(1, expires_at - int(time.time()))
     cache.set(cache_key, actor.__dict__, timeout=timeout)
     return actor
+
+
+def local_bom_pattern_actor(request):
+    """Return launch-owned identity for DEBUG-only local pattern persistence.
+
+    The caller must opt into this explicitly. Production always uses
+    ``resolve_bom_pattern_actor`` above and therefore verifies membership.
+    """
+    token = _bearer_token(request)
+    entity_id = _clean(request.headers.get("X-FactWise-Entity-Id"))
+    enterprise_id = _clean(request.headers.get("X-FactWise-Enterprise-Id"))
+    token_enterprise_id, user_id, _ = _token_identity(token)
+    if not token or not entity_id or not user_id:
+        return None
+    return BomPatternActor(
+        user_id=user_id,
+        entity_id=entity_id,
+        enterprise_id=enterprise_id or token_enterprise_id,
+    )
