@@ -9071,6 +9071,11 @@ const FieldPatternReviewTable = ({
   onAddAlternate,
   onRemoveEntry,
   onValueChange,
+  onViewPatterns,
+  onApplyPatterns,
+  onBack,
+  onConfigureMapping,
+  mappedColumnCount,
 }) => {
   const backendDisplayRows = backendReviewDisplayRows(contract);
   const sourceColumns = Array.isArray(contract?.display?.sourceColumns)
@@ -9138,6 +9143,51 @@ const FieldPatternReviewTable = ({
   );
   const reviewRowHeight = 84;
   const isReviewDark = ['#09090b', '#090b10', '#0f131a'].includes(theme?.page || theme?.pageTokens?.bg);
+  const [clientPaneWidth, setClientPaneWidth] = useState(0);
+  const [isDraggingSplitter, setIsDraggingSplitter] = useState(false);
+  const isDraggingRef = useRef(false);
+  const splitterContainerRef = useRef(null);
+
+  const handleSplitterMouseDown = useCallback((e) => {
+    e.preventDefault();
+    isDraggingRef.current = true;
+    setIsDraggingSplitter(true);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    const rect = splitterContainerRef.current?.getBoundingClientRect();
+    const containerLeft = rect ? rect.left : 0;
+    const containerWidth = rect ? rect.width : 1000;
+
+    const onMouseMove = (moveEvent) => {
+      if (!isDraggingRef.current) return;
+      const newWidth = Math.round(moveEvent.clientX - containerLeft);
+      if (newWidth < 70) {
+        setClientPaneWidth(0);
+      } else {
+        const maxWidth = Math.round(containerWidth * 0.8);
+        const minWidth = Math.round(containerWidth * 0.18);
+        setClientPaneWidth(Math.min(maxWidth, Math.max(minWidth, newWidth)));
+      }
+    };
+    const onMouseUp = () => {
+      isDraggingRef.current = false;
+      setIsDraggingSplitter(false);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    };
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  }, []);
+
+  const handleToggleSplit = useCallback(() => {
+    setClientPaneWidth((prev) => {
+      if (prev > 0) return 0;
+      const containerWidth = splitterContainerRef.current?.clientWidth || 1000;
+      return Math.round(containerWidth * 0.5);
+    });
+  }, []);
   const reviewHeaderBg = isReviewDark ? '#1b1d23' : '#fff3c4';
   const reviewSubHeaderBg = isReviewDark ? '#17181d' : '#fff8df';
   const reviewFactwiseHeaderBg = isReviewDark ? 'rgba(45, 212, 191, 0.12)' : '#d9f8ed';
@@ -9185,62 +9235,125 @@ const FieldPatternReviewTable = ({
         justifyContent="space-between"
         alignItems={{ xs: 'stretch', md: 'center' }}
         gap={1.25}
-        sx={{ px: 1.6, py: 1.25, borderBottom: `1px solid ${theme.border}`, bgcolor: theme.paperSoft }}
+        sx={{ px: 1.75, py: 1.25, borderBottom: `1px solid ${theme.border}`, bgcolor: theme.paperSoft }}
       >
-        <Stack direction="row" alignItems="center" gap={0.8} flexWrap="wrap">
-          <Typography sx={{ fontSize: 14, fontWeight: 550, color: theme.text }}>All detected rows</Typography>
-          <Chip size="small" label={contract?.display?.reviewModeLabel || ''} sx={{ height: 25, fontSize: 11, fontWeight: 500, bgcolor: reviewFactwiseHeaderBg, color: reviewFactwiseText, border: `1px solid ${reviewLine}` }} />
-          <Chip size="small" variant="outlined" label={`${Number(contract?.summary?.sourceRowCount || 0)} source rows`} sx={{ height: 25, fontSize: 11, fontWeight: 500, bgcolor: theme.paper, color: theme.text, borderColor: theme.border }} />
-          <Chip size="small" variant="outlined" label={`${filteredRows.length} displayed rows`} sx={{ height: 25, fontSize: 11, fontWeight: 500, bgcolor: theme.paper, color: theme.text, borderColor: theme.border }} />
+        {/* Left side: Mapped rows status badge & Column mapping guidance */}
+        <Stack direction="row" alignItems="center" gap={1.25} flexWrap="wrap">
+          <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.65, px: 1.25, py: 0.45, borderRadius: '999px', bgcolor: isReviewDark ? 'rgba(16, 185, 129, 0.14)' : '#ecfdf5', border: `1px solid ${isReviewDark ? 'rgba(16, 185, 129, 0.3)' : '#a7f3d0'}` }}>
+            <CheckCircleOutlineIcon sx={{ fontSize: 15, color: isReviewDark ? '#34d399' : '#059669' }} />
+            <Typography sx={{ fontSize: 12.5, fontWeight: 600, color: isReviewDark ? '#6ee7b7' : '#047857', lineHeight: 1 }}>
+              {backendDisplayRows.length} rows mapped
+            </Typography>
+          </Box>
+          {onConfigureMapping && (
+            <Typography sx={{ fontSize: 12.5, color: theme.muted }}>
+              Want to adjust or add fields? Use{' '}
+              <Box component="span" onClick={onConfigureMapping} sx={{ color: isReviewDark ? '#60a5fa' : '#007aff', fontWeight: 500, cursor: 'pointer', '&:hover': { textDecoration: 'underline' } }}>
+                Column mapping
+              </Box>.
+            </Typography>
+          )}
         </Stack>
+
+        {/* Right side: Column mapping, View detected patterns & Search */}
         <Stack direction={{ xs: 'column', sm: 'row' }} alignItems="center" gap={1} sx={{ width: { xs: '100%', md: 'auto' } }}>
-          <FormControl size="small" sx={{ minWidth: { xs: '100%', sm: 190 } }}>
-            <Select
-              value={pairingMismatchFilter}
-              onChange={(event) => {
-                setPairingMismatchFilter(event.target.value);
-                onPageChange(0);
-              }}
-              aria-label="Filter review rows by MPN and manufacturer count"
-            >
-              <MenuItem value="all">All rows</MenuItem>
-              <MenuItem value="mismatch">MPN-MFR mismatch</MenuItem>
-            </Select>
-          </FormControl>
+          {onConfigureMapping && (
+            <Button variant="outlined" size="small" startIcon={<ViewColumnOutlinedIcon sx={{ fontSize: 16 }} />} onClick={onConfigureMapping} sx={{ textTransform: 'none', fontSize: '12.5px', fontWeight: 500, borderColor: isReviewDark ? 'rgba(148, 163, 184, 0.3)' : '#cbd5e1', color: isReviewDark ? '#cbd5e1' : '#334155', bgcolor: isReviewDark ? 'rgba(255, 255, 255, 0.04)' : '#ffffff', whiteSpace: 'nowrap', height: 36, px: 1.5 }}>
+              Column mapping ({mappedColumnCount || 0})
+            </Button>
+          )}
+          {onViewPatterns && (
+            <Button variant="outlined" size="small" startIcon={<TuneIcon sx={{ fontSize: 16 }} />} onClick={onViewPatterns} sx={{ textTransform: 'none', fontSize: '12.5px', fontWeight: 500, borderColor: isReviewDark ? 'rgba(148, 163, 184, 0.3)' : '#bfdbfe', color: isReviewDark ? '#93c5fd' : '#1d4ed8', bgcolor: isReviewDark ? 'rgba(37, 99, 235, 0.1)' : '#eff6ff', whiteSpace: 'nowrap', height: 36, px: 1.5 }}>
+              View detected patterns ({Number(contract?.summary?.patternCount || contract?.patterns?.length || 0)})
+            </Button>
+          )}
           <TextField
             size="small"
             value={search}
-            onChange={(event) => {
-              onSearchChange(event.target.value);
-              onPageChange(0);
-            }}
+            onChange={(event) => { onSearchChange(event.target.value); onPageChange(0); }}
             placeholder="Search source or FactWise values"
             aria-label="Search review rows"
-            InputProps={{
-              startAdornment: (
-                <InputAdornment position="start"><SearchIcon sx={{ fontSize: 18, color: theme.muted }} /></InputAdornment>
-              ),
-            }}
-            sx={{ width: { xs: '100%', md: 360 } }}
+            InputProps={{ startAdornment: <InputAdornment position="start"><SearchIcon sx={{ fontSize: 18, color: theme.muted }} /></InputAdornment> }}
+            sx={{ width: { xs: '100%', md: 260 } }}
           />
         </Stack>
       </Stack>
 
-      <Box sx={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', minWidth: 0 }}>
-        <Box sx={{ minWidth: 0, borderRight: `1px solid ${reviewDivider}` }}>
-          <Box sx={{ height: 38, display: 'flex', alignItems: 'center', justifyContent: 'center', bgcolor: reviewHeaderBg, color: reviewClientText, fontSize: 12.5, fontWeight: 550, borderBottom: `1px solid ${reviewStrongLine}` }}>Client file</Box>
-          <Box sx={{ height: 42, display: 'grid', gridTemplateColumns: `${reviewSourceRowWidth}px minmax(0, 1fr)`, bgcolor: reviewSubHeaderBg, borderBottom: `1px solid ${reviewStrongLine}` }}>
-            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', px: 1, color: reviewClientText, fontSize: 12, fontWeight: 500, borderRight: `1px solid ${reviewLine}` }}>Source row</Box>
-            <Box sx={{ overflow: 'hidden' }}>
-              <Box sx={{ width: clientScrollableWidth, transform: `translateX(-${clientHorizontalScroll}px)`, display: 'grid', gridTemplateColumns: `repeat(${Math.max(1, sourceColumns.length)}, ${reviewSourceColumnWidth}px)`, height: '100%' }}>
-                {(sourceColumns.length ? sourceColumns : ['Customer values']).map((column) => (
-                  <Box key={`source-header-${column}`} title={column} sx={{ display: 'flex', alignItems: 'center', px: 1.25, color: reviewClientText, fontSize: 12, fontWeight: 500, borderRight: `1px solid ${reviewLine}`, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{column}</Box>
-                ))}
+      {/* Splitter Header: Client file | Pulsing Handle or Broad Dark Divider | FactWise interpretation */}
+      <Box ref={splitterContainerRef} sx={{ display: 'flex', flexDirection: 'row', minWidth: 0, width: '100%', userSelect: isDraggingRef.current ? 'none' : 'auto' }}>
+        {clientPaneWidth > 0 && (
+          <Box sx={{ width: clientPaneWidth, minWidth: clientPaneWidth, maxWidth: clientPaneWidth, flexShrink: 0, overflow: 'hidden', transition: isDraggingRef.current ? 'none' : 'width 0.2s ease' }}>
+            <Box sx={{ height: 38, display: 'flex', alignItems: 'center', justifyContent: 'center', bgcolor: reviewHeaderBg, color: reviewClientText, fontSize: 12.5, fontWeight: 550, borderBottom: `1px solid ${reviewStrongLine}` }}>Client file</Box>
+            <Box sx={{ height: 42, display: 'grid', gridTemplateColumns: `${reviewSourceRowWidth}px minmax(0, 1fr)`, bgcolor: reviewSubHeaderBg, borderBottom: `1px solid ${reviewStrongLine}` }}>
+              <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', px: 1, color: reviewClientText, fontSize: 12, fontWeight: 500, borderRight: `1px solid ${reviewLine}` }}>Source row</Box>
+              <Box sx={{ overflow: 'hidden' }}>
+                <Box sx={{ width: clientScrollableWidth, transform: `translateX(-${clientHorizontalScroll}px)`, display: 'grid', gridTemplateColumns: `repeat(${Math.max(1, sourceColumns.length)}, ${reviewSourceColumnWidth}px)`, height: '100%' }}>
+                  {(sourceColumns.length ? sourceColumns : ['Customer values']).map((column) => (
+                    <Box key={`source-header-${column}`} title={column} sx={{ display: 'flex', alignItems: 'center', px: 1.25, color: reviewClientText, fontSize: 12, fontWeight: 500, borderRight: `1px solid ${reviewLine}`, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{column}</Box>
+                  ))}
+                </Box>
               </Box>
             </Box>
           </Box>
+        )}
+
+        {/* Drag Handle / Animated Pulsing Left Split Indicator */}
+        <Box
+          onMouseDown={clientPaneWidth > 0 ? handleSplitterMouseDown : undefined}
+          onClick={clientPaneWidth === 0 ? handleToggleSplit : undefined}
+          onDoubleClick={clientPaneWidth > 0 ? () => setClientPaneWidth(0) : undefined}
+          title={clientPaneWidth === 0 ? 'Click to show Client file (splits 50/50)' : 'Drag to adjust column widths (double-click to collapse)'}
+          sx={{
+            width: clientPaneWidth === 0 ? 32 : 10,
+            minWidth: clientPaneWidth === 0 ? 32 : 10,
+            maxWidth: clientPaneWidth === 0 ? 32 : 10,
+            flexShrink: 0,
+            cursor: clientPaneWidth === 0 ? 'pointer' : 'col-resize',
+            position: 'relative',
+            zIndex: 10,
+            bgcolor: clientPaneWidth === 0 ? (isReviewDark ? 'rgba(0, 122, 255, 0.16)' : '#eff6ff') : 'transparent',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            userSelect: 'none',
+            borderRight: clientPaneWidth === 0 ? `1px solid ${reviewStrongLine}` : 'none',
+            transition: isDraggingRef.current ? 'none' : 'width 0.2s ease, background 0.15s ease',
+            ...(clientPaneWidth === 0 ? {
+              animation: 'pulseGlow 2s infinite',
+              '@keyframes pulseGlow': {
+                '0%': { boxShadow: 'inset 0 0 0 1px #007aff, 0 0 0 0 rgba(0, 122, 255, 0.45)' },
+                '70%': { boxShadow: 'inset 0 0 0 1px #007aff, 0 0 0 7px rgba(0, 122, 255, 0)' },
+                '100%': { boxShadow: 'inset 0 0 0 1px #007aff, 0 0 0 0 rgba(0, 122, 255, 0)' },
+              },
+              '&:hover': { bgcolor: isReviewDark ? 'rgba(0, 122, 255, 0.28)' : '#dbeafe' },
+            } : {
+              '&::before': {
+                content: '""', position: 'absolute', top: 0, bottom: 0, left: '3px', width: '4px', borderRadius: '2px',
+                bgcolor: isDraggingSplitter ? '#007aff' : (isReviewDark ? '#94a3b8' : '#475569'),
+                boxShadow: isDraggingSplitter ? '0 0 8px rgba(0, 122, 255, 0.6)' : 'none',
+                transition: 'background 0.15s, box-shadow 0.15s',
+              },
+              '&:hover::before': { bgcolor: '#007aff', boxShadow: '0 0 6px rgba(0, 122, 255, 0.5)' },
+            }),
+          }}
+        >
+          {clientPaneWidth === 0 ? (
+            <Tooltip title="Click to show Client file & split view 50/50" arrow placement="right">
+              <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', py: 0.5, userSelect: 'none' }}>
+                <ChevronRightIcon sx={{ fontSize: 18, color: '#007aff', animation: 'bounceRight 1.5s infinite', '@keyframes bounceRight': { '0%, 100%': { transform: 'translateX(0)' }, '50%': { transform: 'translateX(3px)' } } }} />
+                <Typography sx={{ writingMode: 'vertical-rl', transform: 'rotate(180deg)', fontSize: 9, fontWeight: 700, color: '#007aff', letterSpacing: 0.5, mt: 0.25 }}>CLIENT</Typography>
+              </Box>
+            </Tooltip>
+          ) : (
+            <Box sx={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', width: 8, height: 28, borderRadius: '4px', bgcolor: isDraggingSplitter ? '#007aff' : (isReviewDark ? '#1e293b' : '#f1f5f9'), border: `1px solid ${isDraggingSplitter ? '#007aff' : (isReviewDark ? '#64748b' : '#94a3b8')}`, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '1.5px', boxShadow: '0 1px 3px rgba(0,0,0,0.18)', pointerEvents: 'none', zIndex: 12 }}>
+              <Box sx={{ width: 1.5, height: 14, borderRadius: 1, bgcolor: isDraggingSplitter ? '#ffffff' : (isReviewDark ? '#94a3b8' : '#475569') }} />
+              <Box sx={{ width: 1.5, height: 14, borderRadius: 1, bgcolor: isDraggingSplitter ? '#ffffff' : (isReviewDark ? '#94a3b8' : '#475569') }} />
+            </Box>
+          )}
         </Box>
-        <Box sx={{ minWidth: 0 }}>
+
+        <Box sx={{ flex: 1, minWidth: 0, overflow: 'hidden' }}>
           <Box sx={{ height: 38, display: 'flex', alignItems: 'center', justifyContent: 'center', bgcolor: reviewFactwiseHeaderBg, color: reviewFactwiseText, fontSize: 12.5, fontWeight: 550, borderBottom: `1px solid ${reviewStrongLine}` }}>FactWise interpretation</Box>
           <Box sx={{ height: 42, display: 'grid', gridTemplateColumns: `${reviewActionColumnWidth}px minmax(0, 1fr)`, bgcolor: reviewFactwiseSubHeaderBg, borderBottom: `1px solid ${reviewStrongLine}` }}>
             <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', px: 1, color: reviewFactwiseText, fontSize: 12, fontWeight: 500, borderRight: `1px solid ${reviewLine}` }}>Actions</Box>
@@ -9256,7 +9369,8 @@ const FieldPatternReviewTable = ({
         </Box>
       </Box>
 
-      <Box sx={{ maxHeight: 'calc(100dvh - 364px)', overflowY: 'auto', overflowX: 'hidden', bgcolor: reviewBodyBg }}>
+      {/* Increased Table Body Height */}
+      <Box sx={{ maxHeight: 'calc(100dvh - 210px)', minHeight: 480, overflowY: 'auto', overflowX: 'hidden', bgcolor: reviewBodyBg }}>
         {visibleSourceGroups.map((group, groupIndex) => {
           const sourceValues = new Map((group.left || []).map((item) => [item.column, item.value]));
           const groupHeight = Math.max(reviewRowHeight, group.rows.length * reviewRowHeight);
@@ -9265,53 +9379,76 @@ const FieldPatternReviewTable = ({
             <Box
               key={group.key}
               sx={{
-                display: 'grid',
-                gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)',
+                display: 'flex',
+                flexDirection: 'row',
                 minWidth: 0,
                 height: groupHeight,
                 position: 'relative',
-                borderLeft: `1px solid ${reviewStrongLine}`,
-                borderRight: `1px solid ${reviewStrongLine}`,
                 borderTop: groupIndex === 0 ? `1px solid ${reviewStrongLine}` : 0,
-                '&::after': {
-                  content: '""',
-                  position: 'absolute',
-                  left: 0,
-                  right: 0,
-                  bottom: 0,
-                  height: '1px',
-                  bgcolor: reviewStrongLine,
-                  zIndex: 4,
-                  pointerEvents: 'none',
-                },
+                '&::after': { content: '""', position: 'absolute', left: 0, right: 0, bottom: 0, height: '1px', bgcolor: reviewStrongLine, zIndex: 4, pointerEvents: 'none' },
                 ...(groupNeedsReview ? { bgcolor: isReviewDark ? 'rgba(251, 191, 36, 0.035)' : 'rgba(217, 119, 6, 0.035)' } : {}),
               }}
             >
-              <Box sx={{ minWidth: 0, display: 'grid', gridTemplateColumns: `${reviewSourceRowWidth}px minmax(0, 1fr)`, borderRight: `1px solid ${reviewDivider}`, bgcolor: reviewClientCellBg }}>
-                <Stack alignItems="center" justifyContent="center" gap={0.45} sx={{ px: 0.75, borderRight: `1px solid ${reviewLine}`, bgcolor: reviewClientCellBg }}>
-                  <Typography sx={{ color: theme.text, fontSize: 12.5, fontWeight: 500, lineHeight: 1 }}>{group.sourceRow || '-'}</Typography>
-                  {group.rows[0]?.hasPairingMismatch && (
-                    <Tooltip title={fmt(group.rows[0]?.warnings?.[0]?.message) || 'MPN and manufacturer counts do not match'}>
-                      <Chip
-                        size="small"
-                        color="warning"
-                        variant="outlined"
-                        label={`${group.rows[0]?.mpnCount || 0}/${group.rows[0]?.manufacturerCount || 0}`}
-                        sx={{ height: 21, fontSize: 10.5, fontWeight: 500, borderRadius: '999px' }}
-                      />
-                    </Tooltip>
-                  )}
-                </Stack>
-                <Box sx={{ minWidth: 0, overflow: 'hidden' }} onWheel={(event) => scrollPaneHorizontally(event, clientHorizontalScrollRef)}>
-                  <Box sx={{ width: clientScrollableWidth, height: '100%', transform: `translateX(-${clientHorizontalScroll}px)`, display: 'grid', gridTemplateColumns: `repeat(${Math.max(1, sourceColumns.length)}, ${reviewSourceColumnWidth}px)` }}>
-                    {(sourceColumns.length ? sourceColumns : ['Customer values']).map((column) => (
-                      <Box key={`${group.key}-source-${column}`} sx={{ minWidth: 0, px: 1.15, py: 0.85, borderRight: `1px solid ${reviewLine}`, bgcolor: groupIndex % 2 ? reviewClientAltCellBg : reviewClientCellBg, color: theme.text, fontSize: 12.25, fontWeight: 400, lineHeight: 1.35, overflow: 'auto', overflowWrap: 'anywhere' }}>{fmt(sourceValues.get(column))}</Box>
-                    ))}
+              {clientPaneWidth > 0 && (
+                <Box sx={{ width: clientPaneWidth, minWidth: clientPaneWidth, maxWidth: clientPaneWidth, flexShrink: 0, display: 'grid', gridTemplateColumns: `${reviewSourceRowWidth}px minmax(0, 1fr)`, bgcolor: reviewClientCellBg, overflow: 'hidden', transition: isDraggingRef.current ? 'none' : 'width 0.2s ease' }}>
+                  <Stack alignItems="center" justifyContent="center" gap={0.45} sx={{ px: 0.75, borderRight: `1px solid ${reviewLine}`, bgcolor: reviewClientCellBg }}>
+                    <Typography sx={{ color: theme.text, fontSize: 12.5, fontWeight: 500, lineHeight: 1 }}>{group.sourceRow || '-'}</Typography>
+                    {group.rows[0]?.hasPairingMismatch && (
+                      <Tooltip title={fmt(group.rows[0]?.warnings?.[0]?.message) || 'MPN and manufacturer counts do not match'}>
+                        <Chip size="small" color="warning" variant="outlined" label={`${group.rows[0]?.mpnCount || 0}/${group.rows[0]?.manufacturerCount || 0}`} sx={{ height: 21, fontSize: 10.5, fontWeight: 500, borderRadius: '999px' }} />
+                      </Tooltip>
+                    )}
+                  </Stack>
+                  <Box sx={{ minWidth: 0, overflow: 'hidden' }} onWheel={(event) => scrollPaneHorizontally(event, clientHorizontalScrollRef)}>
+                    <Box sx={{ width: clientScrollableWidth, height: '100%', transform: `translateX(-${clientHorizontalScroll}px)`, display: 'grid', gridTemplateColumns: `repeat(${Math.max(1, sourceColumns.length)}, ${reviewSourceColumnWidth}px)` }}>
+                      {(sourceColumns.length ? sourceColumns : ['Customer values']).map((column) => (
+                        <Box key={`${group.key}-source-${column}`} sx={{ minWidth: 0, px: 1.15, py: 0.85, borderRight: `1px solid ${reviewLine}`, bgcolor: groupIndex % 2 ? reviewClientAltCellBg : reviewClientCellBg, color: theme.text, fontSize: 12.25, fontWeight: 400, lineHeight: 1.35, overflow: 'auto', overflowWrap: 'anywhere' }}>{fmt(sourceValues.get(column))}</Box>
+                      ))}
+                    </Box>
                   </Box>
                 </Box>
+              )}
+
+              {/* Full-Height Draggable Splitter Column */}
+              <Box
+                onMouseDown={clientPaneWidth > 0 ? handleSplitterMouseDown : undefined}
+                onClick={clientPaneWidth === 0 ? handleToggleSplit : undefined}
+                onDoubleClick={clientPaneWidth > 0 ? () => setClientPaneWidth(0) : undefined}
+                title={clientPaneWidth === 0 ? 'Click to show Client file (splits 50/50)' : 'Drag to adjust column widths (double-click to collapse)'}
+                sx={{
+                  width: clientPaneWidth === 0 ? 32 : 10,
+                  minWidth: clientPaneWidth === 0 ? 32 : 10,
+                  maxWidth: clientPaneWidth === 0 ? 32 : 10,
+                  flexShrink: 0,
+                  bgcolor: clientPaneWidth === 0 ? (isReviewDark ? 'rgba(0, 122, 255, 0.08)' : '#f0f7ff') : 'transparent',
+                  borderRight: clientPaneWidth === 0 ? `1px solid ${reviewLine}` : 'none',
+                  cursor: clientPaneWidth === 0 ? 'pointer' : 'col-resize',
+                  position: 'relative',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  userSelect: 'none',
+                  zIndex: 8,
+                  transition: isDraggingRef.current ? 'none' : 'width 0.2s ease',
+                  ...(clientPaneWidth === 0 ? {
+                    '&:hover': { bgcolor: isReviewDark ? 'rgba(0, 122, 255, 0.18)' : '#e0effe' },
+                  } : {
+                    '&::before': {
+                      content: '""', position: 'absolute', top: 0, bottom: 0, left: '3px', width: '4px', borderRadius: '2px',
+                      bgcolor: isDraggingSplitter ? '#007aff' : (isReviewDark ? '#94a3b8' : '#475569'),
+                      boxShadow: isDraggingSplitter ? '0 0 8px rgba(0, 122, 255, 0.6)' : 'none',
+                      transition: 'background 0.15s, box-shadow 0.15s',
+                    },
+                    '&:hover::before': { bgcolor: '#007aff', boxShadow: '0 0 6px rgba(0, 122, 255, 0.5)' },
+                  }),
+                }}
+              >
+                {clientPaneWidth === 0 && (
+                  <Box sx={{ width: 2, height: '60%', bgcolor: '#007aff', borderRadius: 1, opacity: 0.7 }} />
+                )}
               </Box>
 
-              <Box sx={{ minWidth: 0, bgcolor: reviewFactwiseCellBg }}>
+              <Box sx={{ flex: 1, minWidth: 0, bgcolor: reviewFactwiseCellBg, overflow: 'hidden' }}>
                 {group.rows.map((row, rowIndex) => {
                   const isAlternate = /^Alternate\b/i.test(fmt(row.relation));
                   const rowBackground = rowIndex === 0
@@ -9362,16 +9499,39 @@ const FieldPatternReviewTable = ({
         {!visibleSourceGroups.length && <Box sx={{ py: 5, textAlign: 'center', color: theme.muted }}>No rows match this search.</Box>}
       </Box>
 
-      <Box sx={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', minWidth: 0, borderTop: `1px solid ${reviewLine}`, bgcolor: isReviewDark ? '#17181d' : theme.paperSoft }}>
-        <Box ref={clientHorizontalScrollRef} onScroll={(event) => setClientHorizontalScroll(event.currentTarget.scrollLeft)} sx={{ overflowX: 'auto', overflowY: 'hidden', borderRight: `1px solid ${reviewDivider}` }}>
-          <Box sx={{ width: clientScrollableWidth + reviewSourceRowWidth, height: 10 }} />
-        </Box>
-        <Box ref={factwiseHorizontalScrollRef} onScroll={(event) => setFactwiseHorizontalScroll(event.currentTarget.scrollLeft)} sx={{ overflowX: 'auto', overflowY: 'hidden' }}>
+      <Box sx={{ display: 'flex', flexDirection: 'row', minWidth: 0, borderTop: `1px solid ${reviewLine}`, bgcolor: isReviewDark ? '#17181d' : theme.paperSoft }}>
+        {clientPaneWidth > 0 && (
+          <Box ref={clientHorizontalScrollRef} onScroll={(event) => setClientHorizontalScroll(event.currentTarget.scrollLeft)} sx={{ width: clientPaneWidth, minWidth: clientPaneWidth, maxWidth: clientPaneWidth, flexShrink: 0, overflowX: 'auto', overflowY: 'hidden', borderRight: `1px solid ${reviewLine}`, transition: isDraggingRef.current ? 'none' : 'width 0.2s ease' }}>
+            <Box sx={{ width: clientScrollableWidth + reviewSourceRowWidth, height: 10 }} />
+          </Box>
+        )}
+        <Box sx={{ width: clientPaneWidth === 0 ? 32 : 10, minWidth: clientPaneWidth === 0 ? 32 : 10, maxWidth: clientPaneWidth === 0 ? 32 : 10, flexShrink: 0 }} />
+        <Box ref={factwiseHorizontalScrollRef} onScroll={(event) => setFactwiseHorizontalScroll(event.currentTarget.scrollLeft)} sx={{ flex: 1, overflowX: 'auto', overflowY: 'hidden' }}>
           <Box sx={{ width: factwiseScrollableWidth + reviewActionColumnWidth, height: 10 }} />
         </Box>
       </Box>
 
-      {filteredRows.length > pageSize && (
+      {(onApplyPatterns || onBack || filteredRows.length > pageSize) && (
+        <Stack direction={{ xs: 'column', sm: 'row' }} alignItems={{ xs: 'stretch', sm: 'center' }} justifyContent="space-between" gap={1.5} sx={{ px: 2, py: 1.25, borderTop: `1px solid ${reviewLine}`, bgcolor: isReviewDark ? '#17181d' : theme.paperSoft }}>
+          <Stack direction="row" alignItems="center" gap={1.25}>
+            <ShadcnButton variant="outline" disabled={safePage === 0} onClick={() => onPageChange(Math.max(0, safePage - 1))} className="h-8 px-3 text-xs">Previous</ShadcnButton>
+            <Typography sx={{ fontSize: 12.5, fontWeight: 500, color: theme.text }}>
+              Rows {filteredRows.length === 0 ? 0 : pageStart + 1}–{Math.min(pageStart + visibleRows.length, filteredRows.length)} of {filteredRows.length}
+            </Typography>
+            <ShadcnButton variant="outline" disabled={safePage >= pageCount - 1} onClick={() => onPageChange(Math.min(pageCount - 1, safePage + 1))} className="h-8 px-3 text-xs">Next</ShadcnButton>
+          </Stack>
+          {onApplyPatterns && (
+            <Stack direction="row" alignItems="center" gap={1.25}>
+              {onBack && <ShadcnButton variant="outline" onClick={onBack} className="h-8 px-3 text-xs">&lt; Back</ShadcnButton>}
+              <ShadcnButton onClick={onApplyPatterns} disabled={loading} className="h-8 px-4 text-xs bg-blue-600 hover:bg-blue-700 text-white font-medium">
+                {loading ? <CircularProgress size={14} sx={{ color: '#fff', mr: 1 }} /> : null}
+                Apply patterns
+              </ShadcnButton>
+            </Stack>
+          )}
+        </Stack>
+      )}
+      {false && filteredRows.length > pageSize && (
         <Stack
           direction={{ xs: 'column', sm: 'row' }}
           alignItems={{ xs: 'stretch', sm: 'center' }}
