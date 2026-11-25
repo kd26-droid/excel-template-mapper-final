@@ -10824,6 +10824,12 @@ const BomNormalizer = () => {
   const [mappingDrawerOpen, setMappingDrawerOpen] = useState(false);
   const [configureSubStep, setConfigureSubStep] = useState('mapping');
   const [sourceSetupExpanded, setSourceSetupExpanded] = useState(false);
+
+  useEffect(() => {
+    if ((workbook?.SheetNames?.length || 0) > 1) {
+      setSourceSetupExpanded(true);
+    }
+  }, [workbook]);
   const [columnMapFilter, setColumnMapFilter] = useState('all');
   const [columnMapSearch, setColumnMapSearch] = useState('');
   const [, setReviewTablePageInfo] = useState({ page: 0, pageCount: 1, totalRows: 0, pageSize: 25 });
@@ -18087,15 +18093,39 @@ const BomNormalizer = () => {
                   </Collapse>
                 </Paper>
 
-                {/* 2. Column Mapping Table (FactWise 4.0 with green Matched / yellow Unmapped pills & inline Rule editor) */}
+                {/* 2. Column Mapping Table (FactWise 4.0 with green Matched / blue Alternate / yellow Unmapped pills & inline Rule editor) */}
                 {configureSubStep === 'mapping' && (() => {
                   const sheetBadgeLabel = sheetScope === 'single' ? (sheetName || 'Sheet') : (selectedSheetNames[0] || 'BOM');
                   const headerToRoleKey = {};
                   Object.entries(roles || {}).forEach(([roleKey, mappedHeader]) => {
                     if (mappedHeader) headerToRoleKey[mappedHeader] = roleKey;
                   });
+                  const headerToAlternateLabel = {};
+                  if (!bomLayoutActive) {
+                    if (config.alternateLayout === 'separate_columns') {
+                      (config.alternateColumnGroups || []).forEach((group, groupIdx) => {
+                        const gNum = groupIdx + 1;
+                        if (group?.cpn && !headerToAlternateLabel[group.cpn]) headerToAlternateLabel[group.cpn] = `Alt ${gNum} · CPN`;
+                        if (group?.mpn && !headerToAlternateLabel[group.mpn]) headerToAlternateLabel[group.mpn] = `Alt ${gNum} · MPN`;
+                        if (group?.mfr && !headerToAlternateLabel[group.mfr]) headerToAlternateLabel[group.mfr] = `Alt ${gNum} · Manufacturer`;
+                        if (group?.qty && !headerToAlternateLabel[group.qty]) headerToAlternateLabel[group.qty] = `Alt ${gNum} · Quantity`;
+                        if (group?.uom && !headerToAlternateLabel[group.uom]) headerToAlternateLabel[group.uom] = `Alt ${gNum} · UOM`;
+                      });
+                    } else if (config.alternateLayout === 'following_rows' && config.followingRowAlternateColumn) {
+                      headerToAlternateLabel[config.followingRowAlternateColumn] = 'Following-row Alternates';
+                    } else if (config.alternateLayout === 'same_group_rows' && config.sameGroupKeyColumn) {
+                      headerToAlternateLabel[config.sameGroupKeyColumn] = 'Alternate Group Key';
+                    } else if (config.alternateLayout === 'following_item_rows') {
+                      if (config.followingItemRowsContextColumn) headerToAlternateLabel[config.followingItemRowsContextColumn] = 'Alternate Context';
+                      if (config.followingItemRowsItemColumn) headerToAlternateLabel[config.followingItemRowsItemColumn] = 'Alternate Item';
+                      if (config.followingItemRowsMpnColumn) headerToAlternateLabel[config.followingItemRowsMpnColumn] = 'Alternate MPN';
+                      if (config.followingItemRowsManufacturerColumn) headerToAlternateLabel[config.followingItemRowsManufacturerColumn] = 'Alternate Manufacturer';
+                    }
+                  }
                   const columnRows = visibleSourceHeaders.map((header, idx) => {
                     const roleKey = headerToRoleKey[header] || '';
+                    const altLabel = !roleKey ? (headerToAlternateLabel[header] || '') : '';
+                    const isAlternate = Boolean(altLabel);
                     const colIdx = headers.indexOf(header);
                     const samples = [];
                     for (let r = 0; r < Math.min(dataRows.length, 40) && samples.length < 2; r += 1) {
@@ -18105,16 +18135,17 @@ const BomNormalizer = () => {
                         samples.push(rawVal.length > 36 ? `${rawVal.slice(0, 36)}…` : rawVal);
                       }
                     }
-                    return { header, index: idx, roleKey, isMatched: Boolean(roleKey), samples };
+                    return { header, index: idx, roleKey, altLabel, isAlternate, isMatched: Boolean(roleKey || isAlternate), samples };
                   });
                   const matchedCount = columnRows.filter((c) => c.isMatched).length;
+                  const alternateMappedCount = columnRows.filter((c) => c.isAlternate).length;
                   const unmatchedCount = columnRows.length - matchedCount;
                   const searchQuery = fmt(columnMapSearch).toLowerCase();
                   const filteredColumnRows = columnRows.filter((row) => {
                     if (columnMapFilter === 'matched' && !row.isMatched) return false;
                     if (columnMapFilter === 'unmatched' && row.isMatched) return false;
                     if (!searchQuery) return true;
-                    const targetLabel = ROLE_FIELDS.find((f) => f.key === row.roleKey)?.label || '';
+                    const targetLabel = row.altLabel || ROLE_FIELDS.find((f) => f.key === row.roleKey)?.label || '';
                     return row.header.toLowerCase().includes(searchQuery) || targetLabel.toLowerCase().includes(searchQuery) || row.samples.some((s) => s.toLowerCase().includes(searchQuery));
                   });
                   const handleSourceColumnTargetChange = (sourceHeader, nextRoleKey) => {
@@ -18146,6 +18177,28 @@ const BomNormalizer = () => {
                             <CheckCircleOutlineIcon sx={{ fontSize: 14, color: isDarkMode ? '#34d399' : '#15803d' }} />
                             <Typography sx={{ fontSize: 12, fontWeight: 600, color: isDarkMode ? '#6ee7b7' : '#15803d', lineHeight: 1 }}>Auto-Mapped</Typography>
                           </Box>
+                          {alternateMappedCount > 0 && (
+                            <Box
+                              onClick={() => setMappingDrawerOpen(true)}
+                              sx={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: 0.55,
+                                px: 1.15,
+                                py: 0.4,
+                                borderRadius: '999px',
+                                cursor: 'pointer',
+                                bgcolor: isDarkMode ? 'rgba(0, 122, 255, 0.16)' : '#eff6ff',
+                                border: `1px solid ${isDarkMode ? 'rgba(59, 130, 246, 0.38)' : '#bfdbfe'}`,
+                                '&:hover': { bgcolor: isDarkMode ? 'rgba(0, 122, 255, 0.24)' : '#dbeafe' },
+                              }}
+                            >
+                              <CheckCircleOutlineIcon sx={{ fontSize: 13.5, color: isDarkMode ? '#60a5fa' : '#007aff' }} />
+                              <Typography sx={{ fontSize: 12, fontWeight: 600, color: isDarkMode ? '#93c5fd' : '#007aff', lineHeight: 1 }}>
+                                {alternateMappedCount} {alternateMappedCount === 1 ? 'Alternate column' : 'Alternate columns'}
+                              </Typography>
+                            </Box>
+                          )}
                         </Stack>
                       </Stack>
 
@@ -18180,6 +18233,18 @@ const BomNormalizer = () => {
                           const targetField = ROLE_FIELDS.find((f) => f.key === row.roleKey) || null;
                           const rowConditionalRule = targetField ? config.conditionalFieldMappings?.[targetField.key] : null;
                           const isRowRuleExpanded = Boolean(targetField && conditionalMappingField?.key === targetField.key);
+                          const rowAccentColor = row.isAlternate ? '#007aff' : row.isMatched ? '#10b981' : '#f59e0b';
+                          const rowHoverBorderColor = row.isAlternate ? '#0062cc' : row.isMatched ? '#059669' : '#d97706';
+                          const rowBg = row.isAlternate
+                            ? (isDarkMode ? 'rgba(0, 122, 255, 0.065)' : '#f2f8ff')
+                            : row.isMatched
+                              ? (isDarkMode ? 'rgba(16, 185, 129, 0.055)' : '#f2fdf7')
+                              : (isDarkMode ? 'rgba(245, 158, 11, 0.045)' : '#fffdf5');
+                          const rowHoverBg = row.isAlternate
+                            ? (isDarkMode ? 'rgba(0, 122, 255, 0.11)' : '#e6f2ff')
+                            : row.isMatched
+                              ? (isDarkMode ? 'rgba(16, 185, 129, 0.1)' : '#e8fbf1')
+                              : (isDarkMode ? 'rgba(245, 158, 11, 0.09)' : '#fef9e7');
                           return (
                             <Box
                               key={`col-map-${row.header}`}
@@ -18191,13 +18256,13 @@ const BomNormalizer = () => {
                                 px: 2.25,
                                 py: 1.35,
                                 borderBottom: `1px solid ${normalizerTheme.border}`,
-                                borderLeft: row.isMatched ? '3.5px solid #10b981' : '3.5px solid #f59e0b',
-                                bgcolor: row.isMatched ? (isDarkMode ? 'rgba(16, 185, 129, 0.055)' : '#f2fdf7') : (isDarkMode ? 'rgba(245, 158, 11, 0.045)' : '#fffdf5'),
+                                borderLeft: `3.5px solid ${rowAccentColor}`,
+                                bgcolor: rowBg,
                                 animation: `fwRowFadeIn 0.28s cubic-bezier(0.16, 1, 0.3, 1) ${Math.min(rowIdx * 25, 300)}ms both`,
                                 transition: 'background-color 0.16s ease, border-left-color 0.2s ease',
                                 '&:hover': {
-                                  bgcolor: row.isMatched ? (isDarkMode ? 'rgba(16, 185, 129, 0.1)' : '#e8fbf1') : (isDarkMode ? 'rgba(245, 158, 11, 0.09)' : '#fef9e7'),
-                                  borderLeftColor: row.isMatched ? '#059669' : '#d97706',
+                                  bgcolor: rowHoverBg,
+                                  borderLeftColor: rowHoverBorderColor,
                                   '& .fw-map-arrow': { transform: 'translateX(4px)', color: '#007aff' },
                                 },
                               }}
@@ -18211,7 +18276,12 @@ const BomNormalizer = () => {
                               </Stack>
 
                               <Stack direction="row" alignItems="center" justifyContent="space-between" gap={1}>
-                                {row.isMatched ? (
+                                {row.isAlternate ? (
+                                  <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5, px: 1.15, py: 0.38, borderRadius: '999px', bgcolor: isDarkMode ? 'rgba(0, 122, 255, 0.2)' : '#dbeafe', border: `1px solid ${isDarkMode ? 'rgba(59, 130, 246, 0.45)' : '#93c5fd'}`, animation: 'fwBadgePop 0.28s cubic-bezier(0.16, 1, 0.3, 1) both' }}>
+                                    <CheckCircleOutlineIcon sx={{ fontSize: 13.5, color: isDarkMode ? '#60a5fa' : '#007aff' }} />
+                                    <Typography sx={{ fontSize: 11.5, fontWeight: 600, color: isDarkMode ? '#93c5fd' : '#0062cc', lineHeight: 1 }}>Alternate</Typography>
+                                  </Box>
+                                ) : row.isMatched ? (
                                   <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5, px: 1.15, py: 0.38, borderRadius: '999px', bgcolor: isDarkMode ? 'rgba(16, 185, 129, 0.2)' : '#dcfce7', border: `1px solid ${isDarkMode ? 'rgba(16, 185, 129, 0.4)' : '#86efac'}`, animation: 'fwBadgePop 0.28s cubic-bezier(0.16, 1, 0.3, 1) both' }}>
                                     <CheckCircleOutlineIcon sx={{ fontSize: 13.5, color: isDarkMode ? '#34d399' : '#15803d' }} />
                                     <Typography sx={{ fontSize: 11.5, fontWeight: 600, color: isDarkMode ? '#6ee7b7' : '#15803d', lineHeight: 1 }}>Mapped</Typography>
@@ -18231,13 +18301,20 @@ const BomNormalizer = () => {
                                     value={row.roleKey}
                                     onChange={(event) => handleSourceColumnTargetChange(row.header, event.target.value)}
                                     renderValue={(selected) => {
+                                      if (!selected && row.altLabel) {
+                                        return (
+                                          <Typography sx={{ fontSize: 12.5, color: isDarkMode ? '#93c5fd' : '#0062cc', fontWeight: 600 }}>
+                                            Alternate · {row.altLabel}
+                                          </Typography>
+                                        );
+                                      }
                                       if (!selected) return <Typography sx={{ fontSize: 12.5, color: normalizerTheme.muted }}>Do not map (Ignore)</Typography>;
                                       const target = ROLE_FIELDS.find((f) => f.key === selected);
                                       return <Typography sx={{ fontSize: 12.5, color: normalizerTheme.text, fontWeight: 500 }}>BOM · {target?.label || selected}</Typography>;
                                     }}
                                     sx={{ height: 36, borderRadius: '8px', bgcolor: normalizerTheme.paper }}
                                   >
-                                    <MenuItem value=""><Typography sx={{ fontSize: 12.5, color: normalizerTheme.muted }}>Do not map (Ignore)</Typography></MenuItem>
+                                    <MenuItem value=""><Typography sx={{ fontSize: 12.5, color: normalizerTheme.muted }}>{row.altLabel ? `Keep as ${row.altLabel}` : 'Do not map (Ignore)'}</Typography></MenuItem>
                                     {ROLE_FIELDS.map((field) => (
                                       <MenuItem key={field.key} value={field.key}>
                                         <Stack direction="row" alignItems="center" justifyContent="space-between" width="100%" gap={1}>
@@ -18248,28 +18325,48 @@ const BomNormalizer = () => {
                                     ))}
                                   </Select>
                                 </FormControl>
-                                <Tooltip title={targetField ? 'Add or edit IF / ELSE fallback rule' : 'Map this column first to add a fallback rule'} arrow>
-                                  <span>
+                                {row.isAlternate ? (
+                                  <Tooltip title="Edit alternate column groups in Detected setup" arrow>
                                     <Button
                                       size="small"
                                       variant="outlined"
-                                      disabled={!targetField}
-                                      startIcon={<AltRouteOutlinedIcon sx={{ fontSize: 14 }} />}
-                                      onClick={() => targetField && (isRowRuleExpanded ? closeConditionalFieldMapping() : openConditionalFieldMapping(targetField))}
+                                      startIcon={<TuneIcon sx={{ fontSize: 14 }} />}
+                                      onClick={() => setMappingDrawerOpen(true)}
                                       sx={{
                                         minWidth: 72, height: 36, px: 1.2, borderRadius: '999px', textTransform: 'none', fontSize: 12, fontWeight: 500, whiteSpace: 'nowrap',
-                                        borderColor: (rowConditionalRule || isRowRuleExpanded) ? '#007aff' : (isDarkMode ? 'rgba(59, 130, 246, 0.45)' : 'rgba(0, 122, 255, 0.4)'),
-                                        color: (rowConditionalRule || isRowRuleExpanded) ? '#ffffff' : (isDarkMode ? '#60a5fa' : '#007aff'),
-                                        bgcolor: (rowConditionalRule || isRowRuleExpanded) ? '#007aff' : (isDarkMode ? 'rgba(59, 130, 246, 0.12)' : 'rgba(0, 122, 255, 0.06)'),
-                                        transition: 'transform 0.15s ease, background-color 0.15s ease',
-                                        '&:hover': { borderColor: '#007aff', transform: 'translateY(-1px)', bgcolor: (rowConditionalRule || isRowRuleExpanded) ? '#0062cc' : 'rgba(0, 122, 255, 0.14)' },
+                                        borderColor: isDarkMode ? 'rgba(59, 130, 246, 0.45)' : 'rgba(0, 122, 255, 0.4)',
+                                        color: isDarkMode ? '#60a5fa' : '#007aff',
+                                        bgcolor: isDarkMode ? 'rgba(59, 130, 246, 0.12)' : 'rgba(0, 122, 255, 0.06)',
+                                        '&:hover': { borderColor: '#007aff', bgcolor: 'rgba(0, 122, 255, 0.14)' },
+                                      }}
+                                    >
+                                      Setup
+                                    </Button>
+                                  </Tooltip>
+                                ) : (
+                                  <Tooltip title={targetField ? 'Add or edit IF / ELSE fallback rule' : 'Map this column first to add a fallback rule'} arrow>
+                                    <span>
+                                      <Button
+                                        size="small"
+                                        variant="outlined"
+                                        disabled={!targetField}
+                                        startIcon={<AltRouteOutlinedIcon sx={{ fontSize: 14 }} />}
+                                        onClick={() => targetField && (isRowRuleExpanded ? closeConditionalFieldMapping() : openConditionalFieldMapping(targetField))}
+                                        sx={{
+                                          minWidth: 72, height: 36, px: 1.2, borderRadius: '999px', textTransform: 'none', fontSize: 12, fontWeight: 500, whiteSpace: 'nowrap',
+                                          borderColor: (rowConditionalRule || isRowRuleExpanded) ? '#007aff' : (isDarkMode ? 'rgba(59, 130, 246, 0.45)' : 'rgba(0, 122, 255, 0.4)'),
+                                          color: (rowConditionalRule || isRowRuleExpanded) ? '#ffffff' : (isDarkMode ? '#60a5fa' : '#007aff'),
+                                          bgcolor: (rowConditionalRule || isRowRuleExpanded) ? '#007aff' : (isDarkMode ? 'rgba(59, 130, 246, 0.12)' : 'rgba(0, 122, 255, 0.06)'),
+                                          transition: 'transform 0.15s ease, background-color 0.15s ease',
+                                          '&:hover': { borderColor: '#007aff', transform: 'translateY(-1px)', bgcolor: (rowConditionalRule || isRowRuleExpanded) ? '#0062cc' : 'rgba(0, 122, 255, 0.14)' },
                                         '&:active': { transform: 'scale(0.96)' },
                                       }}
                                     >
                                       Rule
                                     </Button>
-                                  </span>
-                                </Tooltip>
+                                    </span>
+                                  </Tooltip>
+                                )}
                               </Stack>
 
                               {targetField && (rowConditionalRule || isRowRuleExpanded) && (
