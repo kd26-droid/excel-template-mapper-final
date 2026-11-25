@@ -33,6 +33,7 @@ import {
   Menu,
   MenuItem,
   Paper,
+  Popover,
   Radio,
   RadioGroup,
   Select,
@@ -8392,6 +8393,8 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
 
   const [frozenColumnKeys, setFrozenColumnKeys] = useState([]);
   const [selectedRowKeys, setSelectedRowKeys] = useState([]);
+  const [columnsAnchorEl, setColumnsAnchorEl] = useState(null);
+  const [columnPopoverSearch, setColumnPopoverSearch] = useState('');
 
   const toggleFreezeColumn = (columnKey) => {
     setFrozenColumnKeys((prev) => (
@@ -8566,23 +8569,328 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
               ))}
             </Select>
           </FormControl>
-          <FormControl size="small" sx={{ minWidth: 230 }}>
-            <InputLabel>Visible columns</InputLabel>
-            <Select
-              multiple
-              value={visibleColumnKeys}
-              label="Visible columns"
-              renderValue={(selected) => `${selected.length} columns selected`}
-              onChange={(event) => setVisibleColumnKeys(event.target.value)}
+          <Button
+            size="small"
+            variant="outlined"
+            onClick={(event) => setColumnsAnchorEl(event.currentTarget)}
+            sx={{
+              height: 40,
+              px: 1.5,
+              borderRadius: '999px',
+              textTransform: 'none',
+              fontSize: 13,
+              fontWeight: 500,
+              color: tableTone.text,
+              borderColor: Boolean(columnsAnchorEl) ? '#007aff' : tableTone.headerBorder,
+              bgcolor: Boolean(columnsAnchorEl)
+                ? (tableTone.isDark ? 'rgba(0, 122, 255, 0.14)' : '#eff6ff')
+                : tableTone.bg,
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 0.85,
+              '&:hover': {
+                borderColor: '#007aff',
+                bgcolor: tableTone.isDark ? 'rgba(0, 122, 255, 0.12)' : '#f8fafc',
+              },
+            }}
+          >
+            <Box
+              component="svg"
+              viewBox="0 0 24 24"
+              sx={{
+                width: 15,
+                height: 15,
+                fill: 'none',
+                stroke: 'currentColor',
+                strokeWidth: 2,
+                strokeLinecap: 'round',
+                strokeLinejoin: 'round',
+              }}
             >
-              {columns.map((column) => (
-                <MenuItem key={column.key} value={column.key}>
-                  <Checkbox checked={visibleColumnKeys.includes(column.key)} />
-                  <ListItemText primary={column.label} />
-                </MenuItem>
-              ))}
-            </Select>
-          </FormControl>
+              <rect x="3" y="4" width="18" height="16" rx="2" />
+              <line x1="9" y1="4" x2="9" y2="20" />
+              <line x1="15" y1="4" x2="15" y2="20" />
+            </Box>
+            <span>Columns</span>
+            <Box
+              component="span"
+              sx={{
+                minWidth: 22,
+                height: 20,
+                px: 0.7,
+                borderRadius: '999px',
+                bgcolor: '#007aff',
+                color: '#ffffff',
+                fontSize: 11.5,
+                fontWeight: 600,
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                lineHeight: 1,
+              }}
+            >
+              {visibleColumns.length}
+            </Box>
+          </Button>
+          <Popover
+            open={Boolean(columnsAnchorEl)}
+            anchorEl={columnsAnchorEl}
+            onClose={() => {
+              setColumnsAnchorEl(null);
+              setColumnPopoverSearch('');
+            }}
+            anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+            transformOrigin={{ vertical: 'top', horizontal: 'right' }}
+            PaperProps={{
+              sx: {
+                mt: 1,
+                width: 310,
+                borderRadius: '14px',
+                border: `1px solid ${tableTone.headerBorder}`,
+                bgcolor: tableTone.isDark ? '#181a20' : '#ffffff',
+                boxShadow: tableTone.isDark
+                  ? '0 20px 44px -16px rgba(0,0,0,0.65)'
+                  : '0 20px 44px -16px rgba(15,23,42,0.22)',
+                overflow: 'hidden',
+              },
+            }}
+          >
+            {(() => {
+              const q = fmt(columnPopoverSearch).toLowerCase();
+              const filteredCols = q
+                ? columns.filter((col) => fmt(col.label).toLowerCase().includes(q))
+                : columns;
+              const hiddenCount = Math.max(0, columns.length - visibleColumns.length);
+              return (
+                <Box>
+                  {/* Header */}
+                  <Stack
+                    direction="row"
+                    alignItems="center"
+                    justifyContent="space-between"
+                    sx={{ px: 2, py: 1.4, borderBottom: `1px solid ${tableTone.headerBorder}` }}
+                  >
+                    <Typography sx={{ fontSize: 14, fontWeight: 600, color: tableTone.text }}>
+                      Columns
+                    </Typography>
+                    <Button
+                      size="small"
+                      onClick={() => setVisibleColumnKeys(columns.map((c) => c.key))}
+                      disabled={hiddenCount === 0}
+                      sx={{
+                        minWidth: 0,
+                        p: 0,
+                        textTransform: 'none',
+                        fontSize: 12.5,
+                        fontWeight: 600,
+                        color: '#007aff',
+                        '&:hover': { bgcolor: 'transparent', textDecoration: 'underline' },
+                      }}
+                    >
+                      Show all
+                    </Button>
+                  </Stack>
+
+                  {/* Search */}
+                  <Box sx={{ px: 1.75, pt: 1.25, pb: 0.75 }}>
+                    <TextField
+                      size="small"
+                      fullWidth
+                      placeholder="Search columns"
+                      value={columnPopoverSearch}
+                      onChange={(event) => setColumnPopoverSearch(event.target.value)}
+                      InputProps={{
+                        startAdornment: (
+                          <InputAdornment position="start">
+                            <SearchIcon sx={{ fontSize: 16, color: tableTone.muted }} />
+                          </InputAdornment>
+                        ),
+                      }}
+                      sx={{
+                        '& .MuiOutlinedInput-root': {
+                          height: 36,
+                          borderRadius: '10px',
+                          fontSize: 12.75,
+                          bgcolor: tableTone.isDark ? 'rgba(255,255,255,0.03)' : '#f8fafc',
+                        },
+                      }}
+                    />
+                  </Box>
+
+                  {/* Column rows */}
+                  <Box sx={{ maxHeight: 310, overflowY: 'auto', px: 1, pb: 1 }}>
+                    {filteredCols.map((column) => {
+                      const isVisible = visibleColumnKeys.includes(column.key);
+                      const isFrozen = activeFrozenSet.has(column.key);
+                      return (
+                        <Stack
+                          key={column.key}
+                          direction="row"
+                          alignItems="center"
+                          justifyContent="space-between"
+                          gap={1}
+                          sx={{
+                            px: 1,
+                            py: 0.65,
+                            borderRadius: '8px',
+                            '&:hover': {
+                              bgcolor: tableTone.isDark ? 'rgba(255,255,255,0.04)' : '#f8fafc',
+                            },
+                          }}
+                        >
+                          <Typography
+                            sx={{
+                              fontSize: 13,
+                              fontWeight: isVisible ? 500 : 400,
+                              color: isVisible ? tableTone.text : tableTone.muted,
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              whiteSpace: 'nowrap',
+                              flex: 1,
+                              minWidth: 0,
+                            }}
+                          >
+                            {column.label}
+                          </Typography>
+                          <Stack direction="row" alignItems="center" gap={0.75} flexShrink={0}>
+                            <Switch
+                              size="small"
+                              checked={isVisible}
+                              onChange={() => {
+                                setVisibleColumnKeys((prev) => (
+                                  prev.includes(column.key)
+                                    ? prev.filter((k) => k !== column.key)
+                                    : [...prev, column.key]
+                                ));
+                              }}
+                              sx={{
+                                width: 38,
+                                height: 22,
+                                p: 0,
+                                '& .MuiSwitch-switchBase': {
+                                  p: '2px',
+                                  '&.Mui-checked': {
+                                    transform: 'translateX(16px)',
+                                    color: '#ffffff',
+                                    '& + .MuiSwitch-track': {
+                                      bgcolor: '#22c55e',
+                                      opacity: 1,
+                                    },
+                                  },
+                                },
+                                '& .MuiSwitch-thumb': {
+                                  width: 18,
+                                  height: 18,
+                                  boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
+                                },
+                                '& .MuiSwitch-track': {
+                                  borderRadius: '999px',
+                                  bgcolor: tableTone.isDark ? '#334155' : '#cbd5e1',
+                                  opacity: 1,
+                                },
+                              }}
+                            />
+                            <Tooltip title={isFrozen ? 'Unfreeze column' : 'Freeze column'} arrow>
+                              <span>
+                                <IconButton
+                                  size="small"
+                                  disabled={!isVisible}
+                                  onClick={() => toggleFreezeColumn(column.key)}
+                                  sx={{
+                                    width: 28,
+                                    height: 28,
+                                    borderRadius: '999px',
+                                    bgcolor: isFrozen ? '#007aff' : 'transparent',
+                                    color: isFrozen
+                                      ? '#ffffff'
+                                      : isVisible
+                                        ? '#007aff'
+                                        : tableTone.muted,
+                                    opacity: isVisible ? 1 : 0.35,
+                                    '&:hover': {
+                                      bgcolor: isFrozen
+                                        ? '#0066d6'
+                                        : (tableTone.isDark ? 'rgba(0,122,255,0.16)' : '#eff6ff'),
+                                    },
+                                  }}
+                                >
+                                  <Box
+                                    component="svg"
+                                    viewBox="0 0 24 24"
+                                    sx={{
+                                      width: 14,
+                                      height: 14,
+                                      fill: isFrozen ? 'currentColor' : 'none',
+                                      stroke: 'currentColor',
+                                      strokeWidth: 2,
+                                      strokeLinecap: 'round',
+                                      strokeLinejoin: 'round',
+                                    }}
+                                  >
+                                    <path d="M12 17v5" />
+                                    <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
+                                  </Box>
+                                </IconButton>
+                              </span>
+                            </Tooltip>
+                          </Stack>
+                        </Stack>
+                      );
+                    })}
+                  </Box>
+
+                  {/* Footer */}
+                  <Stack
+                    direction="row"
+                    alignItems="center"
+                    justifyContent="space-between"
+                    sx={{
+                      px: 1.75,
+                      py: 1.1,
+                      borderTop: `1px solid ${tableTone.headerBorder}`,
+                      bgcolor: tableTone.isDark ? 'rgba(255,255,255,0.02)' : '#fafbfd',
+                    }}
+                  >
+                    <Button
+                      size="small"
+                      onClick={() => {
+                        setVisibleColumnKeys(columns.map((c) => c.key));
+                        setFrozenColumnKeys([]);
+                        setColumnPopoverSearch('');
+                      }}
+                      sx={{
+                        textTransform: 'none',
+                        fontSize: 12.25,
+                        fontWeight: 500,
+                        color: tableTone.muted,
+                        '&:hover': { color: tableTone.text, bgcolor: 'transparent' },
+                      }}
+                    >
+                      ↺ Reset view
+                    </Button>
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      onClick={() => {
+                        setColumnsAnchorEl(null);
+                        setColumnPopoverSearch('');
+                      }}
+                      sx={{
+                        borderRadius: '8px',
+                        textTransform: 'none',
+                        fontSize: 12.25,
+                        fontWeight: 500,
+                        borderColor: tableTone.headerBorder,
+                        color: tableTone.text,
+                      }}
+                    >
+                      Done
+                    </Button>
+                  </Stack>
+                </Box>
+              );
+            })()}
+          </Popover>
         </Stack>
       </Stack>
     </Paper>
