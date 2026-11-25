@@ -264,7 +264,16 @@ const BomDuplicatePolicyBanner = ({ sessionId, refreshKey }) => {
           ? <WarningAmberOutlinedIcon fontSize="small" />
           : <InfoOutlinedIcon fontSize="small" />}
         variant="outlined"
-        sx={{ mb: 1.5, py: 0.5, '.MuiAlert-message': { py: 0.5, flex: 1 } }}
+        sx={(theme) => ({
+          mb: 1.5,
+          py: 0.5,
+          alignItems: 'center',
+          bgcolor: conflicts.length
+            ? (theme.palette.mode === 'dark' ? '#392b19' : '#fff5df')
+            : (theme.palette.mode === 'dark' ? '#192d43' : '#edf5ff'),
+          '.MuiAlert-message': { py: 0.5, flex: 1 },
+          '.MuiAlert-action': { alignItems: 'center', pt: 0 },
+        })}
         action={
           <Stack direction="row" gap={1}>
             {conflicts.length > 0 && (

@@ -24,6 +24,7 @@ Two principles beyond the individual rules:
 See BOM_GENERATION_PLAN.md section 7 and BOM_VALIDATION_PLAN.md.
 """
 
+import re
 from collections import OrderedDict, defaultdict
 
 # The alternate block's shape is defined by the generator; reading it back has to
@@ -500,6 +501,22 @@ def validate_bom(bom_headers, bom_rows, item_rows=None, bom_row_grid_rows=None):
 
 
 
+_PROVIDER_COLUMN = re.compile(r'^(DigiKey|Mouser|Element14) |^MPN valid \((DigiKey|Mouser|Element14)\)$|^MPNR$')
+
+
+def is_validation_column(column):
+    """Whether MPN validation wrote this column, rather than the sheet.
+
+    Every one of them is derived from the part number - a provider's status,
+    canonical MPN, description, the match % against this row's own Item name -
+    so two rows of the same part can only disagree on one because they
+    disagree on something real elsewhere. Comparing them made a sheet's shared
+    item codes look like different parts on columns nobody can or should edit.
+    """
+    name = str(column or '').strip()
+    return bool(_PROVIDER_COLUMN.match(name)) or name in ('MPN Validity', 'Alternate available')
+
+
 def _describe_code_conflicts(codes, rows_by_code, limit=25):
     """For each shared item code, the columns whose values disagree.
 
@@ -513,7 +530,7 @@ def _describe_code_conflicts(codes, rows_by_code, limit=25):
         if len(rows) < 2:
             continue
         columns = []
-        for column in sorted({k for row in rows for k in row}):
+        for column in sorted({k for row in rows for k in row if not is_validation_column(k)}):
             values = []
             for row in rows:
                 value = _text(row.get(column))

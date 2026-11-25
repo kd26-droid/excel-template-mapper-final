@@ -431,6 +431,17 @@ def generate_flat_bom(records, bom_header):
             for name, value in zip(names, values):
                 row['%s%s' % (name, suffix)] = value
 
+            # Which line each alternate stands in for, the same record the
+            # multi-level path keeps. Without it a flat sheet's alternates were
+            # in the BOM but nothing downstream could tell whose they were.
+            result.alternate_rows.append({
+                'grid_row': grid_row_of(alternate),
+                'alternate_for': _text(primary.get(F_ITEM_CODE)),
+                'finished_good': finished_good,
+                'bom_id': bom_id,
+                'level': 1,
+            })
+
         result.bom_rows.append(row)
         # The primary is the row this BOM line came from; its alternates were
         # folded sideways into the same line and have no line of their own.
@@ -554,6 +565,22 @@ def generate_multi_level_bom(tree, bom_header, alternates_of=None, records=None,
     # incrementing a plain counter would report double.
     groups_with_redundant = set()
 
+    def line_code(row):
+        """The code a BOM line is written under: its own item code first.
+
+        `resolved` holds one item code per tree code, and the tree code is
+        usually the CPN - so two lines sharing a CPN but made by different
+        manufacturers (1N5408 from Diodes and from MCC) both went out under
+        whichever came first, and FactWise rejected the BOM for listing one
+        item twice.
+
+        Parts only. A sub-assembly is referenced by the code the BOM step may
+        have renamed it to, which lives in `resolved`.
+        """
+        is_assembly = not (tree.nodes.get(row['code']) or {}).get('is_leaf', True)
+        own_code = '' if is_assembly else _text((row.get('source') or {}).get(F_ITEM_CODE))
+        return own_code or resolved.get(row['code'], row['code'])
+
     def alternates_for(row):
         key = _text((row.get('source') or {}).get(F_PARENT_KEY))
         if not key:
@@ -566,7 +593,7 @@ def generate_multi_level_bom(tree, bom_header, alternates_of=None, records=None,
         # lands in Raw material code / Sub BOM ID — so "alternate equals
         # primary" is judged on exactly what the sheet will say, including any
         # rename the user made in the structure gate.
-        primary_code = resolved.get(row['code'], row['code'])
+        primary_code = line_code(row)
         kept, dropped = drop_redundant_alternates(primary_code, alternates_of.get(key, []))
         if dropped:
             groups_with_redundant.add(key)
@@ -654,7 +681,7 @@ def generate_multi_level_bom(tree, bom_header, alternates_of=None, records=None,
             bom_name = _text(override.get('bomName')) or block_bom_id
 
         for child in block['children']:
-            child_code = resolved.get(child['code'], child['code'])
+            child_code = line_code(child)
             child_node = tree.nodes.get(child['code']) or {}
             is_assembly = not child_node.get('is_leaf', True)
 

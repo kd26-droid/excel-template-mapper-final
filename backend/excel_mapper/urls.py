@@ -10,6 +10,7 @@ from .views import (
     session_status,
     rebuild_template,
     upload_files,
+    download_session_source_file,
     repair_spilled_rows,
     apply_sheet_join,
     cleanup_rows,
@@ -166,6 +167,7 @@ from .bom_workflow_templates import (
 )
 from .bom_structure_patterns import (
     bom_structure_patterns,
+    bom_structure_pattern_detail,
     bom_structure_match,
     bom_structure_profile,
 )
@@ -186,7 +188,7 @@ from .parser_views import (
 
 from .factwise40 import factwise40_call, factwise40_validate
 # The conversational normaliser: one endpoint, a model driving the views above.
-from .agent import agent_download, agent_message
+from .agent import agent_download, agent_message, agent_turn_status
 
 urlpatterns = [
     # Health check
@@ -207,6 +209,7 @@ urlpatterns = [
 
     # File upload & cleanup
     path('upload/', upload_files, name='upload-files'),
+    path('sessions/<str:session_id>/source-file/', download_session_source_file, name='download-session-source-file'),
     path('repair-spilled-rows/', repair_spilled_rows, name='repair-spilled-rows'),
     # FactWise 4.0, server-side: the 4.0 backend sends no CORS headers, so the
     # export popup cannot call it from the browser.
@@ -284,10 +287,16 @@ urlpatterns = [
     path('normaliser/run/', normaliser_run, name='normaliser-run'),
     # The same flow as a conversation, for a caller with no UI at all.
     path('agent/', agent_message, name='agent-message'),
+    # Where a turn started with async=1 has got to.
+    path('agent/turns/<str:turn_id>/', agent_turn_status, name='agent-turn-status'),
     # The sheet a conversation built, as a file - no session id needed.
     path('agent/<str:conversation_id>/download/', agent_download, name='agent-download'),
     path('normaliser/<str:session_id>/resolve/', normaliser_resolve, name='normaliser-resolve'),
     path('bom/structures/', bom_structure_patterns, name='bom-structure-patterns'),
+    # Safe to sit above 'match/' and 'profile/': the int converter matches
+    # digits only, so a word-shaped segment can never be captured as an id.
+    path('bom/structures/<int:pattern_id>/', bom_structure_pattern_detail,
+         name='bom-structure-pattern-detail'),
     path('bom/structures/match/', bom_structure_match, name='bom-structure-match'),
     path('bom/structures/profile/', bom_structure_profile, name='bom-structure-profile'),
 

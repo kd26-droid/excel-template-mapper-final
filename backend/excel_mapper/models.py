@@ -19,7 +19,17 @@ _MPN_CACHE_WRITE_LOCK = threading.Lock()
 MPN_CACHE_TTL = timedelta(days=14)
 
 class MappingTemplate(models.Model):
-    name = models.CharField(max_length=200, unique=True)
+    name = models.CharField(max_length=200)
+    # Whose templates these are. FactWise's entity_id is the stable key; the
+    # name is carried alongside so a list is readable without a lookup, exactly
+    # as EditorDefaultSettings already does it.
+    #
+    # Blank means SHARED. Every template saved before scoping existed has no
+    # entity, and deleting or reassigning them would lose work nobody asked us
+    # to touch - so blank-entity rows stay visible to everyone, and a caller
+    # with no entity (the app opened outside FactWise 4.0) still sees them.
+    entity_id = models.CharField(max_length=120, blank=True, default='', db_index=True)
+    entity_name = models.CharField(max_length=200, blank=True, default='', db_index=True)
     description = models.TextField(blank=True, null=True)
     template_headers = models.JSONField()  # List of template column names
     source_headers = models.JSONField()    # List of source column names used when created
@@ -51,6 +61,10 @@ class MappingTemplate(models.Model):
     class Meta:
         ordering = ['-created_at']
         db_table = 'excel_mapper_mapping_template'
+        # One name per entity, not one name globally. Shared rows
+        # (blank entity) still collide with each other, which is the
+        # old behaviour and what we want for them.
+        unique_together = [('entity_id', 'name')]
     
     def __str__(self):
         return self.name
@@ -283,7 +297,17 @@ class ColumnRule(models.Model):
     mapping template stores in its operation sequence. Saving one here just
     makes it reusable by name instead of only as part of a template.
     """
-    name = models.CharField(max_length=200, unique=True)
+    name = models.CharField(max_length=200)
+    # Whose templates these are. FactWise's entity_id is the stable key; the
+    # name is carried alongside so a list is readable without a lookup, exactly
+    # as EditorDefaultSettings already does it.
+    #
+    # Blank means SHARED. Every template saved before scoping existed has no
+    # entity, and deleting or reassigning them would lose work nobody asked us
+    # to touch - so blank-entity rows stay visible to everyone, and a caller
+    # with no entity (the app opened outside FactWise 4.0) still sees them.
+    entity_id = models.CharField(max_length=120, blank=True, default='', db_index=True)
+    entity_name = models.CharField(max_length=200, blank=True, default='', db_index=True)
     description = models.TextField(blank=True, null=True)
     rule = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -293,6 +317,10 @@ class ColumnRule(models.Model):
     class Meta:
         ordering = ['-created_at']
         db_table = 'excel_mapper_column_rule'
+        # One name per entity, not one name globally. Shared rows
+        # (blank entity) still collide with each other, which is the
+        # old behaviour and what we want for them.
+        unique_together = [('entity_id', 'name')]
 
     def __str__(self):
         return self.name
@@ -319,7 +347,17 @@ class TagTemplate(models.Model):
     """
     Model for storing reusable smart tag formula rule templates
     """
-    name = models.CharField(max_length=200, unique=True)
+    name = models.CharField(max_length=200)
+    # Whose templates these are. FactWise's entity_id is the stable key; the
+    # name is carried alongside so a list is readable without a lookup, exactly
+    # as EditorDefaultSettings already does it.
+    #
+    # Blank means SHARED. Every template saved before scoping existed has no
+    # entity, and deleting or reassigning them would lose work nobody asked us
+    # to touch - so blank-entity rows stay visible to everyone, and a caller
+    # with no entity (the app opened outside FactWise 4.0) still sees them.
+    entity_id = models.CharField(max_length=120, blank=True, default='', db_index=True)
+    entity_name = models.CharField(max_length=200, blank=True, default='', db_index=True)
     description = models.TextField(blank=True, null=True)
     formula_rules = models.JSONField(default=list, blank=True)  # Formula rules for auto-tagging
     created_at = models.DateTimeField(auto_now_add=True)
@@ -329,6 +367,10 @@ class TagTemplate(models.Model):
     class Meta:
         ordering = ['-created_at']
         db_table = 'excel_mapper_tag_template'
+        # One name per entity, not one name globally. Shared rows
+        # (blank entity) still collide with each other, which is the
+        # old behaviour and what we want for them.
+        unique_together = [('entity_id', 'name')]
     
     def __str__(self):
         return self.name
@@ -497,6 +539,19 @@ class MpnOAuthToken(models.Model):
         return f"Digi-Key OAuth token exp={self.expires_at.isoformat()}"
 
 
+def is_current_digikey_result(entry):
+    """Whether a cached Digi-Key result answers what validation now asks.
+
+    Results cached before specs, or - for a part Digi-Key found - before its
+    manufacturer was kept, are misses: a hit left the provider's Manufacturer
+    blank and its MFR Valid with nothing to compare. Re-fetched once per MPN as
+    each is next used, rather than wiping the cache and paying for every part.
+    """
+    if not isinstance(entry, dict) or 'specs' not in entry:
+        return False
+    return not entry.get('valid') or 'manufacturer' in entry
+
+
 class GlobalMpnCache(models.Model):
     """
     Global persistent cache for MPN validation results.
@@ -572,6 +627,8 @@ class GlobalMpnCache(models.Model):
                 currency=currency,
                 updated_at__gte=timezone.now() - MPN_CACHE_TTL,
             )
+            if not is_current_digikey_result(cache_entry.validation_data):
+                return None
             cache_entry.increment_access()
             return cache_entry.validation_data
         except cls.DoesNotExist:
@@ -594,7 +651,10 @@ class GlobalMpnCache(models.Model):
             currency=currency,
             updated_at__gte=timezone.now() - MPN_CACHE_TTL,
         ).only('mpn_normalized', 'validation_data')
-        return {entry.mpn_normalized: entry.validation_data for entry in entries}
+        return {
+            entry.mpn_normalized: entry.validation_data for entry in entries
+            if is_current_digikey_result(entry.validation_data)
+        }
 
     @classmethod
     def store_result(cls, mpn_norm: str, validation_data: dict, manufacturer_id: str = None,
@@ -1393,7 +1453,17 @@ class ProcessingTemplate(models.Model):
         (STATUS_ARCHIVED, 'Archived'),
     ]
 
-    name = models.CharField(max_length=200, unique=True)
+    name = models.CharField(max_length=200)
+    # Whose templates these are. FactWise's entity_id is the stable key; the
+    # name is carried alongside so a list is readable without a lookup, exactly
+    # as EditorDefaultSettings already does it.
+    #
+    # Blank means SHARED. Every template saved before scoping existed has no
+    # entity, and deleting or reassigning them would lose work nobody asked us
+    # to touch - so blank-entity rows stay visible to everyone, and a caller
+    # with no entity (the app opened outside FactWise 4.0) still sees them.
+    entity_id = models.CharField(max_length=120, blank=True, default='', db_index=True)
+    entity_name = models.CharField(max_length=200, blank=True, default='', db_index=True)
     description = models.TextField(blank=True, null=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_DRAFT)
     version = models.IntegerField(default=1)
@@ -1407,6 +1477,10 @@ class ProcessingTemplate(models.Model):
 
     class Meta:
         db_table = 'excel_mapper_processing_template'
+        # One name per entity, not one name globally. Shared rows
+        # (blank entity) still collide with each other, which is the
+        # old behaviour and what we want for them.
+        unique_together = [('entity_id', 'name')]
         ordering = ['-updated_at']
         indexes = [
             models.Index(fields=['name']),

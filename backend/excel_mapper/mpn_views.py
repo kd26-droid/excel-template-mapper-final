@@ -25,6 +25,8 @@ from .provider_credentials import (
 )
 from .views import get_session_consistent, save_session, apply_column_mappings, read_session_grid, write_session_grid
 
+from .services.provider_errors import compare_specs, description_match_percent, manufacturer_agrees
+
 logger = logging.getLogger(__name__)
 
 #: The one column that answers "can this part be bought?" across every source.
@@ -1878,6 +1880,103 @@ def mpn_validate_warm(request):
         return Response({'success': False, 'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+#: Written on each alternate row, per provider; the primary's row stays blank.
+ALTERNATE_PROVIDERS = ('DigiKey', 'Mouser', 'Element14')
+
+
+def alternate_comparison_columns(provider):
+    """(similarity, differences, rank) column names for one provider."""
+    return ('%s alternate similarity to primary' % provider,
+            '%s spec differences (alternate vs primary)' % provider,
+            '%s alternate rank' % provider)
+
+
+def _compare_alternates(session_id, headers, rows):
+    """Score every alternate against its primary on each provider's specs.
+
+    Which row is an alternate of which comes from the BOM build - the same
+    answer the export writes as "Alternate for?" - so a sheet normalised with
+    no alternates gets no comparison rather than a guessed one.
+
+    Each provider is scored on its own, both rows read from that provider: the
+    three name specs differently, so a Digi-Key spec compared against an
+    Element14 one would always differ. A provider with no Specifications column
+    in this run gets no columns.
+
+    Edits `headers` and `rows` in place. Returns the number of alternates scored
+    by at least one provider.
+    """
+    from .views import _generate_bom_for_session
+    result, _bom_header, error_response = _generate_bom_for_session(
+        session_id, apply_dup_policy=False)
+    entries = [] if error_response is not None or result is None else (
+        getattr(result, 'alternate_rows', None) or [])
+    providers = [provider for provider in ALTERNATE_PROVIDERS
+                 if '%s Specifications' % provider in headers]
+    if not entries or not providers or 'Item code' not in headers:
+        return 0
+
+    # Inside each provider's own cluster, straight after its Specifications -
+    # the column the scores are read from - rather than appended past every
+    # other provider. Dropped and re-inserted on a re-run, so they land there
+    # whatever an earlier run did, and start blank.
+    ours = {column for provider in ALTERNATE_PROVIDERS
+            for column in alternate_comparison_columns(provider)}
+    width = len(headers)
+    for row in rows:
+        while len(row) < width:
+            row.append('')
+    for position in reversed(range(len(headers))):
+        if headers[position] in ours:
+            del headers[position]
+            for row in rows:
+                del row[position]
+    for provider in providers:
+        at = headers.index('%s Specifications' % provider) + 1
+        for offset, column in enumerate(alternate_comparison_columns(provider)):
+            headers.insert(at + offset, column)
+            for row in rows:
+                row.insert(at + offset, '')
+
+    code_at = headers.index('Item code')
+    alternate_rows = {entry.get('grid_row') for entry in entries}
+    primary_row = {}
+    for position, row in enumerate(rows, start=1):
+        code = str(row[code_at] or '').strip()
+        if code and position not in alternate_rows:
+            primary_row.setdefault(code, row)
+
+    scored_rows = set()
+    for provider in providers:
+        similarity, differences_column, rank_column = alternate_comparison_columns(provider)
+        specs_at = headers.index('%s Specifications' % provider)
+        scored = {}
+        for entry in entries:
+            position = entry.get('grid_row')
+            if not isinstance(position, int) or not 0 < position <= len(rows):
+                continue
+            row = rows[position - 1]
+            primary = primary_row.get(str(entry.get('alternate_for') or '').strip())
+            if primary is None:
+                continue
+            score, differences = None, []
+            if str(primary[specs_at] or '').strip() and str(row[specs_at] or '').strip():
+                score, differences = compare_specs(primary[specs_at], row[specs_at])
+            if score is None:
+                row[headers.index(differences_column)] = 'No specs to compare'
+                continue
+            row[headers.index(similarity)] = '%d%%' % score
+            row[headers.index(differences_column)] = (
+                '; '.join(differences[:4]) if differences else 'All shared specs match')
+            scored.setdefault((entry.get('bom_id'), entry.get('alternate_for')), []).append((score, row))
+            scored_rows.add(position)
+        for group in scored.values():
+            group.sort(key=lambda item: -item[0])
+            for rank, (_score, row) in enumerate(group, start=1):
+                row[headers.index(rank_column)] = str(rank)
+    return len(scored_rows)
+
+
 @api_view(['POST'])
 def mpn_validate(request):
     """Validate MPNs for a session and persist results.
@@ -2143,11 +2242,24 @@ def mpn_validate(request):
 
             # For canonical MPNs, only add one column (no multiple columns for invalid data)
             validation_columns.append('DigiKey Canonical MPN')
+            # What the provider says this part is, and how much of our own
+            # Item name it confirms. A provider can answer "valid" while
+            # describing a different part; the percentage is what shows it.
+            validation_columns.append('DigiKey Description')
+            validation_columns.append('DigiKey Description Match %')
+            validation_columns.append('DigiKey Manufacturer')
+            validation_columns.append('DigiKey MFR Valid')
 
             # Only add category if there are valid results
             has_valid_results = any(r.get('valid') for r in results_map.values())
             if has_valid_results:
                 validation_columns.append('DigiKey Category')
+                # The parametric list as the provider states it. One column per
+                # provider rather than one merged column: the three name the same
+                # spec differently (Digi-Key "Voltage - Rated", Element14
+                # "Voltage(DC)") and sometimes disagree on the value, so merging
+                # them would either duplicate every spec or silently pick a winner.
+                validation_columns.append('DigiKey Specifications')
 
         # Keyed off the provider being selected, not off it having returned
         # something — the same rule Digi-Key uses above. Gating on results meant a
@@ -2155,32 +2267,193 @@ def mpn_validate(request):
         # disappeared from the sheet entirely, which reads as "never part of this
         # run" instead of "checked nothing yet". Blank cells say the latter.
         if 'mouser' in selected_providers:
-            mouser_columns = ['MPN valid (Mouser)', 'Mouser Status', 'MPNR', 'Mouser Canonical MPN']
+            mouser_columns = ['MPN valid (Mouser)', 'Mouser Status', 'MPNR', 'Mouser Canonical MPN',
+                              'Mouser Description', 'Mouser Description Match %',
+                              'Mouser Manufacturer', 'Mouser MFR Valid']
             has_valid_mouser_results = any(r.get('valid') for r in mouser_results_map.values())
             if has_valid_mouser_results:
                 mouser_columns.append('Mouser Category')
+                mouser_columns.append('Mouser Specifications')
             validation_columns.extend(mouser_columns)
             logger.info(f"📊 MOUSER_VALIDATION_COLUMNS: Adding {len(mouser_columns)} Mouser columns: {mouser_columns}")
 
         if 'element14' in selected_providers:
-            element14_columns = ['MPN valid (Element14)', 'Element14 Status', 'Element14 Part Number', 'Element14 Canonical MPN']
+            element14_columns = ['MPN valid (Element14)', 'Element14 Status', 'Element14 Part Number',
+                                 'Element14 Canonical MPN', 'Element14 Description',
+                                 'Element14 Description Match %',
+                                 'Element14 Manufacturer', 'Element14 MFR Valid']
             has_valid_element14_results = any(r.get('valid') for r in element14_results_map.values())
             if has_valid_element14_results:
                 element14_columns.append('Element14 Category')
+                element14_columns.append('Element14 Specifications')
             validation_columns.extend(element14_columns)
             logger.info(f"ELEMENT14_VALIDATION_COLUMNS: Adding {len(element14_columns)} Element14 columns: {element14_columns}")
 
         logger.info(f"📊 MPN_VALIDATION_COLUMNS: Adding {len(validation_columns)} columns: {validation_columns}")
 
-        # Add columns if they don't exist
+        # Where a newly added column belongs, in preference order.
+        #
+        # Appending puts it at the far right of the sheet. That is fine on a
+        # first run, where the whole provider block is new and arrives in
+        # order - but on a re-run the other columns are already there, so only
+        # the new one is appended and it lands a dozen columns from the
+        # provider it describes. Anchored instead, so it sits in its own
+        # provider's cluster either way.
+        column_belongs_after = {
+            'DigiKey Description': ('DigiKey Canonical MPN', 'DigiKey Part Number'),
+            'DigiKey Description Match %': ('DigiKey Description', 'DigiKey Canonical MPN'),
+            'Mouser Description': ('Mouser Canonical MPN', 'MPNR'),
+            'Mouser Description Match %': ('Mouser Description', 'Mouser Canonical MPN'),
+            'Element14 Description': ('Element14 Canonical MPN', 'Element14 Part Number'),
+            'Element14 Description Match %': ('Element14 Description', 'Element14 Canonical MPN'),
+            'DigiKey Manufacturer': ('DigiKey Description Match %', 'DigiKey Canonical MPN'),
+            'DigiKey MFR Valid': ('DigiKey Manufacturer', 'DigiKey Description Match %'),
+            'Mouser Manufacturer': ('Mouser Description Match %', 'Mouser Canonical MPN'),
+            'Mouser MFR Valid': ('Mouser Manufacturer', 'Mouser Description Match %'),
+            'Element14 Manufacturer': ('Element14 Description Match %', 'Element14 Canonical MPN'),
+            'Element14 MFR Valid': ('Element14 Manufacturer', 'Element14 Description Match %'),
+            'DigiKey Specifications': (
+                'DigiKey Category', 'DigiKey Canonical MPN', 'DigiKey Part Number'),
+            'Mouser Specifications': (
+                'Mouser Category', 'Mouser Canonical MPN', 'MPNR'),
+            'Element14 Specifications': (
+                'Element14 Category', 'Element14 Canonical MPN', 'Element14 Part Number'),
+        }
+
+        # Add columns if they do not exist
         columns_added = []
         for col in validation_columns:
-            if col not in headers:
+            if col in headers:
+                continue
+            position = None
+            for anchor in column_belongs_after.get(col) or ():
+                if anchor in headers:
+                    position = headers.index(anchor) + 1
+                    break
+            if position is None:
                 headers.append(col)
-                columns_added.append(col)
+            else:
+                headers.insert(position, col)
+                # Rows are positional, so each one needs a blank at the same
+                # index or every value to its right shifts by one.
+                for row in rows:
+                    while len(row) < position:
+                        row.append('')
+                    row.insert(position, '')
+            columns_added.append(col)
 
         logger.info(f"✅ MPN_VALIDATION_COLUMNS: Added {len(columns_added)} new columns: {columns_added}")
         logger.info(f"📋 MPN_VALIDATION_HEADERS: Total headers after adding columns ({len(headers)}): {headers}")
+
+        # Which of the sheet's own columns the two comparisons read, and whether
+        # they run at all.
+        #
+        # Neither value is fixed: a description is usually Item name but can be
+        # Description or a notes column, and a manufacturer is almost never in
+        # a column called Manufacturer - these sheets keep it in Tag 1. Both
+        # are chosen in Settings; the defaults below are what most sheets use.
+        #
+        # On unless the entity turned them off. They only add columns - no row
+        # value is rewritten - so there is nothing to opt in to.
+        compare_descriptions = True
+        validate_manufacturer = True
+        description_column = 'Item name'
+        manufacturer_column = 'Tag_1'
+        try:
+            entity_for_compare = (
+                str(request.data.get('entity_name') or '').strip()
+                or str(request.headers.get('X-Entity-Name') or '').strip()
+                or str((info or {}).get('editor_defaults_entity_name') or '').strip()
+                or str((info or {}).get('entity_name') or '').strip()
+            )
+            from .editor_defaults import get_editor_defaults_for_entity
+            compare_defaults = (
+                getattr(get_editor_defaults_for_entity(entity_for_compare),
+                        'ui_defaults', None) or {}
+            )
+            if 'mpnCompareDescription' in compare_defaults:
+                compare_descriptions = bool(compare_defaults.get('mpnCompareDescription'))
+            if 'mpnValidateManufacturer' in compare_defaults:
+                validate_manufacturer = bool(compare_defaults.get('mpnValidateManufacturer'))
+            description_column = (
+                str(compare_defaults.get('mpnDescriptionColumn') or '').strip()
+                or description_column)
+            manufacturer_column = (
+                str(compare_defaults.get('mpnManufacturerColumn') or '').strip()
+                or manufacturer_column)
+        except Exception as compare_settings_error:
+            # A settings read that fails must not lose the validation run; the
+            # defaults above are the same answer it would have given.
+            logger.warning("Comparison settings unread: %s", compare_settings_error)
+
+        def _column_index(name):
+            """The sheet column by that name, however it is spelt there.
+
+            Settings stores one spelling and a sheet may carry another - "Tag 1"
+            against "Tag_1" is the usual pair, and a template's own label is
+            "Tag (1)" - so the fallback ignores spacing, brackets and case rather
+            than silently comparing against nothing. Missing the brackets put
+            "No manufacturer provided" on every row of a sheet whose Tag (1)
+            named a manufacturer on each one.
+            """
+            if not name:
+                return None
+            if name in headers:
+                return headers.index(name)
+
+            def flat(value):
+                return re.sub(r'[\s_()]', '', str(value)).lower()
+
+            wanted = flat(name)
+            for position, header in enumerate(headers):
+                if flat(header) == wanted:
+                    return position
+            return None
+
+        description_idx = _column_index(description_column)
+        manufacturer_idx = _column_index(manufacturer_column)
+        logger.info(
+            "MPN comparisons: description=%s (column %r -> %s), manufacturer=%s (column %r -> %s)",
+            compare_descriptions, description_column, description_idx,
+            validate_manufacturer, manufacturer_column, manufacturer_idx,
+        )
+
+        def _write_description_pair(row, provider_label, result):
+            """Fill the provider's description, manufacturer and the two verdicts.
+
+            Both comparisons read the sheet through the columns Settings names,
+            because a description does not always live in Item name and a
+            manufacturer almost never does - these sheets keep it in Tag 1.
+
+            This runs before the Item name autofill further down. Autofill
+            copies a provider's description into a blank Item name, so
+            comparing afterwards would report a confident hundred percent on a
+            row that was only ever filled in from the thing being compared.
+            """
+            provider_description = str((result or {}).get('description') or '')
+            provider_manufacturer = str((result or {}).get('manufacturer') or '')
+
+            def put(suffix, value):
+                column = '%s %s' % (provider_label, suffix)
+                if column in headers:
+                    row[headers.index(column)] = value
+
+            def sheet_value(index):
+                if index is None or index >= len(row):
+                    return ''
+                return str(row[index] or '').strip()
+
+            put('Description', provider_description)
+            if compare_descriptions:
+                score = description_match_percent(
+                    sheet_value(description_idx), provider_description)
+                put('Description Match %', '' if score is None else '%d%%' % score)
+
+            put('Manufacturer', provider_manufacturer)
+            if validate_manufacturer:
+                put('MFR Valid', manufacturer_agrees(
+                    sheet_value(manufacturer_idx), provider_manufacturer))
+
 
         # Update rows with validation data
         logger.info(f"🔍 MPN_DATA_POPULATION: Starting to populate {len(dict_rows)} rows with DigiKey data from {len(results_map)} results")
@@ -2242,6 +2515,10 @@ def mpn_validate(request):
                         category_idx = headers.index('DigiKey Category')
                         category_info = validation_result.get('category', {}) or {}
                         rows[i][category_idx] = category_info.get('name') or ''
+                    if 'DigiKey Specifications' in headers:
+                        rows[i][headers.index('DigiKey Specifications')] = (
+                            validation_result.get('specs') or '')
+                    _write_description_pair(rows[i], 'DigiKey', validation_result)
                 else:
                     # For invalid MPNs, show empty/unknown values
                     rows[i][mpn_status_idx] = 'Unknown'
@@ -2258,6 +2535,9 @@ def mpn_validate(request):
                     if 'DigiKey Category' in headers:
                         category_idx = headers.index('DigiKey Category')
                         rows[i][category_idx] = ''
+                    if 'DigiKey Specifications' in headers:
+                        rows[i][headers.index('DigiKey Specifications')] = ''
+                    _write_description_pair(rows[i], 'DigiKey', {})
     
             # Populate Mouser data if we have Mouser results
             if mouser_results_map and 'MPN valid (Mouser)' in headers:
@@ -2270,6 +2550,7 @@ def mpn_validate(request):
                 mpnr_idx = headers.index('MPNR')
                 mouser_canonical_idx = headers.index('Mouser Canonical MPN')
                 mouser_cat_idx = headers.index('Mouser Category') if 'Mouser Category' in headers else None
+                mouser_specs_idx = headers.index('Mouser Specifications') if 'Mouser Specifications' in headers else None
 
                 if not mouser_result:
                     # This MPN's Mouser lookup hasn't been warmed yet — keep the Mouser
@@ -2278,6 +2559,9 @@ def mpn_validate(request):
                         rows[i][ix] = ''
                     if mouser_cat_idx is not None:
                         rows[i][mouser_cat_idx] = ''
+                    if mouser_specs_idx is not None:
+                        rows[i][mouser_specs_idx] = ''
+                    _write_description_pair(rows[i], 'Mouser', {})
                 else:
                     mouser_is_valid = mouser_result.get('valid', False)
                     rows[i][mouser_valid_idx] = 'Yes' if mouser_is_valid else 'No'
@@ -2292,6 +2576,10 @@ def mpn_validate(request):
                         if 'Mouser Category' in headers:
                             mouser_category_idx = headers.index('Mouser Category')
                             rows[i][mouser_category_idx] = mouser_result.get('category') or ''
+                        if 'Mouser Specifications' in headers:
+                            rows[i][headers.index('Mouser Specifications')] = (
+                                mouser_result.get('specs') or '')
+                        _write_description_pair(rows[i], 'Mouser', mouser_result)
                     else:
                         # For invalid MPNs, show empty/unknown values
                         rows[i][mouser_status_idx] = 'Unknown'
@@ -2302,6 +2590,9 @@ def mpn_validate(request):
                         if 'Mouser Category' in headers:
                             mouser_category_idx = headers.index('Mouser Category')
                             rows[i][mouser_category_idx] = ''
+                        if mouser_specs_idx is not None:
+                            rows[i][mouser_specs_idx] = ''
+                        _write_description_pair(rows[i], 'Mouser', {})
 
             # Populate Element14 data if we have Element14 results
             if element14_results_map and 'MPN valid (Element14)' in headers:
@@ -2314,12 +2605,16 @@ def mpn_validate(request):
                 element14_part_idx = headers.index('Element14 Part Number')
                 element14_canonical_idx = headers.index('Element14 Canonical MPN')
                 element14_cat_idx = headers.index('Element14 Category') if 'Element14 Category' in headers else None
+                element14_specs_idx = headers.index('Element14 Specifications') if 'Element14 Specifications' in headers else None
 
                 if not element14_result:
                     for ix in [element14_valid_idx, element14_status_idx, element14_part_idx, element14_canonical_idx]:
                         rows[i][ix] = ''
                     if element14_cat_idx is not None:
                         rows[i][element14_cat_idx] = ''
+                    if element14_specs_idx is not None:
+                        rows[i][element14_specs_idx] = ''
+                    _write_description_pair(rows[i], 'Element14', {})
                 else:
                     element14_is_valid = element14_result.get('valid', False)
                     rows[i][element14_valid_idx] = 'Yes' if element14_is_valid else 'No'
@@ -2330,12 +2625,18 @@ def mpn_validate(request):
                         rows[i][element14_canonical_idx] = element14_result.get('canonical_mpn') or ''
                         if element14_cat_idx is not None:
                             rows[i][element14_cat_idx] = element14_result.get('category') or ''
+                        if element14_specs_idx is not None:
+                            rows[i][element14_specs_idx] = element14_result.get('specs') or ''
+                        _write_description_pair(rows[i], 'Element14', element14_result)
                     else:
                         rows[i][element14_status_idx] = 'Unknown'
                         rows[i][element14_part_idx] = ''
                         rows[i][element14_canonical_idx] = ''
                         if element14_cat_idx is not None:
                             rows[i][element14_cat_idx] = ''
+                        if element14_specs_idx is not None:
+                            rows[i][element14_specs_idx] = ''
+                        _write_description_pair(rows[i], 'Element14', {})
 
         # Fill a blank Item name from whichever source described the part.
         #
@@ -2407,6 +2708,15 @@ def mpn_validate(request):
         # found at Mouser and nowhere else counts once valid and twice invalid,
         # which reads as mostly-bad when it is a part you can buy. These are per
         # row, and one source confirming it is enough.
+        # How close each alternate is to the part it stands in for. Only on the
+        # run that saves: the batches before it are partial, and the BOM build
+        # this needs is too slow to repeat per batch.
+        if not cache_only or str(request.data.get('persist_results', '')).lower() in ('1', 'true', 'yes', 'on'):
+            try:
+                _compare_alternates(session_id, headers, rows)
+            except Exception as compare_error:
+                logger.warning("Alternate comparison skipped: %s", compare_error)
+
         consolidated_counts = {'Valid': 0, 'Invalid': 0, 'Unknown': 0}
         try:
             if CONSOLIDATED_MPN_COLUMN in headers:

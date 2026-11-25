@@ -217,15 +217,18 @@ const BomDuplicatePolicyDialog = ({ open, sessionId, onClose, onApplied }) => {
   const handleClose = () => { onClose?.(); };
 
   return (
-    <Dialog open={open} onClose={handleClose} maxWidth="md" fullWidth>
-      <DialogTitle component="div">
-        <Typography variant="h6" component="h2">Duplicate BOM rows detected</Typography>
+    <Dialog open={open} onClose={handleClose} maxWidth="md" fullWidth
+      PaperProps={{ sx: { maxWidth: 760, borderRadius: '20px', maxHeight: '85vh' } }}
+      sx={{ '& .MuiTypography-body2': { fontSize: 13, lineHeight: 1.5 }, '& .MuiTypography-caption': { fontSize: 12, lineHeight: 1.5 } }}
+    >
+      <DialogTitle component="div" sx={{ px: 3, py: 2 }}>
+        <Typography variant="h6" component="h2" sx={{ fontSize: 20, fontWeight: 600, lineHeight: 1.4 }}>Duplicate BOM rows detected</Typography>
         <Typography variant="body2" sx={{ color: 'text.secondary', mt: 0.5 }}>
           These items appear more than once in the BOM (same identity — only Level and Quantity differ).
           Your item directory is unaffected; this only reshapes the BOM sheet.
         </Typography>
       </DialogTitle>
-      <DialogContent dividers>
+      <DialogContent dividers sx={{ px: 3, py: 2 }}>
         {loading && (
           <Stack direction="row" alignItems="center" gap={1} sx={{ py: 4, justifyContent: 'center' }}>
             <CircularProgress size={20} />
@@ -247,11 +250,11 @@ const BomDuplicatePolicyDialog = ({ open, sessionId, onClose, onApplied }) => {
           <>
             <FormControlLabel
               control={<Switch checked={aggregate} onChange={(e) => setAggregate(e.target.checked)} />}
-              sx={{ alignItems: 'flex-start', ml: 0, mr: 0, mb: 1 }}
+              sx={{ alignItems: 'flex-start', m: 0, mb: 2, p: 1.5, width: '100%', boxSizing: 'border-box', borderRadius: '12px', bgcolor: 'action.hover' }}
               label={
                 <Box sx={{ ml: 1 }}>
                   <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                    Aggregate quantity of the same item within a level
+                    Combine duplicate quantities at each level
                   </Typography>
                   <Typography variant="caption" sx={{ color: 'text.secondary' }}>
                     {aggregate
@@ -273,11 +276,11 @@ const BomDuplicatePolicyDialog = ({ open, sessionId, onClose, onApplied }) => {
               {visibleGroups.length} duplicate group{visibleGroups.length === 1 ? '' : 's'} found:
             </Typography>
 
-            <Box sx={{ maxHeight: 380, overflowY: 'auto', border: '1px solid', borderColor: 'divider', borderRadius: 1, p: 1 }}>
+            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.25 }}>
               {visibleGroups.map(({ group, buckets }) => (
                 <Box
                   key={group.signature_id}
-                  sx={{ py: 1, borderBottom: '1px dashed', borderColor: 'divider', '&:last-child': { borderBottom: 'none' } }}
+                  sx={{ p: 1.75, border: '1px solid', borderColor: 'divider', borderRadius: '12px' }}
                 >
                   <Stack direction="row" alignItems="center" gap={1} flexWrap="wrap">
                     <Typography variant="body2" sx={{ fontFamily: 'var(--fw-font-stack)', fontWeight: 600 }}>
@@ -308,7 +311,7 @@ const BomDuplicatePolicyDialog = ({ open, sessionId, onClose, onApplied }) => {
                         alignItems="center"
                         gap={1.5}
                         flexWrap="wrap"
-                        sx={{ mt: 0.75, pl: 0.5 }}
+                        sx={{ mt: 1.5 }}
                       >
                         <Typography variant="caption" sx={{ minWidth: 62, color: 'text.secondary' }}>
                           Level {bucket.level || '?'}
@@ -326,7 +329,7 @@ const BomDuplicatePolicyDialog = ({ open, sessionId, onClose, onApplied }) => {
                         </Stack>
                         <TextField
                           size="small"
-                          label="Quantity"
+                          label="Export quantity"
                           // Shows the aggregated figure until the user replaces
                           // it. What is stored stays separate — see `quantities`.
                           value={hasTyped ? typed : bucket.suggested}
@@ -350,8 +353,8 @@ const BomDuplicatePolicyDialog = ({ open, sessionId, onClose, onApplied }) => {
           </>
         )}
       </DialogContent>
-      <DialogActions>
-        <Button onClick={handleClose} disabled={saving} sx={cancelButtonSx}>Cancel</Button>
+      <DialogActions sx={{ px: 3, py: 1.5, gap: 1 }}>
+        <Button onClick={handleClose} disabled={saving} sx={{ ...cancelButtonSx, color: 'text.secondary', bgcolor: 'transparent', borderColor: 'divider' }}>Cancel</Button>
         <Button
           variant="contained"
           onClick={visibleGroups.length === 0 ? onApplied : handleApply}

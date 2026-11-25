@@ -39,6 +39,7 @@ import traceback
 import json
 import tempfile
 import shutil
+from io import BytesIO
 from copy import deepcopy
 
 from .delimited_reader import (
@@ -912,6 +913,45 @@ def apply_editor_defaults(request):
         'entity': settings_row.entity_name or settings_row.entity_id,
         'applied': applied,
     })
+
+
+_DESIGNATOR = re.compile(r'^([A-Za-z]+)(\d+)$')
+#: One position written with a suffix: J6_1 (connector J6, pin 1), U1A (gate A
+#: of U1), R1.2. Each is one part placed, so each counts once.
+_SUFFIXED_DESIGNATOR = re.compile(r'^[A-Za-z]+\d+[A-Za-z0-9_.]+$')
+
+
+def count_reference_designators(cell, delimiter=',', range_marker='-'):
+    """How many parts a reference cell places: R1, R2, R5 is 3.
+
+    References are split on `delimiter` (and on spaces, which sheets put after
+    it). A range counts every position in it - with "-", C1-C4 and C1-4 are
+    both 4. A token that is not a reference (a note, "Refer design") counts as
+    nothing rather than as one, and a range that does not read as one counts
+    its two ends.
+    """
+    delimiter = delimiter or ','
+    range_marker = range_marker or '-'
+    text = str(cell or '').strip()
+    # "R1 - R3" is one range; the spaces around the marker are not delimiters.
+    text = re.sub(r'\s*%s\s*' % re.escape(range_marker), range_marker, text)
+    count = 0
+    for piece in text.split(delimiter):
+        for token in piece.split():
+            if range_marker in token:
+                start_text, _, end_text = token.partition(range_marker)
+                start = _DESIGNATOR.match(start_text)
+                end = _DESIGNATOR.match(end_text) or re.match(r'^()(\d+)$', end_text)
+                if start and end and (not end.group(1)
+                                      or end.group(1).upper() == start.group(1).upper()):
+                    first, last = int(start.group(2)), int(end.group(2))
+                    if 0 <= last - first < 1000:
+                        count += last - first + 1
+                        continue
+                count += sum(1 for part in (start_text, end_text) if _DESIGNATOR.match(part))
+            elif _DESIGNATOR.match(token) or _SUFFIXED_DESIGNATOR.match(token):
+                count += 1
+    return count
 
 
 def _internal_post(payload):
@@ -4462,6 +4502,57 @@ def bom_field_pattern_bulk_controls(request):
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+def _combined_upload_file(source_files, selections):
+    """Create one workbook from explicitly selected file/sheet sources."""
+    frames = []
+    selected_count_by_file = Counter(str(item.get('file_index')) for item in selections)
+    for item in selections:
+        file_index = int(item.get('file_index'))
+        if file_index < 0 or file_index >= len(source_files):
+            raise ValueError('A selected source file is unavailable.')
+        source = source_files[file_index]
+        sheet_name = str(item.get('sheet_name') or '').strip() or None
+        header_row = max(1, int(item.get('header_row') or 1))
+        frame = read_spreadsheet_or_delimited(source['path'], sheet_name=sheet_name, header=header_row - 1, dtype=object)
+        frame.columns = [str(column).strip() or f'Column {index + 1}' for index, column in enumerate(frame.columns)]
+        if 'Source file' in frame.columns or 'Source sheet' in frame.columns:
+            raise ValueError('Selected sources already contain reserved columns: Source file or Source sheet.')
+        frame['Source file'] = source['original_name']
+        if selected_count_by_file[str(file_index)] > 1:
+            frame['Source sheet'] = sheet_name or Path(source['original_name']).stem
+        frames.append(frame)
+
+    if not frames:
+        raise ValueError('Select at least two source sheets to combine.')
+    combined = pd.concat(frames, ignore_index=True, sort=False).replace({np.nan: ''})
+    content = BytesIO()
+    with pd.ExcelWriter(content, engine='openpyxl') as writer:
+        combined.to_excel(writer, index=False, sheet_name='Combined')
+    upload = SimpleUploadedFile(
+        'combined-bom.xlsx',
+        content.getvalue(),
+        content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    )
+    return hybrid_file_manager.save_upload_file(upload, 'client_combined'), list(combined.columns)
+
+
+@api_view(['GET'])
+def download_session_source_file(request, session_id):
+    """Return the exact source workbook stored for an upload session."""
+    session = get_session_consistent(session_id)
+    if not session or not session.get('client_path'):
+        return Response({'success': False, 'error': 'Session source file was not found.'}, status=status.HTTP_404_NOT_FOUND)
+    try:
+        path = hybrid_file_manager.get_file_path(session['client_path'])
+        return FileResponse(
+            open(path, 'rb'),
+            as_attachment=True,
+            filename=session.get('original_client_name') or 'source.xlsx',
+        )
+    except OSError:
+        return Response({'success': False, 'error': 'Session source file was not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+
 @api_view(['POST'])
 @parser_classes([MultiPartParser, FormParser])
 def upload_files(request):
@@ -4471,11 +4562,24 @@ def upload_files(request):
     """
     try:
         # Extract form data
-        client_file = request.FILES.get('clientFile')
+        client_files = request.FILES.getlist('clientFiles') or ([request.FILES.get('clientFile')] if request.FILES.get('clientFile') else [])
+        client_file = client_files[0] if client_files else None
         template_file = request.FILES.get('templateFile')
         sheet_name = request.data.get('sheetName')
         header_row_supplied = request.data.get('headerRow') not in (None, '')
         header_row = int(request.data.get('headerRow') or 1)
+        source_selections_raw = request.data.get('sourceSelections')
+        source_selections = []
+        use_source_file_as_bom_groups = str(request.data.get('useSourceFileAsBomGroups') or '').lower() == 'true'
+        if source_selections_raw:
+            try:
+                if isinstance(source_selections_raw, (list, tuple)) and len(source_selections_raw) == 1:
+                    source_selections_raw = source_selections_raw[0]
+                source_selections = json.loads(source_selections_raw) if isinstance(source_selections_raw, str) else source_selections_raw
+                if not isinstance(source_selections, list):
+                    raise ValueError
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return Response({'success': False, 'error': 'sourceSelections must be a list.'}, status=status.HTTP_400_BAD_REQUEST)
         default_template_metadata = get_sfo_template_metadata()
         template_sheet_name = request.data.get('templateSheetName') or default_template_metadata["template_sheet_name"]
         template_header_row = int(request.data.get('templateHeaderRow') or default_template_metadata["template_header_row"])
@@ -4523,13 +4627,13 @@ def upload_files(request):
         
         # Validate file types
         allowed_extensions = ['.xlsx', '.xls', '.xlsm', '.csv']
-        client_ext = Path(client_file.name).suffix.lower()
-        
-        if client_ext not in allowed_extensions:
-            return Response({
-                'success': False,
-                'error': f'Only Excel (.xlsx, .xls, .xlsm) and CSV files are supported for client file'
-            }, status=status.HTTP_400_BAD_REQUEST)
+        for uploaded_client_file in client_files:
+            client_ext = Path(uploaded_client_file.name).suffix.lower()
+            if client_ext not in allowed_extensions:
+                return Response({
+                    'success': False,
+                    'error': 'Only Excel (.xlsx, .xls, .xlsm) and CSV files are supported for client file'
+                }, status=status.HTTP_400_BAD_REQUEST)
         
         if template_file:
             template_ext = Path(template_file.name).suffix.lower()
@@ -4540,7 +4644,20 @@ def upload_files(request):
                 }, status=status.HTTP_400_BAD_REQUEST)
 
         # Save uploaded files
-        client_path, client_original_name = hybrid_file_manager.save_upload_file(client_file, "client")
+        saved_client_sources = []
+        for uploaded_client_file in client_files:
+            source_path, source_name = hybrid_file_manager.save_upload_file(uploaded_client_file, "client")
+            saved_client_sources.append({'path': source_path, 'original_name': source_name})
+        client_path, client_original_name = saved_client_sources[0]['path'], saved_client_sources[0]['original_name']
+        combined_sources = len(source_selections) > 1
+        if combined_sources:
+            try:
+                (client_path, client_original_name), client_headers = _combined_upload_file(saved_client_sources, source_selections)
+                sheet_name = 'Combined'
+                header_row = 1
+                header_row_supplied = True
+            except (ValueError, IndexError, KeyError) as exc:
+                return Response({'success': False, 'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         if template_file:
             template_path, template_original_name = hybrid_file_manager.save_upload_file(template_file, "template")
         else:
@@ -4657,6 +4774,8 @@ def upload_files(request):
             # authored for flat sheets. BOM generation reads this instead of
             # re-asking, so it has to survive a page reload.
             "bom_structure": bom_structure,
+            "source_selections": source_selections,
+            "use_source_file_as_bom_groups": use_source_file_as_bom_groups,
         }
         
         # Save session with universal persistence (critical for multi-worker environments)
@@ -6725,6 +6844,10 @@ def data_view(request):
         except Exception as _e:
             pass
 
+        # Files linked as sub-BOMs: the editor shows the tree's levels, as the
+        # export does.
+        info = _stamp_linked_bom_levels(session_id, info)
+
         # === DETAILED LOGGING FOR DATA_VIEW ===
         logger.info(f"📊 DATA_VIEW: Session {session_id}")
         logger.info(f"📊 DATA_VIEW: template_headers = {info.get('template_headers')}")
@@ -8630,6 +8753,7 @@ def _add_combined_bom_identity_columns(session_id, rows, headers):
         if code:
             open_rows.append((level, code))
 
+    grid_levels = getattr(result, 'grid_levels', None) or {}
     width = len(output_headers)
     output_rows = []
     headers_marked = 0
@@ -8644,6 +8768,10 @@ def _add_combined_bom_identity_columns(session_id, rows, headers):
             values.extend([''] * (width - len(values)))
         alternate = alternate_of.get(position)
         pair = identity.get(position)
+        # Linked files: the tree's level, not the file's own. Alternates take it
+        # too, so they stay at their primary's level.
+        if level_index >= 0 and position in grid_levels:
+            values[level_index] = str(grid_levels[position])
         if alternate and not pair:
             # An alternate belongs to its primary's BOM, so it carries the same
             # BOM code - it is grouped by that before anything looks at it - and
@@ -8859,11 +8987,19 @@ def _authored_finished_goods(info):
     good is entered in the popup and lives only on the session.
     """
     goods = []
-    sheets = ((info or {}).get('bom_structure') or {}).get('sheets') or {}
+    structure = (info or {}).get('bom_structure') or {}
+    sheets = structure.get('sheets') or {}
+    grouped = bool(str(structure.get('groupColumn') or '').strip())
     for _sheet_name, answer in sheets.items():
         if not isinstance(answer, dict) or not answer.get('hasBom'):
             continue
         if answer.get('bomGenerationAvailable') is False:
+            continue
+        # In a grouped upload only the top file's finished good is authored. A
+        # sub-BOM's finished good is a line in its parent's file, so it is
+        # already a row - appending it again would list the board twice in the
+        # item directory.
+        if grouped and str(answer.get('parentBom') or '').strip():
             continue
         header = answer.get('bomHeader') or {}
         code = str(header.get('finishedGoodCode') or '').strip()
@@ -9118,7 +9254,14 @@ def _type_authored_assemblies(info, headers, rows):
 def _apply_sub_assembly_item_types(session_id, info, rows, headers):
     """Type every sub-assembly row in the item export as a Finished good."""
     sheets = ((info or {}).get('bom_structure') or {}).get('sheets') or {}
-    if not any(answer.get('hasLevels') for answer in sheets.values() if isinstance(answer, dict)):
+    # Several files linked into one tree have sub-assemblies even though every
+    # file on its own is flat - the levels come from the links, not from any
+    # sheet's answer. Checking hasLevels alone left every linked board typed as
+    # a raw material, bought in, while a BOM in the same file builds it.
+    grouped = len(_grouped_bom_answers(info)[1]) > 1
+    if not grouped and not any(
+        answer.get('hasLevels') for answer in sheets.values() if isinstance(answer, dict)
+    ):
         return rows, 0
     codes = _sub_assembly_item_codes(session_id)
     if not codes or not headers:
@@ -9182,12 +9325,20 @@ def _dedupe_item_rows(rows, headers):
         return rows, []
 
     width = len(headers)
+    from .bom_validation import is_validation_column
+    # Columns MPN validation filled in are left out of the comparison: they
+    # follow from the part, so they cannot be what makes two rows different
+    # parts - but they DO differ when the rows differ elsewhere (a match % is
+    # scored against each row's own Item name), and were reported as conflicts.
+    compared = [position for position, header in enumerate(headers)
+                if not is_validation_column(header)]
 
     def signature(row):
         # Padded to the header count so a row with trailing blanks trimmed off
         # still matches the identical row that kept them.
         cells = [str(cell or '').strip() for cell in row[:width]]
-        return tuple(cells + [''] * (width - len(cells)))
+        cells += [''] * (width - len(cells))
+        return tuple(cells[position] for position in compared)
 
     first_seen = {}
     conflicts = []
@@ -13888,7 +14039,18 @@ def column_rules(request):
     if not name:
         return Response({'success': False, 'error': 'A name is required'},
                         status=status.HTTP_400_BAD_REQUEST)
-    if not isinstance(rule, dict) or not rule.get('value_mode'):
+    # Two shapes live in this table. A Fill/Create Column rule is replayed
+    # against a session and needs a `value_mode` to mean anything. A BOM field
+    # pattern is a parser rule keyed by shape, written by
+    # save_bom_field_pattern_rule, and has never had one - so the check below
+    # rejected every pattern, and there was no way to put one back after it was
+    # deleted except by re-teaching the sheet it came from.
+    is_field_pattern = (
+        isinstance(rule, dict)
+        and str(rule.get('rule_type') or '').strip() == 'bom_field_pattern'
+        and (rule.get('shape') or rule.get('pattern_key'))
+    )
+    if not isinstance(rule, dict) or not (rule.get('value_mode') or is_field_pattern):
         return Response({'success': False, 'error': 'A rule with a value_mode is required'},
                         status=status.HTTP_400_BAD_REQUEST)
 
@@ -14754,7 +14916,7 @@ def apply_column_value_rule(headers, rows, raw_rule, locked_item_codes=None):
         value_mode = 'join'
     source_columns = [str(value or '').strip() for value in (rule.get('source_columns') or []) if str(value or '').strip()]
     source_indexes = [_grid_column_index(output_headers, source) for source in source_columns]
-    if value_mode in {'copy', 'join'} and (not source_indexes or any(index < 0 for index in source_indexes)):
+    if value_mode in {'copy', 'join', 'count_refs'} and (not source_indexes or any(index < 0 for index in source_indexes)):
         missing = [source for source, index in zip(source_columns, source_indexes) if index < 0]
         raise ValueError(f'Source column not found: {", ".join(missing) or "select a source column"}')
 
@@ -14978,6 +15140,17 @@ def apply_column_value_rule(headers, rows, raw_rule, locked_item_codes=None):
                     generated = generated.replace(fragment, '')
             if rule.get('trim_ends') is not False:
                 generated = generated.strip()
+        elif value_mode == 'count_refs':
+            # The quantity a reference list implies. A row with no references
+            # keeps its quantity: an empty cell says nothing about how many.
+            count = count_reference_designators(
+                row[source_indexes[0]], rule.get('ref_delimiter') or ',',
+                rule.get('ref_range') or '-')
+            if count:
+                generated = str(count)
+            else:
+                should_write = False
+                generated = row[target_index]
         elif value_mode == 'join':
             values = [str(row[index] or '').strip() for index in source_indexes]
             generated = str(rule.get('separator') or '').join(value for value in values if value)
@@ -18661,6 +18834,265 @@ def _add_mpn_validation_columns(headers, columns):
     _place_consolidated_mpn_column(headers)
 
 
+#: Columns that identify a row, in the order _hierarchy_columns tries them. A
+#: grouped upload links its files on the same column the tree is later keyed on,
+#: so a file that links here cannot fail to link there.
+GROUP_LINK_CODE_COLUMNS = ('cpn', 'Item code', 'mpn')
+
+
+def _grouped_bom_answers(info):
+    """The per-file BOM answers of a grouped upload, or ('', {}) when it isn't one.
+
+    A grouped upload is several source files stacked into one table, with a
+    column saying which file each row came from. The popup asks one set of BOM
+    questions per file and keys the answers by that file. Only answers that
+    describe a BOM count - a file the user said has none is not a group.
+    """
+    structure = (info or {}).get('bom_structure') or {}
+    column = str(structure.get('groupColumn') or '').strip()
+    if not column:
+        return '', {}
+    answers = {}
+    for name, answer in (structure.get('sheets') or {}).items():
+        if not isinstance(answer, dict) or not answer.get('hasBom'):
+            continue
+        if answer.get('bomGenerationAvailable') is False:
+            continue
+        answers[str(name)] = answer
+    return column, answers
+
+
+def _link_grouped_boms(records, group_column, group_answers):
+    """Join several single-level BOMs - one per source file - into one tree.
+
+    Nothing in the files says how they relate; the files are linked by the code
+    the user gave each one. When that code appears as a line in another file,
+    this file is the BOM for that line. The file no other file lists is the top
+    BOM. That is the whole rule, so it holds for any customer's layout: no
+    preamble, filename convention or parent column is read.
+
+    Every row is then given the `level` and `parent` a stated-parent sheet would
+    have carried, and the tree builder takes it from there.
+
+    Returns {'records', 'answer', 'bom_header'} or {'error': message}.
+    """
+    if not records:
+        return {'error': 'There are no rows to build the BOMs from.'}
+    if group_column not in records[0]:
+        return {'error': ('The rows no longer say which file they came from (no "%s" '
+                          'column), so the files cannot be told apart. Run the BOM '
+                          'Normalizer again on the combined files.' % group_column)}
+
+    code_column = next(
+        (column for column in GROUP_LINK_CODE_COLUMNS
+         if column in records[0] and any(str(r.get(column) or '').strip() for r in records)),
+        '',
+    )
+    if not code_column:
+        return {'error': 'No part number column has any values, so the files cannot be linked.'}
+
+    def key(value):
+        return str(value or '').strip().upper()
+
+    for name, answer in group_answers.items():
+        # One file that is itself multi-level would need its own levels shifted
+        # under its parent's line, and its own parents kept. Refused rather than
+        # half-done: a wrong tree here looks exactly like a right one.
+        if answer.get('hasLevels'):
+            return {'error': ('"%s" is a multi-level BOM. Linking files together '
+                              'currently works for single-level files only.' % name)}
+
+    typed = {}
+    for name, answer in group_answers.items():
+        code = str((answer.get('bomHeader') or {}).get('finishedGoodCode') or '').strip()
+        if not code:
+            return {'error': 'No BOM code was given for "%s".' % name}
+        typed[name] = code
+    seen = {}
+    for name, code in typed.items():
+        if key(code) in seen:
+            return {'error': ('"%s" and "%s" were both given the code %s. Each file '
+                              'is its own BOM and needs its own code.'
+                              % (seen[key(code)], name, code))}
+        seen[key(code)] = name
+
+    rows_of = {name: [] for name in group_answers}
+    unclaimed = Counter()
+    for record in records:
+        name = str(record.get(group_column) or '').strip()
+        if name in rows_of:
+            rows_of[name].append(record)
+        else:
+            unclaimed[name or '(blank)'] += 1
+    if unclaimed:
+        return {'error': ('%d rows come from files with no BOM answer: %s. Every file '
+                          'needs one.' % (sum(unclaimed.values()),
+                                          ', '.join(sorted(unclaimed)[:5])))}
+
+    # Only links the user CONFIRMED. A code matching a line in another file is
+    # a suggestion in the BOM step, never a link on its own: two files can
+    # share a part number by coincidence, and nesting one under the other
+    # because a string matched is the silent restructuring nobody can explain
+    # afterwards. Each confirmed link is checked against the rows here, and the
+    # cell's own spelling kept - the tree is keyed on the cell, not the typing.
+    by_typed_code = {key(code): name for name, code in typed.items()}
+    parent_of = {}
+    line_code = {}
+    line_item = {}
+    for name, code in typed.items():
+        answer = group_answers[name]
+        parent = str(answer.get('parentGroup') or '').strip()
+        if not parent and str(answer.get('parentBom') or '').strip():
+            parent = by_typed_code.get(key(answer.get('parentBom')), '')
+        if not parent:
+            parent_of[name] = None
+            line_code[name] = code
+            continue
+        if parent not in rows_of or parent == name:
+            return {'error': ('"%s" was linked under "%s", which is not another file in '
+                              'this upload.' % (name, parent))}
+        # The typed code is looked for in EVERY column that identifies a row, not
+        # only the one the tree is keyed on. Which column that is depends on what
+        # is filled: once the editor has generated item codes the tree keys on
+        # "24U751_Graco Spec.", while the user - and the BOM step, which reads
+        # the rows before the editor - knows the line as 24U751. Matching one
+        # column only, the step showed a link that generation then refused.
+        line = next(
+            (record for record in rows_of[parent]
+             if any(key(record.get(column)) == key(code)
+                    for column in GROUP_LINK_CODE_COLUMNS if column in record)),
+            None,
+        )
+        # The child hangs off the line's TREE key, whatever the user typed.
+        cell = str((line or {}).get(code_column) or '').strip()
+        if not cell:
+            return {'error': ('"%s" was linked as a sub-BOM of "%s", but %s is not a line '
+                              'in that file.' % (name, parent, code))}
+        parent_of[name] = parent
+        line_code[name] = cell
+        line_item[name] = str(line.get('Item code') or '').strip()
+
+    roots = [name for name, parent in parent_of.items() if parent is None]
+    if len(roots) != 1:
+        if not roots:
+            return {'error': ('Every file was linked under another, so there is no top '
+                              'BOM - the files reference each other in a loop.')}
+        # One upload builds one tree. Several unrelated BOMs in one upload is a
+        # different feature, not something to produce by leaving links out.
+        return {'error': ('%d files are top BOMs: %s. One upload builds one BOM tree - '
+                          'link the others as sub-BOMs in the BOM step, or upload them '
+                          'separately.' % (len(roots), ', '.join(roots)))}
+    root = roots[0]
+
+    depth = {}
+    for name in group_answers:
+        chain, current = [], name
+        while parent_of[current] is not None:
+            if current in chain:
+                return {'error': 'The files reference each other in a loop: %s.'
+                                 % ' -> '.join(chain + [current])}
+            chain.append(current)
+            current = parent_of[current]
+        depth[name] = len(chain)
+
+    # Top BOM first, then each tier below it, keeping every file's own row order.
+    ordered = sorted(group_answers, key=lambda name: depth[name])
+    linked = []
+    # The level each editor row has in the joined tree. The grid still holds
+    # every file's own levels - all 1 - and the export reads Level from the grid,
+    # so a sub-BOM's lines went out at 1 beside the Sub BOM ID that put them a
+    # tier below. One tier below the line they hang off, at any depth.
+    grid_levels = {}
+    for name in ordered:
+        for record in rows_of[name]:
+            row = dict(record)
+            row['level'] = str(depth[name] + 1)
+            if isinstance(record.get(GRID_ROW_KEY), int):
+                grid_levels[record[GRID_ROW_KEY]] = depth[name] + 1
+            # The top file's rows hang off the authored finished good, which is
+            # what an empty parent means to the tree builder.
+            row['parent'] = '' if name == root else line_code[name]
+            linked.append(row)
+
+    # Each sub-BOM keeps the header the user gave its file, keyed by the line it
+    # is the BOM for - the same map the generator renames sub-assemblies through.
+    sub_boms = {}
+    for name in group_answers:
+        if name == root:
+            continue
+        header = group_answers[name].get('bomHeader') or {}
+        sub_boms[line_code[name]] = {
+            # The item this BOM builds is the LINE it hangs off - an item that
+            # exists in the item sheet. What the user typed identified that
+            # line; it is not a new item, and a finished good FactWise has no
+            # item for fails the import. Its item code, not its tree key: the
+            # tree keys on the CPN (24U751) while the item is 24U751_Graco
+            # Spec., and a BOM building "24U751" built nothing in the item file
+            # and left the real board typed as a raw material.
+            'finishedGoodCode': line_item.get(name) or line_code[name],
+            'bomCode': str(header.get('bomCode') or '').strip() or line_code[name],
+            'bomName': str(header.get('bomName') or '').strip() or line_code[name],
+            'measurementUnit': str(header.get('measurementUnit') or '').strip(),
+            'baseQuantity': header.get('baseQuantity'),
+        }
+
+    answer = dict(group_answers[root])
+    answer.update({'hasLevels': True, 'levelColumn': 'level', 'subBoms': sub_boms})
+    bom_header = dict(answer.get('bomHeader') or {})
+    # The top file's finished good is authored, never a row in any file, so
+    # there is no sheet code for it to be renamed from.
+    bom_header['rootSourceCode'] = ''
+    return {'records': linked, 'answer': answer, 'bom_header': bom_header,
+            'grid_levels': grid_levels}
+
+
+def _stamp_linked_bom_levels(session_id, info):
+    """Write a linked upload's tree levels into the editor's Level column.
+
+    The grid holds every file's own levels - all 1 - and the export already
+    corrects them, so the editor said 1 for lines the file it shipped said 2.
+    Done once per set of links rather than on every load: generation is the only
+    place the levels are known, and an edit made to Level afterwards is the
+    user's and stays until the links change.
+
+    Returns the session to serve.
+    """
+    _group_column, group_answers = _grouped_bom_answers(info)
+    if len(group_answers) < 2:
+        return info
+    stamp = json.dumps(info.get('bom_structure') or {}, sort_keys=True, default=str)
+    if info.get('linked_bom_levels_stamp') == stamp:
+        return info
+    try:
+        result, _bom_header, error_response = _generate_bom_for_session(
+            session_id, apply_dup_policy=False)
+    except Exception as exc:
+        logger.warning('Linked BOM levels: generation failed for %s (%s)', session_id, exc)
+        return info
+    info = get_session_consistent(session_id) or info
+    grid_levels = {}
+    if error_response is None and result is not None:
+        grid_levels = getattr(result, 'grid_levels', None) or {}
+    headers, rows = read_session_grid(session_id, info)
+    level_index = _grid_column_index(headers, 'Level')
+    changed = 0
+    if level_index >= 0:
+        for position, level in grid_levels.items():
+            row = rows[position - 1] if 0 < position <= len(rows) else None
+            if isinstance(row, list) and level_index < len(row) \
+                    and str(row[level_index] or '').strip() != str(level):
+                row[level_index] = str(level)
+                changed += 1
+    if changed:
+        write_session_grid(session_id, info, headers, rows)
+        logger.info('Linked BOM levels: set %d Level cell(s) in %s', changed, session_id)
+    # Stamped even when the links do not build yet, so a broken set is not
+    # regenerated on every load; fixing the links changes the stamp.
+    info['linked_bom_levels_stamp'] = stamp
+    save_session(session_id, info)
+    return info
+
+
 def _hierarchy_columns(records, answer):
     """Pick the level / code columns to derive a tree from.
 
@@ -18791,8 +19223,18 @@ def _generate_bom_for_session(session_id, apply_dup_policy=True):
                                     status=status.HTTP_404_NOT_FOUND)
 
     sheets = (info.get('bom_structure') or {}).get('sheets') or {}
+
+    # Several source files, each its own BOM. The answers are keyed by file
+    # rather than by sheet, and ALL of them are used: which one is the top BOM
+    # and which are its sub-BOMs is only known once the rows are read, so it is
+    # decided below rather than here. Taking the first answer and stopping, as a
+    # single-sheet upload does, built every file's rows under one finished good
+    # and silently discarded the rest.
+    group_column, group_answers = _grouped_bom_answers(info)
+    grouped = len(group_answers) > 1
+
     answer = None
-    for _sheet_name, sheet_answer in sheets.items():
+    for _sheet_name, sheet_answer in ([] if grouped else sheets.items()):
         if not sheet_answer.get('hasBom'):
             continue
         # The user said this sheet is not tree-shaped, so no BOM is built from
@@ -18807,21 +19249,23 @@ def _generate_bom_for_session(session_id, apply_dup_policy=True):
         answer = sheet_answer
         break
 
-    if answer is None:
+    if answer is None and not grouped:
         return None, None, Response({
             'success': False,
             'error': 'No sheet in this upload was marked as containing a BOM.',
             'needs': 'bom_sheet',
         }, status=status.HTTP_400_BAD_REQUEST)
 
-    is_hierarchical = bool(answer.get('hasLevels'))
-    bom_header = answer.get('bomHeader')
+    # Grouped: the answer and header are the TOP BOM's, which is not known until
+    # the rows say which file every other file hangs under. Set after linking.
+    is_hierarchical = True if grouped else bool(answer.get('hasLevels'))
+    bom_header = None if grouped else answer.get('bomHeader')
 
     # A finished good is required either way. A flat sheet has no root at all; a
     # hierarchical sheet usually starts at level 1 and names its root in a
     # preamble above the table, which is not part of the data. Both are authored
     # in the BOM structure gate.
-    if not bom_header:
+    if not bom_header and not grouped:
         return None, None, Response({
             'success': False,
             'error': ('No finished good has been defined for this upload, so a BOM '
@@ -18936,6 +19380,23 @@ def _generate_bom_for_session(session_id, apply_dup_policy=True):
                 }, status=status.HTTP_400_BAD_REQUEST)
             records = source_records
 
+    # Grouped files become one tree here, and it has to happen BEFORE the
+    # duplicate policy below. Until linking, every file's rows sit at level 1
+    # with no parent, so the policy - which buckets by parent and level - would
+    # read a terminal used in the top BOM and the same terminal used inside a
+    # sub-BOM as one part listed twice, and add them together.
+    if grouped:
+        linked = _link_grouped_boms(records, group_column, group_answers)
+        if linked.get('error'):
+            return None, None, Response({
+                'success': False,
+                'error': linked['error'],
+                'needs': 'bom_group_links',
+            }, status=status.HTTP_400_BAD_REQUEST)
+        records = linked['records']
+        answer = linked['answer']
+        bom_header = linked['bom_header']
+
     # Apply the duplicate-handling policy on the normalized records — AFTER
     # the grid ↔ source merge has succeeded, BEFORE tree derivation. Doing it
     # here (not on the raw grid) preserves the positional grid↔source join,
@@ -18976,6 +19437,7 @@ def _generate_bom_for_session(session_id, apply_dup_policy=True):
             'warnings': result.warnings,
         }, status=status.HTTP_400_BAD_REQUEST)
 
+    result.grid_levels = linked['grid_levels'] if grouped else {}
     return result, bom_header, None
 
 

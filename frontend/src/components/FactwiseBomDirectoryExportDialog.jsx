@@ -399,7 +399,7 @@ export default function FactwiseBomDirectoryExportDialog({
         }}
       >
         <Typography variant="h6" component="h2" sx={{ fontWeight: 500 }}>
-          Export to Factwise BOM Directory
+          Export to BOM Directory
         </Typography>
         {!isRunning && (
           <IconButton size="small" onClick={onClose}>
@@ -425,7 +425,7 @@ export default function FactwiseBomDirectoryExportDialog({
             <Typography variant="caption" sx={{ display: 'block', mt: 0.5, color: 'text.secondary' }}>
               No project will be touched. If you also wanted to move a
               project's slot to this new revision, close and use
-              &quot;Export to Factwise Project&quot; instead.
+              &quot;Export to Project&quot; instead.
             </Typography>
           </Alert>
         )}
