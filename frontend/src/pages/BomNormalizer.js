@@ -20780,80 +20780,95 @@ const BomNormalizer = () => {
               </Paper>
 
               {fieldPatternFieldFilterOptions.length > 1 && (
-                <Stack
-                  direction="row"
-                  alignItems="center"
-                  gap={0.75}
+                <Box
                   sx={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
                     flexWrap: 'wrap',
+                    gap: 1,
                     pt: 0.25,
                   }}
                 >
-                  {fieldPatternFieldFilterOptions.map((option) => {
-                    const isActive = (fieldPatternFieldFilter || 'all') === option.key;
-                    return (
-                      <Box
-                        key={option.key}
-                        component="button"
-                        type="button"
-                        onClick={() => {
-                          const nextField = option?.key || 'all';
-                          setFieldPatternFieldFilter(nextField);
-                          setFieldPatternExpandedPatternKey('');
-                          if (
-                            nextField !== 'all' &&
-                            mappedFieldPatternRuleOptions.some((field) => field.key === nextField)
-                          ) {
-                            setFieldPatternSelectedRuleField(nextField);
-                            setBulkPatternControls({});
-                            setBulkPatternControlsChanged(false);
-                          }
-                        }}
-                        sx={{
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          gap: 0.6,
-                          px: 1.4,
-                          py: 0.55,
-                          borderRadius: '999px',
-                          border: `1px solid ${
-                            isActive
-                              ? '#007aff'
-                              : isDarkMode
-                                ? normalizerTheme.border
-                                : '#d9e2ef'
-                          }`,
-                          bgcolor: isActive
-                            ? '#007aff'
-                            : isDarkMode
-                              ? normalizerTheme.paper
-                              : '#ffffff',
-                          color: isActive
-                            ? '#ffffff'
-                            : normalizerTheme.text,
-                          fontSize: 12,
-                          fontWeight: isActive ? 600 : 500,
-                          lineHeight: 1.3,
-                          cursor: 'pointer',
-                          transition: 'all 150ms ease',
-                          boxShadow: isActive
-                            ? '0 4px 12px -4px rgba(0, 122, 255, 0.45)'
-                            : 'none',
-                          '&:hover': {
-                            borderColor: isActive ? '#0066d6' : '#94a3b8',
+                  <Box
+                    role="tablist"
+                    aria-label="Patterns by field"
+                    sx={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      flexWrap: 'wrap',
+                      gap: 0.45,
+                      p: 0.45,
+                      borderRadius: '12px',
+                      bgcolor: isDarkMode ? 'rgba(255,255,255,0.04)' : '#e8eef8',
+                      border: `1px solid ${isDarkMode ? normalizerTheme.border : '#dbe4f3'}`,
+                    }}
+                  >
+                    {fieldPatternFieldFilterOptions.map((option) => {
+                      const isActive = (fieldPatternFieldFilter || 'all') === option.key;
+                      return (
+                        <Box
+                          key={option.key}
+                          component="button"
+                          type="button"
+                          role="tab"
+                          aria-selected={isActive}
+                          onClick={() => {
+                            const nextField = option?.key || 'all';
+                            setFieldPatternFieldFilter(nextField);
+                            setFieldPatternExpandedPatternKey('');
+                            if (
+                              nextField !== 'all' &&
+                              mappedFieldPatternRuleOptions.some((field) => field.key === nextField)
+                            ) {
+                              setFieldPatternSelectedRuleField(nextField);
+                              setBulkPatternControls({});
+                              setBulkPatternControlsChanged(false);
+                            }
+                          }}
+                          sx={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: 0.6,
+                            px: 1.5,
+                            py: 0.65,
+                            borderRadius: '9px',
+                            border: '1px solid transparent',
                             bgcolor: isActive
-                              ? '#0066d6'
-                              : isDarkMode
-                                ? 'rgba(255,255,255,0.06)'
-                                : '#f8fafc',
-                          },
-                        }}
-                      >
-                        {option.label}
-                      </Box>
-                    );
-                  })}
-                </Stack>
+                              ? (isDarkMode ? 'rgba(0, 122, 255, 0.22)' : '#ffffff')
+                              : 'transparent',
+                            borderColor: isActive
+                              ? (isDarkMode ? 'rgba(96, 165, 250, 0.35)' : 'rgba(15, 23, 42, 0.06)')
+                              : 'transparent',
+                            color: isActive
+                              ? (isDarkMode ? '#93c5fd' : '#007aff')
+                              : (isDarkMode ? normalizerTheme.muted : '#475569'),
+                            fontSize: 12.25,
+                            fontWeight: isActive ? 600 : 500,
+                            lineHeight: 1.25,
+                            cursor: 'pointer',
+                            transition: 'all 160ms ease',
+                            boxShadow: isActive
+                              ? (isDarkMode
+                                ? '0 2px 8px -2px rgba(0, 0, 0, 0.45)'
+                                : '0 2px 8px -2px rgba(15, 23, 42, 0.14), 0 1px 2px rgba(15, 23, 42, 0.06)')
+                              : 'none',
+                            '&:hover': {
+                              color: isActive
+                                ? (isDarkMode ? '#bfdbfe' : '#0066d6')
+                                : normalizerTheme.text,
+                              bgcolor: isActive
+                                ? (isDarkMode ? 'rgba(0, 122, 255, 0.28)' : '#ffffff')
+                                : (isDarkMode ? 'rgba(255,255,255,0.06)' : 'rgba(255,255,255,0.65)'),
+                            },
+                          }}
+                        >
+                          {option.label}
+                        </Box>
+                      );
+                    })}
+                  </Box>
+                </Box>
               )}
 
               {fieldPatternReviewPatterns.length > 0 ? (
