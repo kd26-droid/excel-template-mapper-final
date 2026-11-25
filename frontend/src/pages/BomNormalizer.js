@@ -18165,7 +18165,7 @@ const BomNormalizer = () => {
                         </ShadcnButton>
                         <Stack direction="row" alignItems="center" gap={1.25}>
                           <Button size="small" variant="outlined" startIcon={<TuneIcon sx={{ fontSize: 15 }} />} onClick={() => setMappingDrawerOpen(true)} sx={{ height: 34, px: 1.5, borderRadius: '999px', textTransform: 'none', fontSize: 12, fontWeight: 500, borderColor: normalizerTheme.borderStrong, color: normalizerTheme.text }}>
-                            Rules & Layout
+                            Detected setup
                           </Button>
                           <Button
                             variant="contained"
@@ -18190,10 +18190,99 @@ const BomNormalizer = () => {
                 {configureSubStep === 'review' && (
                   <Box sx={{ animation: 'fwStepSlideIn 0.3s ease both' }}>
                     {fieldPatternLoading && !(fieldPatternReviewContract?.displayRows || []).length ? (
-                      <Paper elevation={0} sx={{ p: 4, textAlign: 'center', border: `1px solid ${normalizerTheme.border}`, borderRadius: '14px', bgcolor: normalizerTheme.paper }}>
-                        <CircularProgress size={32} sx={{ mb: 1.5, color: '#007aff' }} />
-                        <Typography sx={{ fontSize: 15, fontWeight: 600, color: normalizerTheme.text }}>Analyzing patterns & generating FactWise interpretations...</Typography>
-                        <Typography sx={{ mt: 0.5, fontSize: 13, color: normalizerTheme.muted }}>Mapping spreadsheet rows against FactWise attributes.</Typography>
+                      <Paper
+                        elevation={0}
+                        sx={{
+                          py: { xs: 5, md: 6 },
+                          px: 3,
+                          textAlign: 'center',
+                          border: `1px solid ${normalizerTheme.border}`,
+                          borderRadius: '14px',
+                          background: isDarkMode
+                            ? 'radial-gradient(circle at 50% 15%, rgba(0, 122, 255, 0.14) 0%, rgba(15, 23, 42, 0.55) 70%)'
+                            : 'radial-gradient(circle at 50% 15%, rgba(0, 122, 255, 0.07) 0%, #ffffff 72%)',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          overflow: 'hidden',
+                          '@keyframes fwInterpretPulse': {
+                            '0%': { transform: 'scale(0.92)', opacity: 0.65 },
+                            '70%': { transform: 'scale(1.24)', opacity: 0 },
+                            '100%': { transform: 'scale(1.24)', opacity: 0 },
+                          },
+                          '@keyframes fwInterpretScan': {
+                            '0%': { top: '10%', opacity: 0.25 },
+                            '50%': { top: '80%', opacity: 1 },
+                            '100%': { top: '10%', opacity: 0.25 },
+                          },
+                          '@keyframes fwShimmerRow': {
+                            '0%, 100%': { opacity: 0.45 },
+                            '50%': { opacity: 0.9 },
+                          },
+                        }}
+                      >
+                        {/* Animated Pattern Scanner Visual */}
+                        <Box sx={{ position: 'relative', width: 88, height: 88, display: 'flex', alignItems: 'center', justifyContent: 'center', mb: 2.25 }}>
+                          <Box sx={{ position: 'absolute', inset: 0, borderRadius: '50%', border: '2px solid rgba(0, 122, 255, 0.32)', animation: 'fwInterpretPulse 2s cubic-bezier(0.16, 1, 0.3, 1) infinite' }} />
+                          <Box sx={{ position: 'absolute', inset: 8, borderRadius: '50%', bgcolor: isDarkMode ? 'rgba(0, 122, 255, 0.14)' : '#eff6ff', border: `1.5px solid ${isDarkMode ? 'rgba(96, 165, 250, 0.35)' : '#bfdbfe'}` }} />
+                          <Box sx={{ position: 'relative', width: 46, height: 42, borderRadius: '8px', bgcolor: isDarkMode ? '#1e293b' : '#ffffff', border: '1.5px solid #007aff', boxShadow: '0 8px 22px -6px rgba(0, 122, 255, 0.4)', display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: '5px', px: 0.9, overflow: 'hidden' }}>
+                            <Stack direction="row" gap={0.5}>
+                              <Box sx={{ height: 4, width: '35%', borderRadius: 2, bgcolor: '#10b981' }} />
+                              <Box sx={{ height: 4, width: '65%', borderRadius: 2, bgcolor: '#007aff', opacity: 0.75 }} />
+                            </Stack>
+                            <Stack direction="row" gap={0.5}>
+                              <Box sx={{ height: 3.5, width: '45%', borderRadius: 2, bgcolor: isDarkMode ? '#475569' : '#cbd5e1' }} />
+                              <Box sx={{ height: 3.5, width: '55%', borderRadius: 2, bgcolor: '#10b981', opacity: 0.65 }} />
+                            </Stack>
+                            <Stack direction="row" gap={0.5}>
+                              <Box sx={{ height: 3.5, width: '30%', borderRadius: 2, bgcolor: isDarkMode ? '#475569' : '#cbd5e1' }} />
+                              <Box sx={{ height: 3.5, width: '70%', borderRadius: 2, bgcolor: isDarkMode ? '#475569' : '#cbd5e1' }} />
+                            </Stack>
+                            <Box sx={{ position: 'absolute', left: 0, right: 0, height: 2.5, bgcolor: '#007aff', boxShadow: '0 0 8px 2px rgba(0, 122, 255, 0.65)', animation: 'fwInterpretScan 1.7s ease-in-out infinite' }} />
+                          </Box>
+                        </Box>
+
+                        <Typography sx={{ fontSize: 16.5, fontWeight: 600, letterSpacing: '-0.015em', color: normalizerTheme.text }}>
+                          Analyzing patterns & generating FactWise interpretations
+                        </Typography>
+                        <Typography sx={{ mt: 0.5, maxWidth: 460, fontSize: 13, color: normalizerTheme.muted, lineHeight: 1.5 }}>
+                          Matching spreadsheet rows against FactWise attributes and detecting part structures...
+                        </Typography>
+
+                        {/* Animated Gradient Progress Bar */}
+                        <Box sx={{ width: '100%', maxWidth: 360, mt: 2.25 }}>
+                          <LinearProgress
+                            sx={{
+                              height: 6,
+                              borderRadius: 999,
+                              bgcolor: isDarkMode ? 'rgba(148, 163, 184, 0.16)' : '#e2e8f0',
+                              '& .MuiLinearProgress-bar': {
+                                borderRadius: 999,
+                                background: 'linear-gradient(90deg, #007aff 0%, #10b981 50%, #007aff 100%)',
+                              },
+                            }}
+                          />
+                        </Box>
+
+                        {/* Live Stage Pills */}
+                        <Stack direction="row" alignItems="center" justifyContent="center" gap={1} flexWrap="wrap" sx={{ mt: 2 }}>
+                          <Chip size="small" label="✓ Columns mapped" sx={{ height: 24, fontSize: 11.5, fontWeight: 600, borderRadius: '999px', bgcolor: isDarkMode ? 'rgba(16, 185, 129, 0.16)' : '#dcfce7', color: isDarkMode ? '#6ee7b7' : '#15803d', border: `1px solid ${isDarkMode ? 'rgba(16, 185, 129, 0.35)' : '#86efac'}` }} />
+                          <Chip size="small" label="Detecting patterns..." sx={{ height: 24, fontSize: 11.5, fontWeight: 600, borderRadius: '999px', bgcolor: isDarkMode ? 'rgba(0, 122, 255, 0.16)' : '#eff6ff', color: isDarkMode ? '#93c5fd' : '#007aff', border: `1px solid ${isDarkMode ? 'rgba(59, 130, 246, 0.35)' : '#bfdbfe'}` }} />
+                          <Chip size="small" label="Building FactWise table" sx={{ height: 24, fontSize: 11.5, fontWeight: 500, borderRadius: '999px', bgcolor: isDarkMode ? 'rgba(148, 163, 184, 0.12)' : '#f1f5f9', color: normalizerTheme.muted, border: `1px solid ${normalizerTheme.border}` }} />
+                        </Stack>
+
+                        {/* Subtle Shimmer Table Skeleton Preview */}
+                        <Box sx={{ width: '100%', maxWidth: 640, mt: 3, p: 1.5, borderRadius: '10px', border: `1px solid ${normalizerTheme.border}`, bgcolor: isDarkMode ? 'rgba(15, 23, 42, 0.35)' : '#f8fafc' }}>
+                          {[0, 1, 2].map((i) => (
+                            <Stack key={i} direction="row" gap={1.5} alignItems="center" sx={{ py: 0.75, borderBottom: i < 2 ? `1px solid ${normalizerTheme.border}` : 'none', animation: `fwShimmerRow 1.6s ease-in-out ${i * 220}ms infinite` }}>
+                              <Box sx={{ width: 52, height: 10, borderRadius: 999, bgcolor: isDarkMode ? 'rgba(16, 185, 129, 0.25)' : '#d1fae5' }} />
+                              <Box sx={{ flex: 1.2, height: 10, borderRadius: 999, bgcolor: isDarkMode ? 'rgba(148, 163, 184, 0.2)' : '#e2e8f0' }} />
+                              <Box sx={{ flex: 2, height: 10, borderRadius: 999, bgcolor: isDarkMode ? 'rgba(148, 163, 184, 0.16)' : '#e2e8f0' }} />
+                              <Box sx={{ width: 64, height: 10, borderRadius: 999, bgcolor: isDarkMode ? 'rgba(0, 122, 255, 0.22)' : '#dbeafe' }} />
+                            </Stack>
+                          ))}
+                        </Box>
                       </Paper>
                     ) : (
                       <FieldPatternReviewTable
@@ -18228,24 +18317,47 @@ const BomNormalizer = () => {
                   </Box>
                 )}
 
-                {/* 3. Slide-Over Rules & Layout Drawer (replaces old inline Source preview + mapping grid) */}
-                <Drawer
-                  anchor="right"
+                {/* 3. Detected Setup Popup Dialog (clean, focused, no duplicate column mapping) */}
+                <Dialog
                   open={mappingDrawerOpen}
                   onClose={() => setMappingDrawerOpen(false)}
-                  PaperProps={{ sx: { width: { xs: '100%', sm: 600, md: 680 }, maxWidth: '100vw', bgcolor: normalizerTheme.paper, color: normalizerTheme.text, display: 'flex', flexDirection: 'column' } }}
+                  maxWidth="md"
+                  fullWidth
+                  PaperProps={{ sx: { borderRadius: '14px', bgcolor: normalizerTheme.paper, color: normalizerTheme.text, overflow: 'hidden' } }}
                 >
-                  <Box sx={{ px: 2.5, py: 1.75, borderBottom: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paperSoft, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                    <Box>
-                      <Typography sx={{ fontSize: 15, fontWeight: 600, color: normalizerTheme.text }}>Column mapping & detected setup</Typography>
-                      <Typography sx={{ mt: 0.2, fontSize: 12, color: normalizerTheme.muted }}>Adjust attribute mappings and detected parser layout.</Typography>
-                    </Box>
-                    <IconButton size="small" onClick={() => setMappingDrawerOpen(false)} sx={{ color: normalizerTheme.muted, '&:hover': { bgcolor: isDarkMode ? 'rgba(239, 68, 68, 0.16)' : '#fee2e2', color: isDarkMode ? '#f87171' : '#dc2626' } }}>
+                  <Box sx={{ px: 2.5, py: 2, borderBottom: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paperSoft, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1.5 }}>
+                    <Stack direction="row" alignItems="center" gap={1.35}>
+                      <Box sx={{ width: 36, height: 36, borderRadius: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, bgcolor: isDarkMode ? 'rgba(0, 122, 255, 0.16)' : '#eff6ff', border: `1px solid ${isDarkMode ? 'rgba(59, 130, 246, 0.35)' : '#bfdbfe'}` }}>
+                        <TuneIcon sx={{ fontSize: 18, color: isDarkMode ? '#60a5fa' : '#007aff' }} />
+                      </Box>
+                      <Box>
+                        <Stack direction="row" alignItems="center" gap={1}>
+                          <Typography sx={{ fontSize: 15.5, fontWeight: 600, letterSpacing: '-0.01em', color: normalizerTheme.text }}>
+                            Detected setup
+                          </Typography>
+                          {bomLayoutActive && (
+                            <Chip size="small" label="BOM layout active" sx={{ height: 20, fontSize: 11, fontWeight: 500, borderRadius: '999px', bgcolor: isDarkMode ? 'rgba(59, 130, 246, 0.16)' : '#eff6ff', color: isDarkMode ? '#93c5fd' : '#1d4ed8' }} />
+                          )}
+                        </Stack>
+                        <Typography sx={{ mt: 0.2, fontSize: 12, color: normalizerTheme.muted }}>
+                          Configure how MPN, Manufacturer, alternates, and BOM layouts are parsed.
+                        </Typography>
+                      </Box>
+                    </Stack>
+                    <IconButton size="small" onClick={() => setMappingDrawerOpen(false)} aria-label="Close detected setup" sx={{ color: normalizerTheme.muted, transition: 'background-color 0.15s ease, color 0.15s ease', '&:hover': { bgcolor: isDarkMode ? 'rgba(239, 68, 68, 0.16)' : '#fee2e2', color: isDarkMode ? '#f87171' : '#dc2626' } }}>
                       <CloseIcon sx={{ fontSize: 18 }} />
                     </IconButton>
                   </Box>
-                  <Box sx={[{ flex: 1, overflowY: 'auto', px: 2.5, py: 2.25 }, normalizerFieldSx, normalizerSelectSx, { '&:hover .MuiOutlinedInput-notchedOutline': { borderColor: `${normalizerTheme.borderStrong || normalizerTheme.border} !important` }, '& .MuiOutlinedInput-root:hover .MuiOutlinedInput-notchedOutline': { borderColor: `${isDarkMode ? 'rgba(148, 163, 184, 0.55)' : '#94a3b8'} !important` }, '& .MuiOutlinedInput-root.Mui-focused .MuiOutlinedInput-notchedOutline': { borderColor: '#007aff !important' } }]}>
-                <Grid container columnSpacing={1.25} rowSpacing={1.05} alignItems="flex-start">
+                  <Box
+                    sx={{
+                      p: 2.5,
+                      maxHeight: '70vh',
+                      overflowY: 'auto',
+                      '& .MuiOutlinedInput-root': { borderRadius: '9px', fontSize: '13px' },
+                      '& .MuiInputLabel-root': { fontSize: '12.5px' },
+                    }}
+                  >
+                <Grid container columnSpacing={1.25} rowSpacing={1.05} alignItems="flex-start" sx={{ display: 'none' }}>
                   {ROLE_FIELDS.map((field) => {
                     const selectedHeader = roles[field.key] || '';
                     const roleHeaderOptions = ['', ...visibleSourceHeaders];
@@ -18345,24 +18457,9 @@ const BomNormalizer = () => {
                     );
                   })}
                 </Grid>
-                <Paper
-                  elevation={0}
-                  className="rounded-lg border border-slate-200 bg-white shadow-sm"
-                  sx={{ mt: 2, p: 1.5 }}
-                >
-                  <Stack direction={{ xs: 'column', sm: 'row' }} alignItems={{ xs: 'flex-start', sm: 'center' }} justifyContent="space-between" gap={1}>
-                    <Typography sx={{ fontSize: 14, fontWeight: 550, color: normalizerTheme.text }}>Detected setup</Typography>
-                    {bomLayoutActive && (
-                      <Chip
-                        size="small"
-                        variant="outlined"
-                        label="BOM layout controls parsing"
-                        sx={{ height: 24, fontSize: 11.5, fontWeight: 500 }}
-                      />
-                    )}
-                  </Stack>
-                  <Grid container spacing={1.5} sx={{ mt: 0.75 }}>
-                    <Grid item xs={12} md={3}>
+                <Box>
+                  <Grid container columnSpacing={2.25} rowSpacing={2.25}>
+                    <Grid item xs={12} sm={6}>
                       <FormControl fullWidth size="small">
                         <InputLabel>Where are MPN, MFR and CPN?</InputLabel>
                         <Select
@@ -18404,7 +18501,7 @@ const BomNormalizer = () => {
                         </Select>
                       </FormControl>
                     </Grid>
-                    <Grid item xs={12} md={3}>
+                    <Grid item xs={12} sm={6}>
                       <FormControl fullWidth size="small">
                         <InputLabel>Row placement</InputLabel>
                         <Select
@@ -18450,7 +18547,7 @@ const BomNormalizer = () => {
                         </Select>
                       </FormControl>
                     </Grid>
-                    <Grid item xs={12} md={3}>
+                    <Grid item xs={12} sm={6}>
                       <FormControl fullWidth size="small">
                         <InputLabel>Where are alternates?</InputLabel>
                         <Select
@@ -18544,7 +18641,7 @@ const BomNormalizer = () => {
                       </FormControl>
                     </Grid>
                     {config.alternateLayout === 'same_group_rows' && !bomLayoutActive && (
-                      <Grid item xs={12} md={3}>
+                      <Grid item xs={12} sm={6}>
                         <FormControl fullWidth size="small" error={groupKeyRequired}>
                           <InputLabel>Group key column</InputLabel>
                           <Select
@@ -18567,7 +18664,7 @@ const BomNormalizer = () => {
                       </Grid>
                     )}
                     {config.alternateLayout === 'following_rows' && !bomLayoutActive && (
-                      <Grid item xs={12} md={3}>
+                      <Grid item xs={12} sm={6}>
                         <FormControl fullWidth size="small">
                           <InputLabel>Following-row alternate column</InputLabel>
                           <Select
@@ -18590,7 +18687,7 @@ const BomNormalizer = () => {
                       </Grid>
                     )}
                     {config.alternateLayout === 'following_rows' && followingRowsInsideCellAlternateInfo && !bomLayoutActive && (
-                      <Grid item xs={12} md={3}>
+                      <Grid item xs={12} sm={6}>
                         <Box
                           sx={{
                             height: '100%',
@@ -18657,7 +18754,7 @@ const BomNormalizer = () => {
                       </Grid>
                     )}
                     {showAlternateInheritanceControl && (
-                      <Grid item xs={12} md={3}>
+                      <Grid item xs={12} sm={6}>
                         <FormControl fullWidth size="small">
                           <InputLabel>Autofill from primary</InputLabel>
                           <Select
@@ -18724,7 +18821,7 @@ const BomNormalizer = () => {
                         </FormControl>
                       </Grid>
                     )}
-                    <Grid item xs={12} md={3}>
+                    <Grid item xs={12} sm={6}>
                       <FormControl fullWidth size="small">
                         <InputLabel>BOM layout</InputLabel>
                         <Select
@@ -18943,35 +19040,49 @@ const BomNormalizer = () => {
                       </Grid>
                     </Box>
                   )}
-                </Paper>
-                <Stack direction="row" justifyContent="space-between" sx={{ mt: 2 }}>
-                  <ShadcnButton
-                    variant="outline"
-                    onClick={handleBackFromSourceSetup}
-                    disabled={busy}
-                    className={darkOutlineButtonClass}
-                    style={darkOutlineButtonStyle}
-                  >
-                    Back
-                  </ShadcnButton>
-                  <Stack direction="row" gap={1}>
-                    <ShadcnButton
-                      variant="outline"
-                      disabled={fieldPatternLoading || !headers.length || !dataRows.length || groupKeyRequired}
-                      onClick={() => handleTeachFieldPattern()}
-                      className={isDarkMode ? darkOutlineButtonClass : 'border-blue-200 text-blue-700 hover:bg-blue-50'}
-                      style={darkOutlineButtonStyle}
+                </Box>
+                  </Box>
+                  <Box sx={{ px: 2.5, py: 1.75, borderTop: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paperSoft, display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 1.25 }}>
+                    <Button
+                      variant="outlined"
+                      onClick={() => setMappingDrawerOpen(false)}
+                      sx={{
+                        textTransform: 'none',
+                        borderRadius: '999px',
+                        px: 2.25,
+                        height: 34,
+                        fontSize: 12.5,
+                        fontWeight: 500,
+                        borderColor: normalizerTheme.borderStrong,
+                        color: normalizerTheme.text,
+                        '&:hover': {
+                          bgcolor: isDarkMode ? 'rgba(239, 68, 68, 0.16)' : '#fee2e2',
+                          color: isDarkMode ? '#f87171' : '#dc2626',
+                          borderColor: isDarkMode ? 'rgba(239, 68, 68, 0.4)' : '#fca5a5',
+                        },
+                      }}
                     >
-                      {fieldPatternLoading ? <CircularProgress size={14} /> : <TuneIcon fontSize="inherit" />}
-                      Review patterns
-                    </ShadcnButton>
-                  </Stack>
-                </Stack>
+                      Cancel
+                    </Button>
+                    <Button
+                      variant="contained"
+                      onClick={() => setMappingDrawerOpen(false)}
+                      sx={{
+                        textTransform: 'none',
+                        borderRadius: '999px',
+                        px: 2.75,
+                        height: 34,
+                        fontSize: 12.5,
+                        fontWeight: 500,
+                        bgcolor: '#007aff',
+                        boxShadow: '0 4px 12px -4px rgba(0, 122, 255, 0.45)',
+                        '&:hover': { bgcolor: '#0062cc', boxShadow: '0 6px 16px -4px rgba(0, 122, 255, 0.55)' },
+                      }}
+                    >
+                      Save & Close
+                    </Button>
                   </Box>
-                  <Box sx={{ px: 2.5, py: 1.5, borderTop: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paperSoft, display: 'flex', justifyContent: 'flex-end' }}>
-                    <Button variant="contained" onClick={() => setMappingDrawerOpen(false)} sx={{ textTransform: 'none', borderRadius: '999px', px: 2.5, height: 34, bgcolor: '#007aff', boxShadow: 'none' }}>Done</Button>
-                  </Box>
-                </Drawer>
+                </Dialog>
               </Stack>
             )}
 
