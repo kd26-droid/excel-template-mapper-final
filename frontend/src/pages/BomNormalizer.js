@@ -20404,226 +20404,377 @@ const BomNormalizer = () => {
                   <AccordionSummary
                     expandIcon={<ExpandMoreIcon />}
                     sx={{
-                      minHeight: 50,
+                      minHeight: 54,
                       px: 0,
-                      '&.Mui-expanded': { minHeight: 50 },
+                      '&.Mui-expanded': { minHeight: 54 },
                       '& .MuiAccordionSummary-content': { my: 1 },
                       '& .MuiAccordionSummary-content.Mui-expanded': { my: 1 },
                     }}
                   >
-                    <Box>
-                      <Typography sx={{ fontSize: 13, fontWeight: 550, color: normalizerTheme.text }}>
-                        Parsing and cleanup
-                      </Typography>
-                      <Typography sx={{ fontSize: 11.25, fontWeight: 400, color: normalizerTheme.muted }}>
-                        Apply one backend parsing rule to every detected pattern for the selected field.
-                      </Typography>
-                    </Box>
-                  </AccordionSummary>
-                  <AccordionDetails sx={{ px: 0, pt: 0, pb: 0.5 }}>
-                    <Stack direction="row" justifyContent="flex-end" sx={{ mb: 1 }}>
-                    <Button
-                      variant="contained"
-                      startIcon={bulkPatternControlsLoading ? <CircularProgress size={15} color="inherit" /> : <TuneIcon />}
-                      disabled={!selectedFieldPatternRuleOption || !bulkPatternControlsChanged || bulkPatternControlsLoading}
-                      onClick={handleApplyBulkPatternControls}
-                      sx={fieldPatternPrimaryButtonSx}
-                    >
-                      Apply to all patterns
-                    </Button>
-                    </Stack>
-                  <Box
-                    sx={{
-                      display: 'grid',
-                      gridTemplateColumns: {
-                        xs: '1fr',
-                        md: 'minmax(220px, 0.85fr) minmax(0, 3.15fr)',
-                      },
-                      gap: 1,
-                      alignItems: 'start',
-                    }}
-                  >
-                    <Autocomplete
-                      size="small"
-                      options={bulkPatternParsingContract.fields || []}
-                      value={selectedFieldPatternRuleOption}
-                      onChange={(_, option) => {
-                        setFieldPatternSelectedRuleField(option?.key || '');
-                        setBulkPatternControls({});
-                        setBulkPatternControlsChanged(false);
-                      }}
-                      getOptionLabel={(option) => `${option?.label || ''} - ${option?.sourceColumn || ''}`}
-                      isOptionEqualToValue={(option, value) => option.key === value.key}
-                      renderInput={(params) => <TextField {...params} label="Field and source column" />}
-                      sx={{ minWidth: 0 }}
-                    />
-                    <Box
-                      sx={{
-                        display: 'grid',
-                        gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, minmax(0, 1fr))', lg: 'repeat(4, minmax(0, 1fr))' },
-                        gap: 1,
-                        minWidth: 0,
-                      }}
-                    >
-                      <FormControl size="small" sx={{ minWidth: 0 }}>
-                        <InputLabel>Prefix cleanup</InputLabel>
-                        <Select
-                          label="Prefix cleanup"
-                          value={bulkPatternControls.prefixMode || 'none'}
-                          onChange={(event) => {
-                            setBulkPatternControls((current) => ({ ...current, prefixMode: event.target.value }));
-                            setBulkPatternControlsChanged(true);
-                          }}
-                        >
-                          {(bulkPatternParsingContract.prefixModeOptions || []).map((option) => (
-                            <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
-                          ))}
-                        </Select>
-                      </FormControl>
-                      <FormControl size="small" sx={{ minWidth: 0 }}>
-                        <InputLabel>Suffix cleanup</InputLabel>
-                        <Select
-                          label="Suffix cleanup"
-                          value={bulkPatternControls.suffixMode || 'none'}
-                          onChange={(event) => {
-                            setBulkPatternControls((current) => ({ ...current, suffixMode: event.target.value }));
-                            setBulkPatternControlsChanged(true);
-                          }}
-                        >
-                          {(bulkPatternParsingContract.suffixModeOptions || []).map((option) => (
-                            <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
-                          ))}
-                        </Select>
-                      </FormControl>
-                      <FormControl size="small" sx={{ minWidth: 0 }}>
-                        <InputLabel>Alternate separator</InputLabel>
-                        <Select
-                          label="Alternate separator"
-                          value={bulkPatternControls.alternateDelimiter || ''}
-                          onChange={(event) => {
-                            setBulkPatternControls((current) => ({ ...current, alternateDelimiter: event.target.value }));
-                            setBulkPatternControlsChanged(true);
-                          }}
-                        >
-                          {(bulkPatternParsingContract.alternateSeparatorOptions || []).map((option) => (
-                            <MenuItem key={option.value || 'empty'} value={option.value}>{option.label}</MenuItem>
-                          ))}
-                        </Select>
-                      </FormControl>
-                      <FormControl size="small" sx={{ minWidth: 0 }}>
-                        <InputLabel>Alternate value mode</InputLabel>
-                        <Select
-                          label="Alternate value mode"
-                          value={bulkPatternControls.alternateMode || ''}
-                          onChange={(event) => {
-                            setBulkPatternControls((current) => ({ ...current, alternateMode: event.target.value }));
-                            setBulkPatternControlsChanged(true);
-                          }}
-                        >
-                          <MenuItem value=""><em>Unchanged</em></MenuItem>
-                          {(bulkPatternParsingContract.alternateModeOptions || []).map((option) => (
-                            <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
-                          ))}
-                        </Select>
-                      </FormControl>
-                    </Box>
-                  </Box>
-                  <Box
-                    sx={{
-                      mt: 1,
-                      ml: { xs: 0, md: 'calc(21.25% + 8px)' },
-                      display: 'grid',
-                      gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, minmax(0, 1fr))' },
-                      gap: 1,
-                    }}
-                  >
-                    <TextField
-                      size="small"
-                      label="Replace text"
-                      value={bulkPatternControls.replaceText || ''}
-                      onChange={(event) => {
-                        setBulkPatternControls((current) => ({ ...current, replaceText: event.target.value }));
-                        setBulkPatternControlsChanged(true);
-                      }}
-                    />
-                    <TextField
-                      size="small"
-                      label="Replace with"
-                      value={bulkPatternControls.replaceWith || ''}
-                      onChange={(event) => {
-                        setBulkPatternControls((current) => ({ ...current, replaceWith: event.target.value }));
-                        setBulkPatternControlsChanged(true);
-                      }}
-                    />
-                  </Box>
-                  {(bulkPatternControls.prefixMode && !['none', 'recognized_mpn_start'].includes(bulkPatternControls.prefixMode))
-                    || (bulkPatternControls.suffixMode && bulkPatternControls.suffixMode !== 'none')
-                    || bulkPatternControls.alternateDelimiter === 'custom'
-                    || bulkPatternControls.alternateMode === 'append' ? (
+                    <Stack direction="row" alignItems="center" gap={1.25}>
                       <Box
                         sx={{
-                          mt: 1,
-                          display: 'grid',
-                          gridTemplateColumns: {
-                            xs: '1fr',
-                            sm: 'repeat(2, minmax(0, 1fr))',
-                            md: 'minmax(220px, 0.85fr) repeat(4, minmax(0, 0.7875fr))',
-                          },
-                          gap: 1,
+                          width: 32,
+                          height: 32,
+                          borderRadius: '9px',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          bgcolor: isDarkMode ? 'rgba(0,122,255,0.16)' : '#eff6ff',
+                          color: '#007aff',
+                          flexShrink: 0,
                         }}
                       >
-                        {bulkPatternControls.prefixMode && !['none', 'recognized_mpn_start'].includes(bulkPatternControls.prefixMode) && (
-                          <TextField
-                            size="small"
-                            label={bulkPatternControls.prefixMode === 'first_n_chars' ? 'Number of prefix characters' : 'Prefix text or delimiter'}
-                            type={bulkPatternControls.prefixMode === 'first_n_chars' ? 'number' : 'text'}
-                            value={bulkPatternControls.stripPrefix || ''}
-                            onChange={(event) => {
-                              setBulkPatternControls((current) => ({ ...current, stripPrefix: event.target.value }));
-                              setBulkPatternControlsChanged(true);
-                            }}
-                            sx={{ gridColumn: { xs: 'auto', md: '2' } }}
-                          />
-                        )}
-                        {bulkPatternControls.suffixMode && bulkPatternControls.suffixMode !== 'none' && (
-                          <TextField
-                            size="small"
-                            label={bulkPatternControls.suffixMode === 'last_n_chars' ? 'Number of suffix characters' : 'Suffix text or delimiter'}
-                            type={bulkPatternControls.suffixMode === 'last_n_chars' ? 'number' : 'text'}
-                            value={bulkPatternControls.stripSuffix || ''}
-                            onChange={(event) => {
-                              setBulkPatternControls((current) => ({ ...current, stripSuffix: event.target.value }));
-                              setBulkPatternControlsChanged(true);
-                            }}
-                            sx={{ gridColumn: { xs: 'auto', md: '3' } }}
-                          />
-                        )}
-                        {bulkPatternControls.alternateDelimiter === 'custom' && (
-                          <TextField
-                            size="small"
-                            label="Custom delimiter"
-                            value={bulkPatternControls.customAlternateDelimiter || ''}
-                            onChange={(event) => {
-                              setBulkPatternControls((current) => ({ ...current, customAlternateDelimiter: event.target.value }));
-                              setBulkPatternControlsChanged(true);
-                            }}
-                            sx={{ gridColumn: { xs: 'auto', md: '4' } }}
-                          />
-                        )}
-                        {bulkPatternControls.alternateMode === 'append' && (
-                          <TextField
-                            size="small"
-                            label="Alternate-only separator"
-                            value={bulkPatternControls.alternateJoiner || ''}
-                            onChange={(event) => {
-                              setBulkPatternControls((current) => ({ ...current, alternateJoiner: event.target.value }));
-                              setBulkPatternControlsChanged(true);
-                            }}
-                            sx={{ gridColumn: { xs: 'auto', md: '5' } }}
-                          />
-                        )}
+                        <TuneIcon sx={{ fontSize: 17 }} />
                       </Box>
-                    ) : null}
+                      <Box>
+                        <Typography sx={{ fontSize: 13.25, fontWeight: 600, color: normalizerTheme.text }}>
+                          Parsing and cleanup
+                        </Typography>
+                        <Typography sx={{ fontSize: 11.5, fontWeight: 400, color: normalizerTheme.muted }}>
+                          Clean up prefixes, suffixes, text, or alternate separators across all patterns for a field.
+                        </Typography>
+                      </Box>
+                    </Stack>
+                  </AccordionSummary>
+                  <AccordionDetails sx={{ px: 0, pt: 0.75, pb: 1.5 }}>
+                    <Stack gap={1.5}>
+                      {/* Step 1: Target Field */}
+                      <Box
+                        sx={{
+                          p: 1.25,
+                          borderRadius: '10px',
+                          border: `1px solid ${isDarkMode ? normalizerTheme.border : '#e2e8f0'}`,
+                          bgcolor: isDarkMode ? 'rgba(255,255,255,0.025)' : '#f8fafc',
+                          display: 'flex',
+                          flexDirection: { xs: 'column', sm: 'row' },
+                          alignItems: { xs: 'stretch', sm: 'center' },
+                          justifyContent: 'space-between',
+                          gap: 1.25,
+                        }}
+                      >
+                        <Stack direction="row" alignItems="center" gap={1}>
+                          <Box
+                            sx={{
+                              width: 22,
+                              height: 22,
+                              borderRadius: '999px',
+                              bgcolor: '#007aff',
+                              color: '#ffffff',
+                              fontSize: 11.5,
+                              fontWeight: 700,
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              flexShrink: 0,
+                            }}
+                          >
+                            1
+                          </Box>
+                          <Box>
+                            <Typography sx={{ fontSize: 12.25, fontWeight: 600, color: normalizerTheme.text }}>
+                              Target field
+                            </Typography>
+                            <Typography sx={{ fontSize: 11, color: normalizerTheme.muted }}>
+                              Choose which mapped column these cleanup rules will apply to.
+                            </Typography>
+                          </Box>
+                        </Stack>
+                        <Autocomplete
+                          size="small"
+                          options={bulkPatternParsingContract.fields || []}
+                          value={selectedFieldPatternRuleOption}
+                          onChange={(_, option) => {
+                            setFieldPatternSelectedRuleField(option?.key || '');
+                            setBulkPatternControls({});
+                            setBulkPatternControlsChanged(false);
+                          }}
+                          getOptionLabel={(option) => `${option?.label || ''} — ${option?.sourceColumn || ''}`}
+                          isOptionEqualToValue={(option, value) => option.key === value.key}
+                          renderInput={(params) => (
+                            <TextField
+                              {...params}
+                              placeholder="Select a mapped field"
+                              inputProps={{ ...params.inputProps, 'aria-label': 'Field and source column' }}
+                            />
+                          )}
+                          sx={{
+                            minWidth: { xs: '100%', sm: 290 },
+                            '& .MuiOutlinedInput-root': {
+                              borderRadius: '9px',
+                              bgcolor: isDarkMode ? normalizerTheme.paper : '#ffffff',
+                            },
+                          }}
+                        />
+                      </Box>
+
+                      {/* Step 2: Grouped Cleanup Cards */}
+                      <Box
+                        sx={{
+                          display: 'grid',
+                          gridTemplateColumns: { xs: '1fr', md: 'repeat(3, minmax(0, 1fr))' },
+                          gap: 1.25,
+                        }}
+                      >
+                        {/* Group A: Trim Prefix & Suffix */}
+                        <Box
+                          sx={{
+                            p: 1.4,
+                            borderRadius: '10px',
+                            border: `1px solid ${isDarkMode ? normalizerTheme.border : '#e2e8f0'}`,
+                            bgcolor: isDarkMode ? 'rgba(255,255,255,0.015)' : '#ffffff',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: 1.15,
+                          }}
+                        >
+                          <Box>
+                            <Typography sx={{ fontSize: 12.25, fontWeight: 600, color: normalizerTheme.text }}>
+                              Trim prefix & suffix
+                            </Typography>
+                            <Typography sx={{ fontSize: 11, color: normalizerTheme.muted }}>
+                              Remove extra characters or codes from the start or end.
+                            </Typography>
+                          </Box>
+                          <FormControl size="small" fullWidth>
+                            <InputLabel>Prefix cleanup</InputLabel>
+                            <Select
+                              label="Prefix cleanup"
+                              value={bulkPatternControls.prefixMode || 'none'}
+                              onChange={(event) => {
+                                setBulkPatternControls((current) => ({ ...current, prefixMode: event.target.value }));
+                                setBulkPatternControlsChanged(true);
+                              }}
+                            >
+                              {(bulkPatternParsingContract.prefixModeOptions || []).map((option) => (
+                                <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
+                              ))}
+                            </Select>
+                          </FormControl>
+                          {bulkPatternControls.prefixMode && !['none', 'recognized_mpn_start'].includes(bulkPatternControls.prefixMode) && (
+                            <TextField
+                              size="small"
+                              fullWidth
+                              label={bulkPatternControls.prefixMode === 'first_n_chars' ? 'Number of prefix characters' : 'Prefix text or delimiter'}
+                              type={bulkPatternControls.prefixMode === 'first_n_chars' ? 'number' : 'text'}
+                              value={bulkPatternControls.stripPrefix || ''}
+                              onChange={(event) => {
+                                setBulkPatternControls((current) => ({ ...current, stripPrefix: event.target.value }));
+                                setBulkPatternControlsChanged(true);
+                              }}
+                            />
+                          )}
+                          <FormControl size="small" fullWidth>
+                            <InputLabel>Suffix cleanup</InputLabel>
+                            <Select
+                              label="Suffix cleanup"
+                              value={bulkPatternControls.suffixMode || 'none'}
+                              onChange={(event) => {
+                                setBulkPatternControls((current) => ({ ...current, suffixMode: event.target.value }));
+                                setBulkPatternControlsChanged(true);
+                              }}
+                            >
+                              {(bulkPatternParsingContract.suffixModeOptions || []).map((option) => (
+                                <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
+                              ))}
+                            </Select>
+                          </FormControl>
+                          {bulkPatternControls.suffixMode && bulkPatternControls.suffixMode !== 'none' && (
+                            <TextField
+                              size="small"
+                              fullWidth
+                              label={bulkPatternControls.suffixMode === 'last_n_chars' ? 'Number of suffix characters' : 'Suffix text or delimiter'}
+                              type={bulkPatternControls.suffixMode === 'last_n_chars' ? 'number' : 'text'}
+                              value={bulkPatternControls.stripSuffix || ''}
+                              onChange={(event) => {
+                                setBulkPatternControls((current) => ({ ...current, stripSuffix: event.target.value }));
+                                setBulkPatternControlsChanged(true);
+                              }}
+                            />
+                          )}
+                        </Box>
+
+                        {/* Group B: Find & Replace */}
+                        <Box
+                          sx={{
+                            p: 1.4,
+                            borderRadius: '10px',
+                            border: `1px solid ${isDarkMode ? normalizerTheme.border : '#e2e8f0'}`,
+                            bgcolor: isDarkMode ? 'rgba(255,255,255,0.015)' : '#ffffff',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: 1.15,
+                          }}
+                        >
+                          <Box>
+                            <Typography sx={{ fontSize: 12.25, fontWeight: 600, color: normalizerTheme.text }}>
+                              Find & replace text
+                            </Typography>
+                            <Typography sx={{ fontSize: 11, color: normalizerTheme.muted }}>
+                              Swap repeated text, or leave &ldquo;Replace with&rdquo; blank to delete it.
+                            </Typography>
+                          </Box>
+                          <TextField
+                            size="small"
+                            fullWidth
+                            label="Replace text"
+                            placeholder="e.g. CORP, INC."
+                            value={bulkPatternControls.replaceText || ''}
+                            onChange={(event) => {
+                              setBulkPatternControls((current) => ({ ...current, replaceText: event.target.value }));
+                              setBulkPatternControlsChanged(true);
+                            }}
+                          />
+                          <TextField
+                            size="small"
+                            fullWidth
+                            label="Replace with"
+                            placeholder="Leave blank to remove"
+                            value={bulkPatternControls.replaceWith || ''}
+                            onChange={(event) => {
+                              setBulkPatternControls((current) => ({ ...current, replaceWith: event.target.value }));
+                              setBulkPatternControlsChanged(true);
+                            }}
+                          />
+                        </Box>
+
+                        {/* Group C: Alternate Values */}
+                        <Box
+                          sx={{
+                            p: 1.4,
+                            borderRadius: '10px',
+                            border: `1px solid ${isDarkMode ? normalizerTheme.border : '#e2e8f0'}`,
+                            bgcolor: isDarkMode ? 'rgba(255,255,255,0.015)' : '#ffffff',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: 1.15,
+                          }}
+                        >
+                          <Box>
+                            <Typography sx={{ fontSize: 12.25, fontWeight: 600, color: normalizerTheme.text }}>
+                              Alternate values
+                            </Typography>
+                            <Typography sx={{ fontSize: 11, color: normalizerTheme.muted }}>
+                              Control how multiple values in the same cell are split.
+                            </Typography>
+                          </Box>
+                          <FormControl size="small" fullWidth>
+                            <InputLabel>Alternate separator</InputLabel>
+                            <Select
+                              label="Alternate separator"
+                              value={bulkPatternControls.alternateDelimiter || ''}
+                              onChange={(event) => {
+                                setBulkPatternControls((current) => ({ ...current, alternateDelimiter: event.target.value }));
+                                setBulkPatternControlsChanged(true);
+                              }}
+                            >
+                              {(bulkPatternParsingContract.alternateSeparatorOptions || []).map((option) => (
+                                <MenuItem key={option.value || 'empty'} value={option.value}>{option.label}</MenuItem>
+                              ))}
+                            </Select>
+                          </FormControl>
+                          {bulkPatternControls.alternateDelimiter === 'custom' && (
+                            <TextField
+                              size="small"
+                              fullWidth
+                              label="Custom delimiter"
+                              placeholder="e.g. ; or |"
+                              value={bulkPatternControls.customAlternateDelimiter || ''}
+                              onChange={(event) => {
+                                setBulkPatternControls((current) => ({ ...current, customAlternateDelimiter: event.target.value }));
+                                setBulkPatternControlsChanged(true);
+                              }}
+                            />
+                          )}
+                          <FormControl size="small" fullWidth>
+                            <InputLabel>Alternate value mode</InputLabel>
+                            <Select
+                              label="Alternate value mode"
+                              value={bulkPatternControls.alternateMode || ''}
+                              onChange={(event) => {
+                                setBulkPatternControls((current) => ({ ...current, alternateMode: event.target.value }));
+                                setBulkPatternControlsChanged(true);
+                              }}
+                            >
+                              <MenuItem value=""><em>Unchanged</em></MenuItem>
+                              {(bulkPatternParsingContract.alternateModeOptions || []).map((option) => (
+                                <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
+                              ))}
+                            </Select>
+                          </FormControl>
+                          {bulkPatternControls.alternateMode === 'append' && (
+                            <TextField
+                              size="small"
+                              fullWidth
+                              label="Alternate-only separator"
+                              placeholder="e.g. , "
+                              value={bulkPatternControls.alternateJoiner || ''}
+                              onChange={(event) => {
+                                setBulkPatternControls((current) => ({ ...current, alternateJoiner: event.target.value }));
+                                setBulkPatternControlsChanged(true);
+                              }}
+                            />
+                          )}
+                        </Box>
+                      </Box>
+
+                      {/* Action Footer */}
+                      <Stack
+                        direction="row"
+                        alignItems="center"
+                        justifyContent="space-between"
+                        flexWrap="wrap"
+                        gap={1}
+                        sx={{
+                          pt: 1,
+                          borderTop: `1px solid ${isDarkMode ? normalizerTheme.border : '#e2e8f0'}`,
+                        }}
+                      >
+                        <Typography sx={{ fontSize: 11.5, color: normalizerTheme.muted }}>
+                          {selectedFieldPatternRuleOption
+                            ? bulkPatternControlsChanged
+                              ? `Ready to apply cleanup rules to all ${selectedFieldPatternRuleOption.label} patterns.`
+                              : `Adjust any rule above to update all ${selectedFieldPatternRuleOption.label} patterns.`
+                            : 'Select a target field above to configure cleanup rules.'}
+                        </Typography>
+                        <Stack direction="row" alignItems="center" gap={1}>
+                          {bulkPatternControlsChanged && (
+                            <Button
+                              variant="outlined"
+                              size="small"
+                              onClick={() => {
+                                setBulkPatternControls({});
+                                setBulkPatternControlsChanged(false);
+                              }}
+                              sx={{
+                                ...fieldPatternSecondaryButtonSx,
+                                borderRadius: '999px',
+                                '&:hover': {
+                                  bgcolor: isDarkMode ? 'rgba(239,68,68,0.16)' : '#fee2e2',
+                                  borderColor: isDarkMode ? 'rgba(248,113,113,0.45)' : '#fca5a5',
+                                  color: isDarkMode ? '#fca5a5' : '#dc2626',
+                                },
+                              }}
+                            >
+                              Reset
+                            </Button>
+                          )}
+                          <Button
+                            variant="contained"
+                            startIcon={bulkPatternControlsLoading ? <CircularProgress size={15} color="inherit" /> : <TuneIcon />}
+                            disabled={!selectedFieldPatternRuleOption || !bulkPatternControlsChanged || bulkPatternControlsLoading}
+                            onClick={handleApplyBulkPatternControls}
+                            sx={{
+                              ...fieldPatternPrimaryButtonSx,
+                              borderRadius: '999px',
+                              px: 2.25,
+                            }}
+                          >
+                            Apply to all patterns
+                          </Button>
+                        </Stack>
+                      </Stack>
+                    </Stack>
                   </AccordionDetails>
                 </Accordion>
               </Paper>
