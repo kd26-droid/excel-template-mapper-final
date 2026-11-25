@@ -9235,33 +9235,19 @@ const FieldPatternReviewTable = ({
         justifyContent="space-between"
         alignItems={{ xs: 'stretch', md: 'center' }}
         gap={1.25}
-        sx={{ px: 1.75, py: 1.25, borderBottom: `1px solid ${theme.border}`, bgcolor: theme.paperSoft }}
+        sx={{ px: 2, py: 1.4, borderBottom: `1px solid ${theme.border}`, bgcolor: theme.paperSoft }}
       >
-        {/* Left side: Mapped rows status badge & Column mapping guidance */}
-        <Stack direction="row" alignItems="center" gap={1.25} flexWrap="wrap">
-          <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.65, px: 1.25, py: 0.45, borderRadius: '999px', bgcolor: isReviewDark ? 'rgba(16, 185, 129, 0.14)' : '#ecfdf5', border: `1px solid ${isReviewDark ? 'rgba(16, 185, 129, 0.3)' : '#a7f3d0'}` }}>
-            <CheckCircleOutlineIcon sx={{ fontSize: 15, color: isReviewDark ? '#34d399' : '#059669' }} />
-            <Typography sx={{ fontSize: 12.5, fontWeight: 600, color: isReviewDark ? '#6ee7b7' : '#047857', lineHeight: 1 }}>
-              {backendDisplayRows.length} rows mapped
-            </Typography>
-          </Box>
-          {onConfigureMapping && (
-            <Typography sx={{ fontSize: 12.5, color: theme.muted }}>
-              Want to adjust or add fields? Use{' '}
-              <Box component="span" onClick={onConfigureMapping} sx={{ color: isReviewDark ? '#60a5fa' : '#007aff', fontWeight: 500, cursor: 'pointer', '&:hover': { textDecoration: 'underline' } }}>
-                Column mapping
-              </Box>.
-            </Typography>
-          )}
-        </Stack>
+        <Box sx={{ minWidth: 0 }}>
+          <Typography sx={{ fontSize: 15, fontWeight: 600, letterSpacing: '-0.01em', color: theme.text, lineHeight: 1.3 }}>
+            Review all rows
+          </Typography>
+          <Typography sx={{ mt: 0.2, fontSize: 12, fontWeight: 400, color: theme.muted, lineHeight: 1.35 }}>
+            Compare every customer row with the backend-owned FactWise interpretation.
+          </Typography>
+        </Box>
 
-        {/* Right side: Column mapping, View detected patterns & Search */}
+        {/* Right side: View detected patterns & Search */}
         <Stack direction={{ xs: 'column', sm: 'row' }} alignItems="center" gap={1} sx={{ width: { xs: '100%', md: 'auto' } }}>
-          {onConfigureMapping && (
-            <Button variant="outlined" size="small" startIcon={<ViewColumnOutlinedIcon sx={{ fontSize: 16 }} />} onClick={onConfigureMapping} sx={{ textTransform: 'none', fontSize: '12.5px', fontWeight: 500, borderColor: isReviewDark ? 'rgba(148, 163, 184, 0.3)' : '#cbd5e1', color: isReviewDark ? '#cbd5e1' : '#334155', bgcolor: isReviewDark ? 'rgba(255, 255, 255, 0.04)' : '#ffffff', whiteSpace: 'nowrap', height: 36, px: 1.5 }}>
-              Column mapping ({mappedColumnCount || 0})
-            </Button>
-          )}
           {onViewPatterns && (
             <Button variant="outlined" size="small" startIcon={<TuneIcon sx={{ fontSize: 16 }} />} onClick={onViewPatterns} sx={{ textTransform: 'none', fontSize: '12.5px', fontWeight: 500, borderColor: isReviewDark ? 'rgba(148, 163, 184, 0.3)' : '#bfdbfe', color: isReviewDark ? '#93c5fd' : '#1d4ed8', bgcolor: isReviewDark ? 'rgba(37, 99, 235, 0.1)' : '#eff6ff', whiteSpace: 'nowrap', height: 36, px: 1.5 }}>
               View detected patterns ({Number(contract?.summary?.patternCount || contract?.patterns?.length || 0)})
@@ -17368,7 +17354,7 @@ const BomNormalizer = () => {
                       </Paper>
                     )}
                   </Stack>
-                ) : (busy || combineBusy) ? (
+                ) : (
                   <Box
                     sx={{
                       py: { xs: 5.5, md: 7 },
@@ -17425,49 +17411,6 @@ const BomNormalizer = () => {
                         <Chip key={stage} size="small" label={stage} sx={{ height: 24, fontSize: 11.5, fontWeight: 500, borderRadius: '999px', bgcolor: idx === 0 ? (isDarkMode ? 'rgba(16, 185, 129, 0.16)' : '#ecfdf5') : (isDarkMode ? 'rgba(0, 122, 255, 0.14)' : '#eff6ff'), color: idx === 0 ? (isDarkMode ? '#6ee7b7' : '#047857') : (isDarkMode ? '#93c5fd' : '#1d4ed8'), border: `1px solid ${idx === 0 ? (isDarkMode ? 'rgba(16, 185, 129, 0.3)' : '#a7f3d0') : (isDarkMode ? 'rgba(59, 130, 246, 0.3)' : '#bfdbfe')}` }} />
                       ))}
                     </Stack>
-                  </Box>
-                ) : (
-                  <Box
-                    component="label"
-                    sx={{
-                      py: { xs: 5, md: 6.5 },
-                      px: 3,
-                      borderRadius: '16px',
-                      border: `1.5px dashed ${isDarkMode ? 'rgba(96, 165, 250, 0.38)' : '#93c5fd'}`,
-                      background: isDarkMode
-                        ? 'radial-gradient(circle at 50% 0%, rgba(0, 122, 255, 0.14) 0%, rgba(15, 23, 42, 0.45) 70%)'
-                        : 'radial-gradient(circle at 50% 0%, rgba(0, 122, 255, 0.08) 0%, #f8fafc 72%)',
-                      display: 'flex',
-                      flexDirection: 'column',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      textAlign: 'center',
-                      cursor: 'pointer',
-                      transition: 'all 0.25s cubic-bezier(0.16, 1, 0.3, 1)',
-                      '@keyframes fwUploadFloat': { '0%, 100%': { transform: 'translateY(0px)' }, '50%': { transform: 'translateY(-6px)' } },
-                      '@keyframes fwUploadHalo': { '0%': { boxShadow: '0 0 0 0 rgba(0, 122, 255, 0.28)' }, '70%': { boxShadow: '0 0 0 14px rgba(0, 122, 255, 0)' }, '100%': { boxShadow: '0 0 0 0 rgba(0, 122, 255, 0)' } },
-                      '&:hover': { borderColor: '#007aff', boxShadow: isDarkMode ? '0 18px 40px -24px rgba(0, 122, 255, 0.45)' : '0 18px 40px -24px rgba(0, 122, 255, 0.28)' },
-                    }}
-                  >
-                    <input hidden multiple type="file" accept=".xlsx,.xls,.xlsm,.csv,.pdf" onChange={handleCombineFilesChange} />
-                    <Box sx={{ width: 68, height: 68, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', mb: 2, bgcolor: isDarkMode ? 'rgba(0, 122, 255, 0.18)' : '#ffffff', border: `1.5px solid ${isDarkMode ? 'rgba(96, 165, 250, 0.4)' : '#bfdbfe'}`, animation: 'fwUploadHalo 2.4s infinite' }}>
-                      <CloudUploadIcon sx={{ fontSize: 32, color: '#007aff', animation: 'fwUploadFloat 2.6s ease-in-out infinite' }} />
-                    </Box>
-                    <Typography sx={{ fontSize: 16, fontWeight: 600, color: normalizerTheme.text }}>
-                      Drop your BOM file here, or browse
-                    </Typography>
-                    <Typography sx={{ mt: 0.6, maxWidth: 460, fontSize: 13, color: normalizerTheme.muted, lineHeight: 1.5 }}>
-                      Choose a source file to start. After upload, you can continue directly to mapping or add another source to merge.
-                    </Typography>
-                    <Stack direction="row" alignItems="center" justifyContent="center" gap={0.85} flexWrap="wrap" sx={{ mt: 2 }}>
-                      {['XLSX', 'XLS', 'CSV', 'PDF'].map((ext) => (
-                        <Chip key={ext} size="small" label={ext} sx={{ height: 22, fontSize: 11, fontWeight: 600, borderRadius: '6px', bgcolor: isDarkMode ? 'rgba(148, 163, 184, 0.14)' : '#ffffff', color: isDarkMode ? '#cbd5e1' : '#475569', border: `1px solid ${normalizerTheme.border}` }} />
-                      ))}
-                    </Stack>
-                    <Box sx={{ mt: 2.5, px: 2.75, py: 0.95, borderRadius: '999px', bgcolor: '#007aff', color: '#ffffff', fontSize: 13, fontWeight: 500, display: 'inline-flex', alignItems: 'center', gap: 0.85, boxShadow: '0 6px 18px -6px rgba(0, 122, 255, 0.55)' }}>
-                      <CloudUploadIcon sx={{ fontSize: 17 }} />
-                      Choose source file
-                    </Box>
                   </Box>
                 )}
               </Paper>
@@ -20292,15 +20235,29 @@ const BomNormalizer = () => {
         <DialogTitle sx={{ px: 2.75, py: 1.7, borderBottom: `1px solid ${normalizerTheme.border}`, bgcolor: isDarkMode ? normalizerTheme.paper : '#ffffff' }}>
           <Stack direction="row" justifyContent="space-between" alignItems="center" gap={2}>
             <Box sx={{ minWidth: 0 }}>
-              <Typography sx={{ fontSize: 18, fontWeight: 550, color: normalizerTheme.text }}>
-                {fieldPatternReviewStage === 'patterns' ? 'Confirm patterns' : 'Review all rows'}
+              <Typography sx={{ fontSize: 18, fontWeight: 600, color: normalizerTheme.text }}>
+                Confirm patterns
               </Typography>
-              <Typography sx={{ mt: 0.4, fontSize: 12.75, fontWeight: 400, color: normalizerTheme.muted }}>
-                {fieldPatternReviewStage === 'patterns'
-                  ? 'Review each unique backend-detected pattern before checking the complete normalized output.'
-                  : 'Compare every customer row with the backend-owned FactWise interpretation.'}
+              <Typography sx={{ mt: 0.35, fontSize: 12.75, fontWeight: 400, color: normalizerTheme.muted }}>
+                Review each unique backend-detected pattern and adjust parsing rules if needed.
               </Typography>
             </Box>
+            <IconButton
+              size="small"
+              onClick={() => setFieldPatternReviewOpen(false)}
+              aria-label="Close"
+              sx={{
+                color: normalizerTheme.muted,
+                borderRadius: '8px',
+                transition: 'all 0.15s ease',
+                '&:hover': {
+                  bgcolor: isDarkMode ? 'rgba(239,68,68,0.18)' : '#fee2e2',
+                  color: isDarkMode ? '#fca5a5' : '#dc2626',
+                },
+              }}
+            >
+              <CloseIcon sx={{ fontSize: 18 }} />
+            </IconButton>
           </Stack>
         </DialogTitle>
         <DialogContent
@@ -20312,200 +20269,134 @@ const BomNormalizer = () => {
             scrollbarWidth: 'none',
             '&::-webkit-scrollbar': { display: 'none' },
             p: 2,
+            pt: '18px !important',
             pb: 1.25,
             bgcolor: isDarkMode ? normalizerTheme.page : '#f4f7ff',
           }}
         >
           {fieldPatternReviewStage === 'patterns' && (
-            <Stack gap={1.25}>
-              <Paper
-                elevation={0}
+            <Stack gap={1.35}>
+              <Box
                 sx={{
-                  p: 1.5,
-                  border: `1px solid ${isDarkMode ? normalizerTheme.border : '#d9e2ef'}`,
-                  borderRadius: '10px',
-                  bgcolor: isDarkMode ? normalizerTheme.paper : '#ffffff',
-                  boxShadow: isDarkMode ? 'none' : '0 14px 34px -30px rgba(15,23,42,0.32)',
+                  display: 'grid',
+                  gridTemplateColumns: {
+                    xs: 'repeat(2, minmax(0, 1fr))',
+                    md: 'repeat(4, minmax(0, 1fr))',
+                  },
+                  gap: 1.25,
+                  alignItems: 'stretch',
                 }}
               >
-                <Box>
-                  <Typography sx={{ fontSize: 13.5, fontWeight: 600, color: normalizerTheme.text }}>Detection summary</Typography>
-                  <Typography sx={{ mt: 0.25, fontSize: 11.5, color: normalizerTheme.muted }}>
-                    A clear overview of the patterns found before you review and apply changes.
-                  </Typography>
-                </Box>
-                <Box
-                  sx={{
-                    mt: 1.1,
-                    display: 'grid',
-                    gridTemplateColumns: {
-                      xs: 'repeat(2, minmax(0, 1fr))',
-                      md: 'repeat(4, minmax(145px, 1fr))',
-                      lg: 'repeat(4, minmax(155px, 1fr)) minmax(245px, 1.25fr)',
-                    },
-                    gap: 1,
-                    alignItems: 'stretch',
-                  }}
-                >
-                  {[
-                    {
-                      label: 'Items detected',
-                      value: fieldPatternReviewSummary.itemCount,
-                      helper: 'Rows found in the source',
-                      accent: isDarkMode ? '#67c5dc' : '#0891b2',
-                      Icon: InsertDriveFileOutlinedIcon,
-                    },
-                    {
-                      label: 'Patterns detected',
-                      value: fieldPatternReviewSummary.patternCount,
-                      helper: 'Unique structures identified',
-                      accent: isDarkMode ? '#66b3ff' : '#2563eb',
-                      Icon: GridViewOutlinedIcon,
-                    },
-                    {
-                      label: 'Recognized',
-                      value: fieldPatternReviewSummary.recognizedPatternCount,
-                      helper: 'Ready for confirmation',
-                      accent: isDarkMode ? '#62dfa6' : '#079455',
-                      Icon: CheckCircleOutlineIcon,
-                    },
-                    {
-                      label: 'Need review',
-                      value: fieldPatternReviewSummary.unrecognizedPatternCount,
-                      helper: 'Requires your attention',
-                      accent: isDarkMode ? '#f8bd52' : '#d97706',
-                      Icon: WarningAmberOutlinedIcon,
-                    },
-                  ].map(({ label, value, helper, accent, Icon }) => (
-                    <Box
-                      key={label}
-                      sx={{
-                        position: 'relative',
-                        minHeight: 108,
-                        overflow: 'hidden',
-                        px: 1.5,
-                        py: 1.35,
-                        border: `1px solid ${isDarkMode ? normalizerTheme.border : '#d9e2ef'}`,
-                        borderRadius: '14px',
-                        bgcolor: isDarkMode ? normalizerTheme.paperSoft : '#ffffff',
-                        boxShadow: isDarkMode ? 'none' : '0 16px 34px -30px rgba(15,23,42,0.5)',
-                        transition: 'border-color 150ms ease, box-shadow 150ms ease, transform 150ms ease',
-                        '&:hover': {
-                          transform: 'translateY(-1px)',
-                          borderColor: `${accent}66`,
-                          boxShadow: isDarkMode
-                            ? `0 14px 30px -26px ${accent}80`
-                            : `0 18px 36px -30px ${accent}99`,
-                        },
-                      }}
-                    >
-                      <Box
-                        aria-hidden
-                        sx={{
-                          position: 'absolute',
-                          right: -24,
-                          bottom: -32,
-                          width: 86,
-                          height: 86,
-                          borderRadius: '50%',
-                          bgcolor: `${accent}16`,
-                        }}
-                      />
-                      <Stack direction="row" alignItems="flex-start" justifyContent="space-between" gap={1}>
-                        <Typography sx={{ minWidth: 0, fontSize: 11.5, fontWeight: 600, color: normalizerTheme.text }}>
-                          {label}
-                        </Typography>
-                        <Box
-                          sx={{
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            width: 32,
-                            height: 32,
-                            flexShrink: 0,
-                            borderRadius: '11px',
-                            bgcolor: `${accent}18`,
-                            color: accent,
-                            boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.28)',
-                          }}
-                        >
-                          <Icon sx={{ fontSize: 17 }} />
-                        </Box>
-                      </Stack>
-                      <Typography sx={{ mt: 0.55, fontSize: 23, lineHeight: 1.05, fontWeight: 600, color: normalizerTheme.text, fontVariantNumeric: 'tabular-nums' }}>
-                        {Number(value || 0)}
-                      </Typography>
-                      <Typography sx={{ mt: 0.65, fontSize: 10.75, color: normalizerTheme.muted }}>
-                        {helper}
-                      </Typography>
-                    </Box>
-                  ))}
+                {[
+                  {
+                    label: 'Items detected',
+                    value: fieldPatternReviewSummary.itemCount,
+                    helper: 'Rows found in the source',
+                    accent: isDarkMode ? '#67c5dc' : '#0891b2',
+                    Icon: InsertDriveFileOutlinedIcon,
+                  },
+                  {
+                    label: 'Patterns detected',
+                    value: fieldPatternReviewSummary.patternCount,
+                    helper: 'Unique structures identified',
+                    accent: isDarkMode ? '#66b3ff' : '#2563eb',
+                    Icon: GridViewOutlinedIcon,
+                  },
+                  {
+                    label: 'Recognized',
+                    value: fieldPatternReviewSummary.recognizedPatternCount,
+                    helper: 'Ready for confirmation',
+                    accent: isDarkMode ? '#62dfa6' : '#079455',
+                    Icon: CheckCircleOutlineIcon,
+                  },
+                  {
+                    label: 'Need review',
+                    value: fieldPatternReviewSummary.unrecognizedPatternCount,
+                    helper: 'Requires your attention',
+                    accent: isDarkMode ? '#f8bd52' : '#d97706',
+                    Icon: WarningAmberOutlinedIcon,
+                  },
+                ].map(({ label, value, helper, accent, Icon }) => (
                   <Box
+                    key={label}
                     sx={{
-                      gridColumn: { xs: '1 / -1', md: '1 / -1', lg: 'auto' },
+                      position: 'relative',
                       minHeight: 108,
+                      overflow: 'hidden',
                       px: 1.5,
                       py: 1.35,
                       border: `1px solid ${isDarkMode ? normalizerTheme.border : '#d9e2ef'}`,
                       borderRadius: '14px',
-                      bgcolor: isDarkMode ? normalizerTheme.paperSoft : '#ffffff',
-                      boxShadow: isDarkMode ? 'none' : '0 16px 34px -30px rgba(15,23,42,0.5)',
+                      bgcolor: isDarkMode ? normalizerTheme.paper : '#ffffff',
+                      boxShadow: isDarkMode ? 'none' : '0 10px 24px -20px rgba(15,23,42,0.35)',
+                      transition: 'border-color 150ms ease, box-shadow 150ms ease, transform 150ms ease',
+                      '&:hover': {
+                        transform: 'translateY(-1px)',
+                        borderColor: `${accent}66`,
+                        boxShadow: isDarkMode
+                          ? `0 14px 30px -26px ${accent}80`
+                          : `0 16px 32px -24px ${accent}99`,
+                      },
                     }}
                   >
-                    <Stack direction="row" alignItems="center" justifyContent="space-between" gap={1} sx={{ mb: 0.75 }}>
-                      <Box sx={{ minWidth: 0 }}>
-                        <Typography sx={{ fontSize: 11.5, fontWeight: 600, color: normalizerTheme.text }}>
-                          Patterns by field
-                        </Typography>
-                        <Typography sx={{ mt: 0.1, fontSize: 10.5, color: normalizerTheme.muted }}>
-                          Focus the review list
-                        </Typography>
-                      </Box>
-                      <TuneIcon sx={{ fontSize: 17, color: normalizerTheme.pageTokens.primary }} />
-                    </Stack>
-                    <Autocomplete
-                      size="small"
-                      options={fieldPatternFieldFilterOptions}
-                      value={fieldPatternFieldFilterOptions.find((option) => option.key === fieldPatternFieldFilter) || fieldPatternFieldFilterOptions[0]}
-                      onChange={(_, option) => {
-                        const nextField = option?.key || 'all';
-                        setFieldPatternFieldFilter(nextField);
-                        setFieldPatternExpandedPatternKey('');
-                        if (
-                          nextField !== 'all' &&
-                          mappedFieldPatternRuleOptions.some((field) => field.key === nextField)
-                        ) {
-                          setFieldPatternSelectedRuleField(nextField);
-                          setBulkPatternControls({});
-                          setBulkPatternControlsChanged(false);
-                        }
-                      }}
-                      getOptionLabel={(option) => option?.label || ''}
-                      isOptionEqualToValue={(option, value) => option.key === value.key}
-                      renderInput={(params) => (
-                        <TextField
-                          {...params}
-                          placeholder="All mapped fields"
-                          inputProps={{ ...params.inputProps, 'aria-label': 'Patterns by field' }}
-                        />
-                      )}
+                    <Box
+                      aria-hidden
                       sx={{
-                        '& .MuiOutlinedInput-root': {
-                          height: 38,
-                          borderRadius: '10px',
-                          bgcolor: isDarkMode ? 'rgba(255,255,255,0.025)' : '#f8fafc',
-                        },
+                        position: 'absolute',
+                        right: -24,
+                        bottom: -32,
+                        width: 86,
+                        height: 86,
+                        borderRadius: '50%',
+                        bgcolor: `${accent}16`,
                       }}
                     />
+                    <Stack direction="row" alignItems="flex-start" justifyContent="space-between" gap={1}>
+                      <Typography sx={{ minWidth: 0, fontSize: 11.5, fontWeight: 600, color: normalizerTheme.text }}>
+                        {label}
+                      </Typography>
+                      <Box
+                        sx={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          width: 32,
+                          height: 32,
+                          flexShrink: 0,
+                          borderRadius: '11px',
+                          bgcolor: `${accent}18`,
+                          color: accent,
+                          boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.28)',
+                        }}
+                      >
+                        <Icon sx={{ fontSize: 17 }} />
+                      </Box>
+                    </Stack>
+                    <Typography sx={{ mt: 0.55, fontSize: 23, lineHeight: 1.05, fontWeight: 600, color: normalizerTheme.text, fontVariantNumeric: 'tabular-nums' }}>
+                      {Number(value || 0)}
+                    </Typography>
+                    <Typography sx={{ mt: 0.65, fontSize: 10.75, color: normalizerTheme.muted }}>
+                      {helper}
+                    </Typography>
                   </Box>
-                </Box>
+                ))}
+              </Box>
+              <Paper
+                elevation={0}
+                sx={{
+                  px: 1.75,
+                  py: 0.25,
+                  border: `1px solid ${isDarkMode ? normalizerTheme.border : '#d9e2ef'}`,
+                  borderRadius: '14px',
+                  bgcolor: isDarkMode ? normalizerTheme.paper : '#ffffff',
+                  boxShadow: isDarkMode ? 'none' : '0 10px 24px -22px rgba(15,23,42,0.28)',
+                }}
+              >
                 <Accordion
                   defaultExpanded={false}
                   disableGutters
                   elevation={0}
                   sx={{
-                    mt: 1.35,
-                    borderTop: `1px solid ${isDarkMode ? normalizerTheme.border : '#d9e2ef'}`,
                     bgcolor: 'transparent',
                     '&::before': { display: 'none' },
                   }}
@@ -20736,6 +20627,83 @@ const BomNormalizer = () => {
                   </AccordionDetails>
                 </Accordion>
               </Paper>
+
+              {fieldPatternFieldFilterOptions.length > 1 && (
+                <Stack
+                  direction="row"
+                  alignItems="center"
+                  gap={0.75}
+                  sx={{
+                    flexWrap: 'wrap',
+                    pt: 0.25,
+                  }}
+                >
+                  {fieldPatternFieldFilterOptions.map((option) => {
+                    const isActive = (fieldPatternFieldFilter || 'all') === option.key;
+                    return (
+                      <Box
+                        key={option.key}
+                        component="button"
+                        type="button"
+                        onClick={() => {
+                          const nextField = option?.key || 'all';
+                          setFieldPatternFieldFilter(nextField);
+                          setFieldPatternExpandedPatternKey('');
+                          if (
+                            nextField !== 'all' &&
+                            mappedFieldPatternRuleOptions.some((field) => field.key === nextField)
+                          ) {
+                            setFieldPatternSelectedRuleField(nextField);
+                            setBulkPatternControls({});
+                            setBulkPatternControlsChanged(false);
+                          }
+                        }}
+                        sx={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: 0.6,
+                          px: 1.4,
+                          py: 0.55,
+                          borderRadius: '999px',
+                          border: `1px solid ${
+                            isActive
+                              ? '#007aff'
+                              : isDarkMode
+                                ? normalizerTheme.border
+                                : '#d9e2ef'
+                          }`,
+                          bgcolor: isActive
+                            ? '#007aff'
+                            : isDarkMode
+                              ? normalizerTheme.paper
+                              : '#ffffff',
+                          color: isActive
+                            ? '#ffffff'
+                            : normalizerTheme.text,
+                          fontSize: 12,
+                          fontWeight: isActive ? 600 : 500,
+                          lineHeight: 1.3,
+                          cursor: 'pointer',
+                          transition: 'all 150ms ease',
+                          boxShadow: isActive
+                            ? '0 4px 12px -4px rgba(0, 122, 255, 0.45)'
+                            : 'none',
+                          '&:hover': {
+                            borderColor: isActive ? '#0066d6' : '#94a3b8',
+                            bgcolor: isActive
+                              ? '#0066d6'
+                              : isDarkMode
+                                ? 'rgba(255,255,255,0.06)'
+                                : '#f8fafc',
+                          },
+                        }}
+                      >
+                        {option.label}
+                      </Box>
+                    );
+                  })}
+                </Stack>
+              )}
 
               {fieldPatternReviewPatterns.length > 0 ? (
                 <Stack gap={0.75}>
@@ -21295,20 +21263,31 @@ const BomNormalizer = () => {
         <DialogActions sx={{ px: 2.75, py: 1.45, justifyContent: 'space-between', gap: 1, flexWrap: 'wrap', borderTop: `1px solid ${normalizerTheme.border}`, bgcolor: isDarkMode ? '#17181d' : normalizerTheme.paperSoft }}>
           {fieldPatternReviewStage === 'patterns' ? (
             <>
-              <Button variant="outlined" onClick={() => setFieldPatternReviewOpen(false)} sx={fieldPatternSecondaryButtonSx}>Close</Button>
+              <Button
+                variant="outlined"
+                onClick={() => setFieldPatternReviewOpen(false)}
+                sx={{
+                  ...fieldPatternSecondaryButtonSx,
+                  borderRadius: '999px',
+                  '&:hover': {
+                    bgcolor: isDarkMode ? 'rgba(239,68,68,0.16)' : '#fee2e2',
+                    borderColor: isDarkMode ? 'rgba(248,113,113,0.45)' : '#fca5a5',
+                    color: isDarkMode ? '#fca5a5' : '#dc2626',
+                  },
+                }}
+              >
+                Close
+              </Button>
               <Button
                 variant="contained"
-                disabled={fieldPatternLoading || !fieldPatternReviewRows.length}
-                onClick={() => {
-                  setFieldPatternReviewPage(0);
-                  setFieldPatternReviewStage('rows');
-                  setFieldPatternExpandedPatternKey('');
-                  fieldPatternReviewContentRef.current?.scrollTo({ top: 0, behavior: 'auto' });
+                onClick={() => setFieldPatternReviewOpen(false)}
+                sx={{
+                  ...fieldPatternPrimaryButtonSx,
+                  borderRadius: '999px',
+                  px: 2.5,
                 }}
-                endIcon={<ChevronRightIcon />}
-                sx={fieldPatternPrimaryButtonSx}
               >
-                Review all rows
+                Done
               </Button>
             </>
           ) : (
