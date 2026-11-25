@@ -8390,6 +8390,54 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
     setPendingPrimaryDeleteIndex(null);
   };
 
+  const [frozenColumnKeys, setFrozenColumnKeys] = useState([]);
+  const [selectedRowKeys, setSelectedRowKeys] = useState([]);
+
+  const toggleFreezeColumn = (columnKey) => {
+    setFrozenColumnKeys((prev) => (
+      prev.includes(columnKey)
+        ? prev.filter((k) => k !== columnKey)
+        : [...prev, columnKey]
+    ));
+  };
+
+  const toggleRowSelection = (rowKey) => {
+    setSelectedRowKeys((prev) => (
+      prev.includes(rowKey)
+        ? prev.filter((k) => k !== rowKey)
+        : [...prev, rowKey]
+    ));
+  };
+
+  const ACTIONS_COL_WIDTH = 86;
+  const activeFrozenSet = useMemo(
+    () => new Set(frozenColumnKeys.filter((key) => visibleColumns.some((col) => col.key === key))),
+    [frozenColumnKeys, visibleColumns]
+  );
+  const orderedVisibleColumns = useMemo(() => {
+    if (!activeFrozenSet.size) return visibleColumns;
+    const frozenCols = visibleColumns.filter((col) => activeFrozenSet.has(col.key));
+    const unfrozenCols = visibleColumns.filter((col) => !activeFrozenSet.has(col.key));
+    return [...frozenCols, ...unfrozenCols];
+  }, [visibleColumns, activeFrozenSet]);
+
+  const frozenLeftOffsets = useMemo(() => {
+    const offsets = {};
+    let currentLeft = ACTIONS_COL_WIDTH;
+    orderedVisibleColumns.forEach((col) => {
+      if (activeFrozenSet.has(col.key)) {
+        offsets[col.key] = currentLeft;
+        currentLeft += Number(col.width || 140);
+      }
+    });
+    return offsets;
+  }, [orderedVisibleColumns, activeFrozenSet]);
+
+  const lastFrozenColumnKey = useMemo(() => {
+    const frozenCols = orderedVisibleColumns.filter((col) => activeFrozenSet.has(col.key));
+    return frozenCols.length ? frozenCols[frozenCols.length - 1].key : null;
+  }, [orderedVisibleColumns, activeFrozenSet]);
+
   useEffect(() => {
     const knownKeys = new Set(NORMALIZED_TABLE_BASE_COLUMNS.map((column) => column.key));
     const usefulDynamicKeys = columns
@@ -8448,6 +8496,25 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
               variant="outlined"
               label={activeIssueFilter?.label || 'Issue filter'}
               onDelete={() => setIssueFilter('all')}
+              sx={{ height: 24, fontSize: 11.5, fontWeight: 500 }}
+            />
+          )}
+          {activeFrozenSet.size > 0 && (
+            <Chip
+              size="small"
+              color="primary"
+              variant="outlined"
+              label={`${activeFrozenSet.size} frozen ${activeFrozenSet.size === 1 ? 'column' : 'columns'}`}
+              onDelete={() => setFrozenColumnKeys([])}
+              sx={{ height: 24, fontSize: 11.5, fontWeight: 500 }}
+            />
+          )}
+          {selectedRowKeys.length > 0 && (
+            <Chip
+              size="small"
+              color="primary"
+              label={`${selectedRowKeys.length} ${selectedRowKeys.length === 1 ? 'row' : 'rows'} selected`}
+              onDelete={() => setSelectedRowKeys([])}
               sx={{ height: 24, fontSize: 11.5, fontWeight: 500 }}
             />
           )}
@@ -8523,25 +8590,106 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
       <Table stickyHeader size="small" sx={factWiseTableSx(tableTone)}>
         <TableHead>
           <TableRow>
-            <TableCell sx={tableHeaderCellSx({ width: 62, textAlign: 'center' })}>Actions</TableCell>
-            {visibleColumns.map((column) => (
-              <TableCell key={column.key} sx={tableHeaderCellSx({ minWidth: column.width })}>
-                {column.key === 'confidence' ? (
-                  <Stack direction="row" alignItems="center" gap={0.5}>
-                    <span>{column.label}</span>
-                    <Tooltip title={CONFIDENCE_HELP_TEXT} arrow>
-                      <InfoOutlinedIcon sx={{ fontSize: 16, color: tableTone.muted }} />
+            <TableCell
+              sx={tableHeaderCellSx({
+                width: ACTIONS_COL_WIDTH,
+                minWidth: ACTIONS_COL_WIDTH,
+                maxWidth: ACTIONS_COL_WIDTH,
+                textAlign: 'center',
+                position: 'sticky',
+                left: 0,
+                zIndex: 5,
+                bgcolor: tableTone.header,
+                borderRight: !lastFrozenColumnKey ? `1px solid ${tableTone.headerBorder}` : undefined,
+              })}
+            >
+              Actions
+            </TableCell>
+            {orderedVisibleColumns.map((column) => {
+              const isFrozen = activeFrozenSet.has(column.key);
+              const isLastFrozen = lastFrozenColumnKey === column.key;
+              const colWidth = Number(column.width || 140);
+              return (
+                <TableCell
+                  key={column.key}
+                  sx={tableHeaderCellSx({
+                    minWidth: colWidth,
+                    ...(isFrozen ? {
+                      width: colWidth,
+                      maxWidth: colWidth,
+                      position: 'sticky',
+                      left: frozenLeftOffsets[column.key],
+                      zIndex: 5,
+                      bgcolor: tableTone.isDark ? '#1a2333' : '#edf4ff',
+                      borderRight: isLastFrozen ? '2px solid rgba(0, 122, 255, 0.35)' : `1px solid ${tableTone.headerBorder}`,
+                      boxShadow: isLastFrozen ? '3px 0 8px -3px rgba(15, 23, 42, 0.18)' : 'none',
+                    } : {}),
+                  })}
+                >
+                  <Stack direction="row" alignItems="center" justifyContent="space-between" gap={0.5}>
+                    {column.key === 'confidence' ? (
+                      <Stack direction="row" alignItems="center" gap={0.5}>
+                        <span>{column.label}</span>
+                        <Tooltip title={CONFIDENCE_HELP_TEXT} arrow>
+                          <InfoOutlinedIcon sx={{ fontSize: 16, color: tableTone.muted }} />
+                        </Tooltip>
+                      </Stack>
+                    ) : (
+                      <Box component="span" sx={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {column.label}
+                      </Box>
+                    )}
+                    <Tooltip title={isFrozen ? 'Unfreeze column' : 'Freeze column'} arrow>
+                      <IconButton
+                        size="small"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          toggleFreezeColumn(column.key);
+                        }}
+                        aria-label={isFrozen ? `Unfreeze ${column.label}` : `Freeze ${column.label}`}
+                        sx={{
+                          p: 0.35,
+                          color: isFrozen ? '#007aff' : tableTone.muted,
+                          opacity: isFrozen ? 1 : 0.45,
+                          bgcolor: isFrozen ? (tableTone.isDark ? 'rgba(0, 122, 255, 0.2)' : 'rgba(0, 122, 255, 0.1)') : 'transparent',
+                          transition: 'all 140ms ease',
+                          '&:hover': {
+                            opacity: 1,
+                            color: '#007aff',
+                            bgcolor: tableTone.isDark ? 'rgba(0, 122, 255, 0.18)' : 'rgba(0, 122, 255, 0.12)',
+                          },
+                        }}
+                      >
+                        <Box
+                          component="svg"
+                          viewBox="0 0 24 24"
+                          sx={{
+                            width: 14,
+                            height: 14,
+                            fill: isFrozen ? 'currentColor' : 'none',
+                            stroke: 'currentColor',
+                            strokeWidth: 2,
+                            strokeLinecap: 'round',
+                            strokeLinejoin: 'round',
+                            transform: isFrozen ? 'rotate(0deg)' : 'rotate(35deg)',
+                            transition: 'transform 140ms ease',
+                          }}
+                        >
+                          <path d="M12 17v5" />
+                          <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
+                        </Box>
+                      </IconButton>
                     </Tooltip>
                   </Stack>
-                ) : column.label}
-              </TableCell>
-            ))}
+                </TableCell>
+              );
+            })}
           </TableRow>
         </TableHead>
         <TableBody>
           {rows.length === 0 ? (
             <TableRow>
-              <TableCell colSpan={visibleColumns.length + 1}>
+              <TableCell colSpan={orderedVisibleColumns.length + 1}>
                 <Typography sx={{ py: 3, textAlign: 'center', color: tableTone.muted }}>
                   Run normalization to see parsed MPNs, manufacturers, alternates, levels, and confidence.
                 </Typography>
@@ -8549,66 +8697,140 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
             </TableRow>
           ) : filteredRows.length === 0 ? (
             <TableRow>
-              <TableCell colSpan={visibleColumns.length + 1}>
+              <TableCell colSpan={orderedVisibleColumns.length + 1}>
                 <Typography sx={{ py: 3, textAlign: 'center', color: tableTone.muted }}>
                   No rows match the current filter.
                 </Typography>
               </TableCell>
             </TableRow>
-          ) : filteredRows.slice(0, 250).map(({ row, originalIndex }) => (
-            <TableRow
-              key={`${row.sourceRow}-${row.relation}-${originalIndex}`}
-              sx={factWiseTableRowSx(tableTone, { warning: row.confidence < 70 })}
-            >
-              <TableCell sx={tableBodyCellSx({ width: 62, textAlign: 'center', py: 0.95 })}>
-                <IconButton size="small" color="error" onClick={() => handleDeleteRow(originalIndex)}>
-                  <DeleteOutlineIcon fontSize="small" />
-                </IconButton>
-              </TableCell>
-              {visibleColumns.map((column) => (
+          ) : filteredRows.slice(0, 250).map(({ row, originalIndex }) => {
+            const rowKey = `${row.sourceRow}-${row.relation}-${originalIndex}`;
+            const isSelected = selectedRowKeys.includes(rowKey);
+            const isWarning = row.confidence < 70;
+            const stickyCellBg = isSelected
+              ? (tableTone.isDark ? '#16263d' : '#e8f2ff')
+              : isWarning
+                ? (tableTone.isDark ? '#2a2216' : '#fffbeb')
+                : tableTone.bg;
+            return (
+              <TableRow
+                key={rowKey}
+                onClick={(event) => {
+                  const tag = event.target?.tagName?.toLowerCase();
+                  if (tag === 'input' || tag === 'button' || event.target?.closest?.('button')) return;
+                  toggleRowSelection(rowKey);
+                }}
+                sx={{
+                  ...factWiseTableRowSx(tableTone, { warning: isWarning }),
+                  cursor: 'pointer',
+                  ...(isSelected ? {
+                    bgcolor: `${tableTone.isDark ? '#16263d' : '#e8f2ff'} !important`,
+                    '&:hover': {
+                      bgcolor: `${tableTone.isDark ? '#1b2e4a' : '#dcebff'} !important`,
+                    },
+                  } : {}),
+                }}
+              >
                 <TableCell
-                  key={column.key}
                   sx={tableBodyCellSx({
-                    maxWidth: column.width + 40,
-                    p: column.editable ? 0.5 : undefined,
-                    minWidth: column.width,
+                    width: ACTIONS_COL_WIDTH,
+                    minWidth: ACTIONS_COL_WIDTH,
+                    maxWidth: ACTIONS_COL_WIDTH,
+                    textAlign: 'center',
+                    py: 0.75,
+                    px: 0.75,
+                    position: 'sticky',
+                    left: 0,
+                    zIndex: 2,
+                    bgcolor: stickyCellBg,
+                    borderLeft: isSelected ? '3px solid #007aff' : '3px solid transparent',
+                    borderRight: !lastFrozenColumnKey ? `1px solid ${tableTone.headerBorder}` : undefined,
                   })}
                 >
-                  {column.editable ? (
-                    <Box
-                      component="input"
-                      value={row[column.key] || ''}
-                      onChange={(event) => handleCellChange(originalIndex, column.key, event.target.value)}
+                  <Stack direction="row" alignItems="center" justifyContent="center" gap={0.25}>
+                    <Checkbox
+                      size="small"
+                      checked={isSelected}
+                      onClick={(event) => event.stopPropagation()}
+                      onChange={() => toggleRowSelection(rowKey)}
+                      inputProps={{ 'aria-label': `Select row ${originalIndex + 1}` }}
                       sx={{
-                        width: '100%',
-                        minWidth: column.width,
-                        border: '1px solid transparent',
-                        borderRadius: '8px',
-                        bgcolor: 'transparent',
-                        color: tableTone.text,
-                        caretColor: tableTone.text,
-                        px: 0.75,
-                        py: 0.55,
-                        font: 'inherit',
-                        fontSize: 13,
-                        fontWeight: 400,
-                        '&:focus': {
-                          bgcolor: tableTone.focusBg,
-                          borderColor: '#007aff',
-                          boxShadow: '0 0 0 2px rgba(0, 122, 255, 0.12)',
-                          outline: 'none',
-                        },
+                        p: 0.4,
+                        color: tableTone.muted,
+                        '&.Mui-checked': { color: '#007aff' },
                       }}
                     />
-                  ) : (
-                    <Typography sx={{ fontSize: 13, fontWeight: 400, color: tableTone.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                      {column.key === 'confidence' ? `${row[column.key]}%` : row[column.key]}
-                    </Typography>
-                  )}
+                    <IconButton
+                      size="small"
+                      color="error"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        handleDeleteRow(originalIndex);
+                      }}
+                    >
+                      <DeleteOutlineIcon fontSize="small" />
+                    </IconButton>
+                  </Stack>
                 </TableCell>
-              ))}
-            </TableRow>
-          ))}
+                {orderedVisibleColumns.map((column) => {
+                  const isFrozen = activeFrozenSet.has(column.key);
+                  const isLastFrozen = lastFrozenColumnKey === column.key;
+                  const colWidth = Number(column.width || 140);
+                  return (
+                    <TableCell
+                      key={column.key}
+                      sx={tableBodyCellSx({
+                        maxWidth: isFrozen ? colWidth : colWidth + 40,
+                        p: column.editable ? 0.5 : undefined,
+                        minWidth: colWidth,
+                        ...(isFrozen ? {
+                          width: colWidth,
+                          position: 'sticky',
+                          left: frozenLeftOffsets[column.key],
+                          zIndex: 2,
+                          bgcolor: stickyCellBg,
+                          borderRight: isLastFrozen ? '2px solid rgba(0, 122, 255, 0.35)' : `1px solid ${tableTone.headerBorder}`,
+                          boxShadow: isLastFrozen ? '3px 0 8px -3px rgba(15, 23, 42, 0.14)' : 'none',
+                        } : {}),
+                      })}
+                    >
+                      {column.editable ? (
+                        <Box
+                          component="input"
+                          value={row[column.key] || ''}
+                          onChange={(event) => handleCellChange(originalIndex, column.key, event.target.value)}
+                          sx={{
+                            width: '100%',
+                            minWidth: isFrozen ? Math.max(60, colWidth - 16) : colWidth,
+                            border: '1px solid transparent',
+                            borderRadius: '8px',
+                            bgcolor: 'transparent',
+                            color: tableTone.text,
+                            caretColor: tableTone.text,
+                            px: 0.75,
+                            py: 0.55,
+                            font: 'inherit',
+                            fontSize: 13,
+                            fontWeight: 400,
+                            '&:focus': {
+                              bgcolor: tableTone.focusBg,
+                              borderColor: '#007aff',
+                              boxShadow: '0 0 0 2px rgba(0, 122, 255, 0.12)',
+                              outline: 'none',
+                            },
+                          }}
+                        />
+                      ) : (
+                        <Typography sx={{ fontSize: 13, fontWeight: 400, color: tableTone.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                          {column.key === 'confidence' ? `${row[column.key]}%` : row[column.key]}
+                        </Typography>
+                      )}
+                    </TableCell>
+                  );
+                })}
+              </TableRow>
+            );
+          })}
         </TableBody>
       </Table>
       {rows.length > 250 && (
