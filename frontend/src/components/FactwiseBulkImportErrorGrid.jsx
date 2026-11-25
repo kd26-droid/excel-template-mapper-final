@@ -22,6 +22,7 @@ import {
   processFactwiseBulkImport,
 } from '../services/factwiseApi';
 import api from '../services/api';
+import { parseFactwiseRowErrors } from '../utils/factwiseImportErrors';
 import FactwiseNewTagsPopup from './FactwiseNewTagsPopup';
 import FactwiseDuplicateTagsPopup from './FactwiseDuplicateTagsPopup';
 
@@ -78,27 +79,14 @@ async function loadErrorWorkbook(bulkImportId) {
     // Build the per-row per-column error map.
     // errorMap: { [rowId]: { [headerName]: string[] } }
     const errorMap = {};
+    const unmappedErrors = [];
     const dataRows = rows.slice(1);
+    if (errorColIdx < 0) unmappedErrors.push('FactWise did not return an errors column. Cell errors could not be located.');
     dataRows.forEach((row, idx) => {
       if (errorColIdx < 0) return;
-      const raw = String(row[errorColIdx] ?? '').trim();
-      if (!raw) return;
-      let parsed = null;
-      try {
-        parsed = JSON.parse(raw.replace(/;/g, ','));
-      } catch {
-        parsed = null;
-      }
-      if (!parsed || typeof parsed !== 'object') return;
-      const perRow = {};
-      Object.keys(parsed).forEach((colIndex1Based) => {
-        const colIdx = parseInt(colIndex1Based, 10) - 1;
-        if (Number.isNaN(colIdx) || colIdx < 0 || colIdx >= headers.length) return;
-        const codes = Array.isArray(parsed[colIndex1Based]) ? parsed[colIndex1Based] : [];
-        if (!codes.length) return;
-        perRow[headers[colIdx]] = codes.map(String);
-      });
-      if (Object.keys(perRow).length) errorMap[idx] = perRow;
+      const { cells, unmapped } = parseFactwiseRowErrors(row[errorColIdx], headers);
+      if (Object.keys(cells).length) errorMap[idx] = cells;
+      unmapped.forEach((message) => unmappedErrors.push(`Error-file row ${idx + 2}: ${message}`));
     });
 
     return {
@@ -109,6 +97,7 @@ async function loadErrorWorkbook(bulkImportId) {
       originalHeaders: dataHeaders,
       dataRows,
       errorMap,
+      unmappedErrors,
       sheetName: firstSheetName,
     };
   } catch (e) {
@@ -175,6 +164,10 @@ export default function FactwiseBulkImportErrorGrid({
   const [originalHeaders, setOriginalHeaders] = useState([]); // raw FW headers (file)
   const [rows, setRows] = useState([]); // {id, __hasErrors, [h]: v}[]
   const [errorMap, setErrorMap] = useState({}); // {rowId: {header: string[]}}
+  const [unmappedErrors, setUnmappedErrors] = useState([]);
+  const nextErrorRef = useRef(-1);
+  const [paginationModel, setPaginationModel] = useState({ page: 0, pageSize: 25 });
+  const [pendingErrorFocus, setPendingErrorFocus] = useState(null);
   const [sheetName, setSheetName] = useState('Sheet1');
   const [retrying, setRetrying] = useState(false);
   const [retryMessage, setRetryMessage] = useState(null);
@@ -212,6 +205,8 @@ export default function FactwiseBulkImportErrorGrid({
       setOriginalHeaders(result.originalHeaders || result.headers);
       setRows(objRows);
       setErrorMap(result.errorMap);
+      setUnmappedErrors(result.unmappedErrors || []);
+      nextErrorRef.current = -1;
       setSheetName(result.sheetName);
       setLoading(false);
     })();
@@ -298,6 +293,27 @@ export default function FactwiseBulkImportErrorGrid({
     return rows.filter((r) => r.__hasErrors);
   }, [rows, showOnlyErrors]);
 
+  const errorCells = useMemo(() => visibleRows.flatMap((row, rowIndex) =>
+    Object.keys(errorMap[row.id] || {}).map((field) => ({ id: row.id, field, rowIndex }))
+  ), [visibleRows, errorMap]);
+  const goToNextError = () => {
+    if (!errorCells.length) return;
+    nextErrorRef.current = (nextErrorRef.current + 1) % errorCells.length;
+    const target = errorCells[nextErrorRef.current];
+    setPaginationModel((current) => ({ ...current, page: Math.floor(target.rowIndex / current.pageSize) }));
+    setPendingErrorFocus(target);
+  };
+  useEffect(() => {
+    if (!pendingErrorFocus) return undefined;
+    const frame = requestAnimationFrame(() => {
+      const { id, field, rowIndex } = pendingErrorFocus;
+      apiRef.current.scrollToIndexes({ rowIndex, colIndex: headers.indexOf(field) });
+      apiRef.current.setCellFocus(id, field);
+      setPendingErrorFocus(null);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [pendingErrorFocus, paginationModel, apiRef, headers]);
+
   const columns = useMemo(() => headers.map((h) => ({
     field: h,
     headerName: h,
@@ -320,7 +336,7 @@ export default function FactwiseBulkImportErrorGrid({
             <Stack spacing={0.5} sx={{ py: 0.25 }}>
               {codes.map((c, i) => (
                 <Typography key={i} variant="caption" sx={{ fontWeight: 500 }}>
-                  {humanizeErrorCode(c)}
+                  {humanizeErrorCode(c)} ({c})
                 </Typography>
               ))}
             </Stack>
@@ -330,6 +346,8 @@ export default function FactwiseBulkImportErrorGrid({
         >
           <Box
             component="span"
+            tabIndex={params.hasFocus ? 0 : -1}
+            aria-label={`${value}: ${codes.join(', ')}`}
             sx={{ display: 'flex', alignItems: 'center', gap: 0.5, width: '100%', overflow: 'hidden' }}
           >
             <ErrorOutlineIcon sx={{ fontSize: 14, flexShrink: 0 }} />
@@ -682,7 +700,8 @@ export default function FactwiseBulkImportErrorGrid({
 
   return (
     <Box sx={{
-      '& .fw-error-cell': {
+      '&& .MuiDataGrid-cell.fw-error-cell, && .MuiDataGrid-row:hover .MuiDataGrid-cell.fw-error-cell': {
+        boxShadow: 'inset 0 0 0 2px #dc2626',
         backgroundColor: (t) => t.palette.mode === 'dark'
           ? 'rgba(239, 68, 68, 0.28)'
           : 'rgba(239, 68, 68, 0.14)',
@@ -742,6 +761,13 @@ export default function FactwiseBulkImportErrorGrid({
           </Button>
         </Stack>
       </Stack>
+      <Button size="small" onClick={goToNextError} disabled={!errorCells.length || retrying}>Next error</Button>
+      {unmappedErrors.length > 0 && (
+        <Alert severity="error" sx={{ mb: 1, maxHeight: 180, overflow: 'auto' }}>
+          These export errors could not be linked to a cell:
+          {unmappedErrors.map((message, index) => <Typography key={index} variant="body2">{message}</Typography>)}
+        </Alert>
+      )}
       {newTagsFromErrors.length > 0 && (
         <Alert
           severity="info"
@@ -800,9 +826,8 @@ export default function FactwiseBulkImportErrorGrid({
           hideFooterSelectedRowCount
           processRowUpdate={handleCellEdit}
           onProcessRowUpdateError={(err) => setRetryMessage(err?.message || 'Edit failed')}
-          initialState={{
-            pagination: { paginationModel: { pageSize: 25 } },
-          }}
+          paginationModel={paginationModel}
+          onPaginationModelChange={setPaginationModel}
           pageSizeOptions={[25, 50, 100]}
           getRowClassName={(params) => (params.row.__hasErrors ? 'fw-error-row' : '')}
         />

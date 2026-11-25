@@ -203,7 +203,7 @@ function createEnforcedColumnDefs(headers) {
         borderRight: '1px solid #e9ecef',
         borderBottom: '1px solid #e9ecef',
         fontSize: '14px',
-        fontFamily: 'Segoe UI, Arial, sans-serif',
+        fontFamily: 'var(--fw-font-stack)',
         padding: '12px 16px',
         ...cellStyle
       },

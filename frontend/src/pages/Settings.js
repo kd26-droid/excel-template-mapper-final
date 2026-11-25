@@ -1,3 +1,4 @@
+import FactWiseToast from '../components/FactWiseToast';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Alert,
@@ -12,7 +13,6 @@ import {
   MenuItem,
   Paper,
   Select,
-  Snackbar,
   Stack,
   Table,
   TableBody,
@@ -2633,34 +2633,15 @@ const Settings = () => {
         </Grid>
       </Box>
 
-      <Snackbar
+      <FactWiseToast
         open={toast.open}
         autoHideDuration={5000}
         onClose={() => setToast(prev => ({ ...prev, open: false }))}
-        anchorOrigin={{ vertical: 'top', horizontal: 'right' }}
-        sx={{ mt: 7 }}
+        tokens={fwPageTokens}
+        severity={toast.severity}
       >
-        <Alert
-          variant="filled"
-          severity={toast.severity}
-          onClose={() => setToast(prev => ({ ...prev, open: false }))}
-          sx={{
-            minHeight: 38,
-            borderRadius: '12px',
-            boxShadow: t.shadow.card,
-            '& .MuiAlert-icon': { fontSize: 18, py: 0.25 },
-            '& .MuiAlert-message': {
-              py: 0.35,
-              fontSize: '12.5px',
-              fontWeight: 450,
-              lineHeight: 1.25,
-            },
-            '& .MuiAlert-action': { py: 0 },
-          }}
-        >
-          {toast.message}
-        </Alert>
-      </Snackbar>
+        {toast.message}
+      </FactWiseToast>
     </Box>
   );
 };

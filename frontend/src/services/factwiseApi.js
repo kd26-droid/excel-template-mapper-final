@@ -14,6 +14,7 @@ const STORAGE_KEYS = {
 // The mapper's own backend. 4.0 sends no CORS headers, so anything addressed to
 // it has to be relayed from there rather than called from the browser.
 const MAPPER_API_URL = process.env.REACT_APP_API_BASE_URL || '/api';
+const LOCAL_DEMO_BOM_PREFIX = 'MAX_UI_DEMO_';
 
 // Custom DOM event fired the first time a FactWise request fails with an
 // expired-token symptom (401/403 from FW's API Management, or JWT `exp`
@@ -261,6 +262,41 @@ function buildClient() {
     }
   );
   return client;
+}
+
+function isLocalHostApp() {
+  return ['localhost', '127.0.0.1'].includes(window.location.hostname);
+}
+
+function localDemoFactwiseAvailable() {
+  const { token, apiUrl } = readCredentials();
+  return isLocalHostApp() || !token || !apiUrl;
+}
+
+function isLocalDemoFactwiseId(value) {
+  return String(value || '').startsWith(LOCAL_DEMO_BOM_PREFIX);
+}
+
+async function localDemoFactwiseGet(path, config = {}) {
+  const { data } = await axios.get(`${MAPPER_API_URL}/demo-factwise${path}`, {
+    ...config,
+    timeout: 0,
+  });
+  return data;
+}
+
+async function localDemoEnterpriseBomCodesResult(fallbackError = 'Local demo BOM list failed') {
+  try {
+    const data = await localDemoFactwiseGet('/organization/bom/admin/codes/');
+    const boms = Array.isArray(data) ? data : (data?.results || []);
+    return { success: true, boms, demo: true };
+  } catch (error) {
+    return {
+      success: false,
+      boms: [],
+      error: error?.response?.data?.error || error?.message || fallbackError,
+    };
+  }
 }
 
 export function isFactwiseSessionAvailable() {
@@ -703,12 +739,23 @@ export async function fetchProjects({
 // by base_bom_id (see collapseBomRevisions) when the caller wants BOMs.
 export async function fetchEnterpriseBomCodes() {
   const client = buildClient();
+  if (!client && localDemoFactwiseAvailable()) {
+    return localDemoEnterpriseBomCodesResult();
+  }
   if (!client) return { success: false, boms: [] };
   try {
     const { data } = await client.get(`/organization/bom/admin/codes/`);
     const boms = Array.isArray(data) ? data : (data?.results || []);
+    if (!boms.length && localDemoFactwiseAvailable()) {
+      const demo = await localDemoEnterpriseBomCodesResult();
+      if (demo.success && demo.boms.length) return demo;
+    }
     return { success: true, boms };
   } catch (error) {
+    if (localDemoFactwiseAvailable()) {
+      const demo = await localDemoEnterpriseBomCodesResult();
+      if (demo.success && demo.boms.length) return demo;
+    }
     return {
       success: false,
       boms: [],
@@ -1032,11 +1079,39 @@ export function nextRevisionCode(bomCode, version) {
 // `project_status` so the caller decides what is eligible.
 export async function fetchProjectsWithBom({ baseBomId } = {}) {
   const client = buildClient();
-  if (!client || !baseBomId) return { success: false, projects: [] };
+  if (!baseBomId) return { success: false, projects: [] };
+  if ((!client && localDemoFactwiseAvailable()) || (localDemoFactwiseAvailable() && isLocalDemoFactwiseId(baseBomId))) {
+    try {
+      const data = await localDemoFactwiseGet(`/organization/project/bom/${baseBomId}/`);
+      return { success: true, projects: Array.isArray(data) ? data : [], demo: true };
+    } catch (error) {
+      return {
+        success: false,
+        projects: [],
+        error: error?.response?.data?.error || error?.message || 'Local demo project lookup failed',
+      };
+    }
+  }
+  if (!client) return { success: false, projects: [] };
   try {
     const { data } = await client.get(`/organization/project/bom/${baseBomId}/`);
-    return { success: true, projects: Array.isArray(data) ? data : [] };
+    const projects = Array.isArray(data) ? data : [];
+    if (!projects.length && localDemoFactwiseAvailable()) {
+      try {
+        const demoData = await localDemoFactwiseGet(`/organization/project/bom/${baseBomId}/`);
+        const demoProjects = Array.isArray(demoData) ? demoData : [];
+        if (demoProjects.length) return { success: true, projects: demoProjects, demo: true };
+      } catch (_) { /* keep live response */ }
+    }
+    return { success: true, projects };
   } catch (error) {
+    if (localDemoFactwiseAvailable()) {
+      try {
+        const demoData = await localDemoFactwiseGet(`/organization/project/bom/${baseBomId}/`);
+        const demoProjects = Array.isArray(demoData) ? demoData : [];
+        if (demoProjects.length) return { success: true, projects: demoProjects, demo: true };
+      } catch (_) { /* keep live error */ }
+    }
     return {
       success: false,
       projects: [],
@@ -1059,14 +1134,51 @@ export async function fetchProjectsWithBom({ baseBomId } = {}) {
 // name their parameters.
 export async function fetchProjectBomSlots({ projectId, baseBomId } = {}) {
   const client = buildClient();
-  if (!client || !projectId || !baseBomId) return { success: false, slots: [] };
+  if (!projectId || !baseBomId) return { success: false, slots: [] };
+  if ((!client && localDemoFactwiseAvailable()) || (localDemoFactwiseAvailable() && isLocalDemoFactwiseId(projectId))) {
+    try {
+      const data = await localDemoFactwiseGet(
+        `/organization/project/${projectId}/bom-groups/`,
+        { params: { base_bom_id: baseBomId } }
+      );
+      return { success: true, slots: Array.isArray(data) ? data : [], demo: true };
+    } catch (error) {
+      return {
+        success: false,
+        slots: [],
+        error: error?.response?.data?.error || error?.message || 'Local demo project BOM slot lookup failed',
+      };
+    }
+  }
+  if (!client) return { success: false, slots: [] };
   try {
     const { data } = await client.get(
       `/organization/project/${projectId}/bom-groups/`,
       { params: { base_bom_id: baseBomId } }
     );
-    return { success: true, slots: Array.isArray(data) ? data : [] };
+    const slots = Array.isArray(data) ? data : [];
+    if (!slots.length && localDemoFactwiseAvailable()) {
+      try {
+        const demoData = await localDemoFactwiseGet(
+          `/organization/project/${projectId}/bom-groups/`,
+          { params: { base_bom_id: baseBomId } }
+        );
+        const demoSlots = Array.isArray(demoData) ? demoData : [];
+        if (demoSlots.length) return { success: true, slots: demoSlots, demo: true };
+      } catch (_) { /* keep live response */ }
+    }
+    return { success: true, slots };
   } catch (error) {
+    if (localDemoFactwiseAvailable()) {
+      try {
+        const demoData = await localDemoFactwiseGet(
+          `/organization/project/${projectId}/bom-groups/`,
+          { params: { base_bom_id: baseBomId } }
+        );
+        const demoSlots = Array.isArray(demoData) ? demoData : [];
+        if (demoSlots.length) return { success: true, slots: demoSlots, demo: true };
+      } catch (_) { /* keep live error */ }
+    }
     return {
       success: false,
       slots: [],
@@ -1095,6 +1207,20 @@ export async function fetchCurrencies() {
 // Fetches enterprise BOM detail (needed to know quantity/currency before attach).
 export async function fetchEnterpriseBomDetail(enterpriseBomId) {
   const client = buildClient();
+  if (!enterpriseBomId) return { success: false };
+  if ((!client && localDemoFactwiseAvailable()) || (localDemoFactwiseAvailable() && isLocalDemoFactwiseId(enterpriseBomId))) {
+    try {
+      const data = await localDemoFactwiseGet(
+        `/organization/bom/${enterpriseBomId}/admin/`
+      );
+      return { success: true, bom: data, demo: true };
+    } catch (error) {
+      return {
+        success: false,
+        error: error?.response?.data?.error || error?.message || 'Local demo BOM detail failed',
+      };
+    }
+  }
   if (!client) return { success: false };
   try {
     const { data } = await client.get(
@@ -1102,6 +1228,14 @@ export async function fetchEnterpriseBomDetail(enterpriseBomId) {
     );
     return { success: true, bom: data };
   } catch (error) {
+    if (localDemoFactwiseAvailable()) {
+      try {
+        const data = await localDemoFactwiseGet(
+          `/organization/bom/${enterpriseBomId}/admin/`
+        );
+        return { success: true, bom: data, demo: true };
+      } catch (_) { /* keep live error */ }
+    }
     return {
       success: false,
       error: error?.response?.data?.error || error?.message || 'BOM detail fetch failed',

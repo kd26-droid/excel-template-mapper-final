@@ -38,7 +38,7 @@ import {
   Dialog, DialogTitle, DialogContent, DialogActions, Button, Box, Typography,
   Checkbox, FormControlLabel, FormControl, InputLabel, Select, MenuItem,
   TextField, RadioGroup, Radio, Alert, Divider, Chip, Stepper, Step, StepLabel,
-  Autocomplete, CircularProgress, Paper,
+  Autocomplete, CircularProgress, Paper, Stack,
 } from '@mui/material';
 import { AccountTree as AccountTreeIcon } from '@mui/icons-material';
 import {
@@ -2347,7 +2347,7 @@ const BomStructureDialog = ({
   const renderSheets = () => (
     <>
       <Typography variant="body2" sx={stepCopySx}>
-        Choose the sheets that should build a BOM.
+        Each card represents a worksheet tab in the uploaded workbook. Select the tabs that contain parts for a BOM, then choose the layout used on each selected tab.
       </Typography>
       {sheetNames.length === 0 && (
         <Alert severity="info" sx={dialogAlertSx('info')}>
@@ -2363,35 +2363,33 @@ const BomStructureDialog = ({
             key={name}
             sx={panelSx(Boolean(answer.hasBom))}
           >
-            <FormControlLabel
-              control={
+            <Stack direction="row" alignItems="center" justifyContent="space-between" gap={1}>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, minWidth: 0 }}>
                 <Checkbox
                   size="small"
                   checked={Boolean(answer.hasBom)}
                   onChange={e => patch(name, { hasBom: e.target.checked })}
+                  inputProps={{ 'aria-label': `Include worksheet ${name} in BOM generation` }}
                 />
-              }
-              label={
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                  <Typography component="span" sx={{ color: fwTokens.text, fontSize: 13.5, fontWeight: 500 }}>
+                <Box sx={{ minWidth: 0 }}>
+                  <Typography sx={{ color: fwTokens.muted, fontSize: 10.5, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em', lineHeight: 1.2 }}>
+                    Worksheet tab
+                  </Typography>
+                  <Typography sx={{ color: fwTokens.text, fontSize: 14, fontWeight: 600, overflowWrap: 'anywhere' }}>
                     {name}
                   </Typography>
-                  <Chip
-                    size="small"
-                    variant="outlined"
-                    label={`${headers.length} columns`}
-                    sx={{
-                      height: 20,
-                      fontSize: 11,
-                      fontWeight: 500,
-                      color: fwTokens.muted,
-                      borderColor: fwTokens.strongBorder,
-                    }}
-                  />
                 </Box>
-              }
-              sx={{ m: 0 }}
-            />
+              </Box>
+              <Chip
+                size="small"
+                variant="outlined"
+                label={`${headers.length} columns`}
+                sx={{ height: 22, flexShrink: 0, fontSize: 11, fontWeight: 500, color: fwTokens.muted, borderColor: fwTokens.strongBorder }}
+              />
+            </Stack>
+            <Typography sx={{ pl: 5, mt: 0.1, color: fwTokens.muted, fontSize: 11.5, lineHeight: 1.4 }}>
+              {answer.hasBom ? 'Included in BOM generation' : 'Not included in BOM generation'}
+            </Typography>
             {answer.hasBom && (
               <Box sx={{ pl: { xs: 0, sm: 3.5 }, pt: 1, pb: 0.25 }}>
                 <RadioGroup

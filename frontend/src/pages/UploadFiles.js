@@ -4578,10 +4578,8 @@ const UploadFiles = () => {
         sx={{
           position: 'relative',
           zIndex: 1,
-          width: wizardStep === 0
-            ? 'min(920px, calc(100vw - 32px))'
-            : 'min(760px, calc(100vw - 32px))',
-          minHeight: wizardStep === 0 ? '580px' : 'auto',
+          width: 'min(920px, calc(100vw - 32px))',
+          minHeight: '580px',
           borderRadius: '22px',
           border: `1px solid ${Nn.cardBorder}`,
           background: Nn.cardBg,
@@ -4591,32 +4589,32 @@ const UploadFiles = () => {
           p: { xs: 2.5, md: 3.5 },
           display: 'flex',
           flexDirection: 'column',
-          justifyContent: wizardStep === 0 ? 'space-between' : 'flex-start'
+          justifyContent: 'space-between'
         }}
       >
         {/* Top Header & Progress */}
         <Box sx={{
           display: 'flex',
-          justifyContent: wizardStep === 0 ? 'center' : 'space-between',
-          alignItems: wizardStep === 0 ? 'center' : 'flex-start',
-          mb: wizardStep === 0 ? 3 : 2.25,
+          justifyContent: 'center',
+          alignItems: 'center',
+          mb: 3,
           position: 'relative',
-          textAlign: wizardStep === 0 ? 'center' : 'left'
+          textAlign: 'center'
         }}>
           <Box>
-            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: wizardStep === 0 ? 'center' : 'flex-start', gap: 1.5, mb: 0.5 }}>
+            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 1.5, mb: 0.5 }}>
               <Typography variant="h5" fontWeight="600" sx={{ color: Nn.text, letterSpacing: '-0.02em', fontSize: '1.4rem' }}>
-                {wizardStep === 1 ? 'Select Template' : 'Upload Files'}
+                Upload Files
               </Typography>
             </Box>
             <Typography variant="caption" sx={{ color: Nn.muted, fontSize: '0.85rem' }}>
-              {wizardStep === 1
-                ? 'Choose an existing workflow template, or continue and create a new one.'
+              {userFile
+                ? 'Review the sheet setup, optionally choose a saved workflow, then continue to BOM Normalizer or Process Upload.'
                 : 'Upload the client source data. Destination: FactWise item default.'}
             </Typography>
           </Box>
           <Chip
-            label={wizardStep === 0 ? 'Step 1 of 2' : 'Step 2 of 2'}
+            label={userFile ? 'Ready to continue' : 'Select a file'}
             size="small"
             sx={{
               position: 'absolute',
@@ -4645,9 +4643,8 @@ const UploadFiles = () => {
           </Alert>
         )}
 
-        {/* STEP 1: Files Selection */}
-        {wizardStep === 0 && (
-          <Box sx={{ display: 'flex', flexDirection: 'column', flex: 1, justifyContent: 'space-between' }}>
+        {/* Files Selection (persists across Step 1 & Step 2) */}
+        <Box sx={{ display: 'flex', flexDirection: 'column', flex: 1, justifyContent: 'space-between' }}>
             {/* Saved Merge Books Section */}
             {false && savedSheetJoinComparisons.length > 0 && (
               <Box
@@ -4920,109 +4917,178 @@ const UploadFiles = () => {
                   </Button>
                 </Box>
 
-                {attachedClientFiles.length > 0 && (
+                {attachedClientFiles.length > 1 && (
                   <Box
                     onClick={(event) => event.stopPropagation()}
                     sx={{
                       mt: 1.25,
-                      px: 1.5,
+                      px: 1.75,
                       py: 1.25,
                       border: `1px solid ${Nn.panelBorder}`,
-                      borderRadius: '10px',
+                      borderRadius: '12px',
                       bgcolor: Nn.panelBg,
                     }}
                   >
-                    <Typography variant="caption" sx={{ color: Nn.muted, display: 'block', mb: 0.75 }}>
-                      {attachedClientFiles.length} client file{attachedClientFiles.length === 1 ? '' : 's'} attached. The active file is used for the current setup.
-                    </Typography>
-                    <Stack spacing={1}>
-                      {attachedClientFiles.map(file => {
+                    <Stack
+                      direction="row"
+                      justifyContent="space-between"
+                      alignItems="center"
+                      flexWrap="wrap"
+                      gap={1}
+                    >
+                      <Stack direction="row" spacing={1} alignItems="center">
+                        <Typography sx={{ fontSize: 13, fontWeight: 600, color: Nn.text }}>
+                          {attachedClientFiles.length} files attached
+                        </Typography>
+                        {combineAttachedFiles && (() => {
+                          const allSourceKeys = [];
+                          attachedClientFiles.forEach((file, fileIndex) => {
+                            (attachedClientFileSheets[getClientFileKey(file)]?.sheets || []).forEach((s) => {
+                              allSourceKeys.push(`${fileIndex}:${s}`);
+                            });
+                          });
+                          const allSelected = allSourceKeys.length > 0 && allSourceKeys.every((k) => selectedAttachedSources[k]);
+                          return (
+                            <Chip
+                              size="small"
+                              label={allSelected ? 'All selected' : 'Select all'}
+                              onClick={() => {
+                                const next = {};
+                                if (!allSelected) {
+                                  allSourceKeys.forEach((k) => { next[k] = true; });
+                                }
+                                setSelectedAttachedSources(next);
+                              }}
+                              sx={{
+                                height: 22,
+                                fontSize: 11,
+                                fontWeight: 600,
+                                cursor: 'pointer',
+                                bgcolor: allSelected
+                                  ? (isDarkMode ? '#2563eb' : '#007aff')
+                                  : (isDarkMode ? '#1e2633' : '#f1f5f9'),
+                                color: allSelected
+                                  ? '#ffffff'
+                                  : (isDarkMode ? '#cbd5e1' : '#334155'),
+                                border: `1px solid ${
+                                  allSelected
+                                    ? (isDarkMode ? '#3b82f6' : '#007aff')
+                                    : (isDarkMode ? '#334155' : '#cbd5e1')
+                                }`,
+                                '&:hover': {
+                                  bgcolor: allSelected
+                                    ? (isDarkMode ? '#1d4ed8' : '#0062cc')
+                                    : (isDarkMode ? '#263040' : '#e2e8f0'),
+                                },
+                              }}
+                            />
+                          );
+                        })()}
+                      </Stack>
+
+                      <FormControlLabel
+                        sx={{ m: 0 }}
+                        control={
+                          <Checkbox
+                            checked={combineAttachedFiles}
+                            onChange={(event) => {
+                              const enabled = event.target.checked;
+                              setCombineAttachedFiles(enabled);
+                              if (enabled) {
+                                const allSources = {};
+                                const headerRows = {};
+                                attachedClientFiles.forEach((file, fileIndex) => {
+                                  (attachedClientFileSheets[getClientFileKey(file)]?.sheets || []).forEach(sheetName => {
+                                    const sourceKey = `${fileIndex}:${sheetName}`;
+                                    allSources[sourceKey] = true;
+                                    headerRows[sourceKey] = attachedClientFileSheets[getClientFileKey(file)]?.headerRows?.[sheetName] || 1;
+                                  });
+                                });
+                                setSelectedAttachedSources(allSources);
+                                setSelectedAttachedSourceHeaderRows(headerRows);
+                              }
+                            }}
+                            size="small"
+                            sx={{
+                              p: 0.5,
+                              mr: 0.5,
+                              color: isDarkMode ? '#94a3b8' : '#64748b',
+                              '&.Mui-checked': { color: isDarkMode ? '#3b82f6' : '#007aff' },
+                            }}
+                          />
+                        }
+                        label={
+                          <Typography variant="body2" sx={{ fontSize: 12.5, fontWeight: 500, color: isDarkMode ? '#e2e8f0' : '#1e293b' }}>
+                            Combine files into one BOM
+                          </Typography>
+                        }
+                      />
+                    </Stack>
+
+                    <Stack direction="row" spacing={0.75} useFlexGap flexWrap="wrap" sx={{ mt: 1 }}>
+                      {attachedClientFiles.map((file, fileIndex) => {
                         const isActiveFile = getClientFileKey(file) === getClientFileKey(userFile);
-                        const fileSheetInfo = attachedClientFileSheets[getClientFileKey(file)];
+                        const fileSheets = attachedClientFileSheets[getClientFileKey(file)]?.sheets || [];
+                        const isFileChecked = fileSheets.some((s) => selectedAttachedSources[`${fileIndex}:${s}`]);
+                        const highlighted = combineAttachedFiles ? isFileChecked : isActiveFile;
+
                         return (
-                          <Box key={getClientFileKey(file)}>
-                            <Stack direction="row" spacing={0.75} alignItems="center" useFlexGap flexWrap="wrap">
-                              <Chip
-                                size="small"
-                                label={isActiveFile ? `${file.name} (active)` : file.name}
-                                onDelete={isActiveFile ? undefined : () => handleRemoveAttachedClientFile(file)}
-                                deleteIcon={isActiveFile ? undefined : <CloseIcon fontSize="small" />}
-                                sx={{
-                                  maxWidth: '100%',
-                                  color: isActiveFile ? Nn.text : Nn.muted,
-                                  border: `1px solid ${isActiveFile ? uploadActionColor : Nn.divider}`,
-                                  bgcolor: isActiveFile ? (isDarkMode ? 'rgba(37, 99, 235, 0.16)' : 'rgba(37, 99, 235, 0.07)') : 'transparent',
-                                  '& .MuiChip-label': { overflow: 'hidden', textOverflow: 'ellipsis' },
-                                }}
-                              />
-                              {fileSheetInfo?.isPdf ? (
-                                <Typography variant="caption" sx={{ color: Nn.muted }}>PDF sheets are available after extraction.</Typography>
-                              ) : fileSheetInfo?.error ? (
-                                <Typography variant="caption" sx={{ color: '#ef4444' }}>Could not read sheets.</Typography>
-                              ) : !fileSheetInfo ? (
-                                <Typography variant="caption" sx={{ color: Nn.muted }}>Reading sheets...</Typography>
-                              ) : (
-                                <Stack direction="row" spacing={0.5} useFlexGap flexWrap="wrap">
-                                  {fileSheetInfo.sheets.map(sheetName => (
-                                    <Chip key={`${getClientFileKey(file)}:${sheetName}`} size="small" label={sheetName} variant="outlined" sx={{ height: 22, fontSize: '0.7rem', borderColor: Nn.divider, color: Nn.muted }} />
-                                  ))}
-                                </Stack>
-                              )}
-                            </Stack>
-                          </Box>
+                          <Chip
+                            key={getClientFileKey(file)}
+                            size="small"
+                            label={`${fileIndex + 1}. ${file.name}`}
+                            onClick={
+                              combineAttachedFiles
+                                ? () => {
+                                    setSelectedAttachedSources((current) => {
+                                      const next = { ...current };
+                                      fileSheets.forEach((s) => {
+                                        next[`${fileIndex}:${s}`] = !isFileChecked;
+                                      });
+                                      return next;
+                                    });
+                                  }
+                                : undefined
+                            }
+                            onDelete={!isActiveFile ? () => handleRemoveAttachedClientFile(file) : undefined}
+                            deleteIcon={!isActiveFile ? <CloseIcon fontSize="small" /> : undefined}
+                            sx={{
+                              height: 26,
+                              fontSize: 12,
+                              fontWeight: highlighted ? 600 : 500,
+                              cursor: combineAttachedFiles ? 'pointer' : 'default',
+                              color: highlighted
+                                ? (isDarkMode ? '#93c5fd' : '#1d4ed8')
+                                : (isDarkMode ? '#cbd5e1' : '#475569'),
+                              border: `1px solid ${
+                                highlighted
+                                  ? (isDarkMode ? '#3b82f6' : '#3b82f6')
+                                  : (isDarkMode ? '#334155' : '#cbd5e1')
+                              }`,
+                              bgcolor: highlighted
+                                ? (isDarkMode ? '#172e4d' : '#eff6ff')
+                                : (isDarkMode ? '#1e2633' : '#ffffff'),
+                              '&:hover': {
+                                bgcolor: highlighted
+                                  ? (isDarkMode ? '#1e3a5f' : '#dbeafe')
+                                  : (isDarkMode ? '#263040' : '#f8fafc'),
+                              },
+                            }}
+                          />
                         );
                       })}
                     </Stack>
-                    {attachedClientFiles.length > 1 && (
-                      <Box sx={{ mt: 1, pt: 1, borderTop: `1px solid ${Nn.divider}` }}>
-                        <FormControlLabel
-                          control={<Checkbox checked={combineAttachedFiles} onChange={(event) => {
-                            const enabled = event.target.checked;
-                            setCombineAttachedFiles(enabled);
-                            if (enabled) {
-                              const allSources = {};
-                              const headerRows = {};
-                              attachedClientFiles.forEach((file, fileIndex) => {
-                                (attachedClientFileSheets[getClientFileKey(file)]?.sheets || []).forEach(sheetName => {
-                                  const sourceKey = `${fileIndex}:${sheetName}`;
-                                  allSources[sourceKey] = true;
-                                  headerRows[sourceKey] = attachedClientFileSheets[getClientFileKey(file)]?.headerRows?.[sheetName] || 1;
-                                });
-                              });
-                              setSelectedAttachedSources(allSources);
-                              setSelectedAttachedSourceHeaderRows(headerRows);
-                            }
-                          }} size="small" />}
-                          label={<Typography variant="body2" sx={{ fontSize: 13, color: Nn.tableText }}>Combine selected files and sheets into one BOM</Typography>}
-                        />
-                        {combineAttachedFiles && (
-                          <Box sx={{ ml: 4, mt: 0.5 }}>
-                            {attachedClientFiles.map((file, fileIndex) => (
-                              <Box key={`combine:${getClientFileKey(file)}`} sx={{ mb: 0.5 }}>
-                                <Typography variant="caption" sx={{ color: Nn.muted }}>{file.name}</Typography>
-                                <Stack direction="row" spacing={0.5} useFlexGap flexWrap="wrap">
-                                  {(attachedClientFileSheets[getClientFileKey(file)]?.sheets || []).map(sheetName => {
-                                    const sourceKey = `${fileIndex}:${sheetName}`;
-                                    return <Stack key={sourceKey} direction="row" spacing={0.25} alignItems="center"><FormControlLabel sx={{ mr: 0 }} control={<Checkbox size="small" checked={Boolean(selectedAttachedSources[sourceKey])} onChange={(event) => setSelectedAttachedSources(current => ({ ...current, [sourceKey]: event.target.checked }))} />} label={<Typography variant="caption">{sheetName}</Typography>} /><TextField size="small" type="number" label="Header" value={selectedAttachedSourceHeaderRows[sourceKey] || 1} onChange={(event) => setSelectedAttachedSourceHeaderRows(current => ({ ...current, [sourceKey]: Math.max(1, Number(event.target.value) || 1) }))} inputProps={{ min: 1 }} sx={{ width: 92 }} /></Stack>;
-                                  })}
-                                </Stack>
-                              </Box>
-                            ))}
-                          </Box>
-                        )}
-                      </Box>
-                    )}
                   </Box>
                 )}
 
-                {/* Client File Sheet & Columns Preview Card */}
+                {/* Client File Sheet & Columns Preview Card (Step 1 only; replaced by Select Template on Step 2) */}
                 {userFile && (
-                  <Box sx={{ mt: 1.25, p: 2, borderRadius: '14px', border: `1px solid ${Nn.panelBorder}`, bgcolor: Nn.panelBg, boxShadow: isDarkMode ? '0 10px 24px -22px rgba(0,0,0,0.9)' : '0 12px 28px -24px rgba(15, 23, 42, 0.28)' }}>
+                  <Box sx={{ mt: 1.25, p: 2, minHeight: 280, borderRadius: '14px', border: `1px solid ${Nn.panelBorder}`, bgcolor: Nn.panelBg, boxShadow: isDarkMode ? '0 10px 24px -22px rgba(0,0,0,0.9)' : '0 12px 28px -24px rgba(15, 23, 42, 0.28)' }}>
                     <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1.5 }}>
                       <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                        <CheckCircleIcon sx={{ color: '#4ade80', fontSize: 18 }} />
+                        <CheckCircleIcon sx={{ color: isDarkMode ? '#4ade80' : '#16a34a', fontSize: 18 }} />
                         <Box sx={{ minWidth: 0 }}>
-                          <Typography variant="subtitle2" sx={{ color: Nn.text, fontWeight: 500, fontSize: 13.5, lineHeight: 1.25 }}>
+                          <Typography variant="subtitle2" sx={{ color: Nn.text, fontWeight: 600, fontSize: 13.5, lineHeight: 1.25 }}>
                             Sheet setup
                           </Typography>
                           <Typography variant="caption" sx={{ color: Nn.muted, fontSize: 12, lineHeight: 1.25, display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: { xs: 220, sm: 420 } }}>
@@ -5036,140 +5102,259 @@ const UploadFiles = () => {
                     </Box>
 
                     {clientSheetNames.length > 0 && (
-                      <Box sx={{ pt: 1, borderTop: `1px solid ${Nn.divider}` }}>
+                      <Box sx={{ pt: 1.25, borderTop: `1px solid ${Nn.divider}` }}>
                         {combineAttachedFiles && (
                           <Stack spacing={1} sx={{ mb: 1.5 }}>
-                            <Typography variant="caption" sx={{ color: Nn.muted }}>Selected source sheets</Typography>
-                            {attachedClientFiles.flatMap((file, fileIndex) => (
-                              (attachedClientFileSheets[getClientFileKey(file)]?.sheets || [])
-                                .filter(sheetName => selectedAttachedSources[`${fileIndex}:${sheetName}`])
-                                .map(sheetName => {
+                            <Typography variant="caption" sx={{ color: isDarkMode ? '#cbd5e1' : '#475569', fontWeight: 500 }}>
+                              Selected sheets across files:
+                            </Typography>
+                            <Stack direction="row" spacing={0.75} useFlexGap flexWrap="wrap">
+                              {attachedClientFiles.flatMap((file, fileIndex) =>
+                                (attachedClientFileSheets[getClientFileKey(file)]?.sheets || []).map((sheetName) => {
                                   const sourceKey = `${fileIndex}:${sheetName}`;
+                                  const isChecked = Boolean(selectedAttachedSources[sourceKey]);
                                   return (
-                                    <Stack key={`setup:${sourceKey}`} direction={{ xs: 'column', sm: 'row' }} spacing={1} alignItems={{ sm: 'center' }}>
-                                      <Typography sx={{ minWidth: 220, fontSize: 13, color: Nn.tableText }}>{file.name} / {sheetName}</Typography>
-                                      <TextField size="small" type="number" label="Header row" value={selectedAttachedSourceHeaderRows[sourceKey] || 1} onChange={(event) => setSelectedAttachedSourceHeaderRows(current => ({ ...current, [sourceKey]: Math.max(1, Number(event.target.value) || 1) }))} inputProps={{ min: 1 }} sx={{ width: { xs: '100%', sm: 140 } }} />
-                                    </Stack>
+                                    <Chip
+                                      key={`setup:${sourceKey}`}
+                                      size="small"
+                                      label={`${fileIndex + 1}. ${file.name} / ${sheetName}`}
+                                      onClick={() =>
+                                        setSelectedAttachedSources((current) => ({
+                                          ...current,
+                                          [sourceKey]: !isChecked,
+                                        }))
+                                      }
+                                      sx={{
+                                        height: 26,
+                                        fontSize: 11.5,
+                                        fontWeight: isChecked ? 600 : 500,
+                                        cursor: 'pointer',
+                                        border: `1px solid ${
+                                          isChecked
+                                            ? (isDarkMode ? '#3b82f6' : '#3b82f6')
+                                            : (isDarkMode ? '#334155' : '#cbd5e1')
+                                        }`,
+                                        bgcolor: isChecked
+                                          ? (isDarkMode ? '#172e4d' : '#eff6ff')
+                                          : (isDarkMode ? '#1e2633' : '#ffffff'),
+                                        color: isChecked
+                                          ? (isDarkMode ? '#93c5fd' : '#1d4ed8')
+                                          : (isDarkMode ? '#cbd5e1' : '#475569'),
+                                        '&:hover': {
+                                          bgcolor: isChecked
+                                            ? (isDarkMode ? '#1e3a5f' : '#dbeafe')
+                                            : (isDarkMode ? '#263040' : '#f8fafc'),
+                                        },
+                                      }}
+                                    />
                                   );
                                 })
-                            ))}
+                              )}
+                            </Stack>
                           </Stack>
                         )}
-                        {!combineAttachedFiles && <>
-                        <Grid container spacing={1.5} sx={uploadSheetRowSx}>
-                          <Grid item xs={7}>
-                            {userFile.name.toLowerCase().endsWith('.csv') ? (
-                              <TextField
-                                fullWidth
-                                size="small"
-                                label="Sheet Name"
-                                value={getFileStem(userFile.name)}
-                                InputProps={{ readOnly: true }}
-                                sx={fieldSx}
-                              />
-                            ) : (
-                              <FormControl fullWidth size="small" sx={uploadSheetSelectControlSx}>
-                                <InputLabel sx={inputLabelSx}>
-                                  {combineSheetsMode ? 'Sheets to combine' : 'Sheet Name'}
-                                </InputLabel>
-                                {/* Combining stacks several sheets into one, so the
-                                    picker has to accept several. */}
-                                {combineSheetsMode ? (
-                                  <Select
-                                    multiple
-                                    value={selectedClientSheets}
-                                    onChange={(e) => {
-                                      const picked = typeof e.target.value === 'string'
-                                        ? e.target.value.split(',')
-                                        : e.target.value;
-                                      setSelectedClientSheets(picked);
-                                    }}
-                                    renderValue={(picked) => `${picked.length} of ${clientSheetNames.length} selected`}
-                                    MenuProps={sheetJoinSelectMenuProps}
-                                    sx={selectFieldSx}
-                                  >
-                                    {clientSheetNames.map(s => (
-                                      <MenuItem key={s} value={s}>
-                                        <Checkbox
-                                          checked={selectedClientSheets.indexOf(s) > -1}
-                                          size="small"
-                                          sx={{ p: 0.5, mr: 1 }}
-                                        />
-                                        {s}
-                                      </MenuItem>
-                                    ))}
-                                  </Select>
+
+                        {!combineAttachedFiles && (
+                          <>
+                            <Grid container spacing={1.5} alignItems="flex-start" sx={uploadSheetRowSx}>
+                              <Grid item xs={12} sm={7}>
+                                {userFile.name.toLowerCase().endsWith('.csv') ? (
+                                  <TextField
+                                    fullWidth
+                                    size="small"
+                                    label="Sheet Name"
+                                    value={getFileStem(userFile.name)}
+                                    InputProps={{ readOnly: true }}
+                                    sx={fieldSx}
+                                  />
+                                ) : combineSheetsMode ? (
+                                  <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
+                                    <Typography
+                                      sx={{
+                                        color: fwPageTokens.muted,
+                                        fontSize: '12px',
+                                        fontWeight: 500,
+                                        lineHeight: 1,
+                                        mb: '5px',
+                                      }}
+                                    >
+                                      Sheets to combine
+                                    </Typography>
+                                    <Box
+                                      sx={{
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        flexWrap: 'wrap',
+                                        gap: 0.65,
+                                        minHeight: 40,
+                                        px: 1.15,
+                                        py: 0.6,
+                                        boxSizing: 'border-box',
+                                        borderRadius: '8px',
+                                        border: `1px solid ${fwPageTokens.strongBorder}`,
+                                        bgcolor: fwPageTokens.inputBg,
+                                        boxShadow: isDarkMode ? 'none' : '0 1px 1px rgba(15, 23, 42, 0.03)',
+                                      }}
+                                    >
+                                      <Chip
+                                        size="small"
+                                        label="All"
+                                        onClick={() => {
+                                          const allPicked = selectedClientSheets.length === clientSheetNames.length;
+                                          setSelectedClientSheets(allPicked ? [] : [...clientSheetNames]);
+                                        }}
+                                        sx={{
+                                          height: 25,
+                                          fontSize: 11.5,
+                                          fontWeight: 600,
+                                          cursor: 'pointer',
+                                          bgcolor: selectedClientSheets.length === clientSheetNames.length
+                                            ? (isDarkMode ? '#2563eb' : '#007aff')
+                                            : (isDarkMode ? '#1e2633' : '#f1f5f9'),
+                                          color: selectedClientSheets.length === clientSheetNames.length
+                                            ? '#ffffff'
+                                            : (isDarkMode ? '#cbd5e1' : '#334155'),
+                                          border: `1px solid ${
+                                            selectedClientSheets.length === clientSheetNames.length
+                                              ? (isDarkMode ? '#3b82f6' : '#007aff')
+                                              : (isDarkMode ? '#334155' : '#cbd5e1')
+                                          }`,
+                                          '&:hover': {
+                                            bgcolor: selectedClientSheets.length === clientSheetNames.length
+                                              ? (isDarkMode ? '#1d4ed8' : '#0062cc')
+                                              : (isDarkMode ? '#263040' : '#e2e8f0'),
+                                          },
+                                        }}
+                                      />
+                                      {clientSheetNames.map((sheet, idx) => {
+                                        const isChecked = selectedClientSheets.includes(sheet);
+                                        return (
+                                          <Chip
+                                            key={sheet}
+                                            size="small"
+                                            label={`${idx + 1}. ${sheet}`}
+                                            onClick={() => {
+                                              setSelectedClientSheets((prev) =>
+                                                prev.includes(sheet)
+                                                  ? prev.filter((item) => item !== sheet)
+                                                  : [...prev, sheet]
+                                              );
+                                            }}
+                                            sx={{
+                                              height: 25,
+                                              fontSize: 11.5,
+                                              fontWeight: isChecked ? 600 : 500,
+                                              cursor: 'pointer',
+                                              bgcolor: isChecked
+                                                ? (isDarkMode ? '#172e4d' : '#eff6ff')
+                                                : (isDarkMode ? '#1e2633' : '#f8fafc'),
+                                              color: isChecked
+                                                ? (isDarkMode ? '#93c5fd' : '#1d4ed8')
+                                                : (isDarkMode ? '#cbd5e1' : '#475569'),
+                                              border: `1px solid ${
+                                                isChecked
+                                                  ? (isDarkMode ? '#3b82f6' : '#3b82f6')
+                                                  : (isDarkMode ? '#334155' : '#cbd5e1')
+                                              }`,
+                                              '&:hover': {
+                                                bgcolor: isChecked
+                                                  ? (isDarkMode ? '#1e3a5f' : '#dbeafe')
+                                                  : (isDarkMode ? '#263040' : '#f1f5f9'),
+                                              },
+                                            }}
+                                          />
+                                        );
+                                      })}
+                                    </Box>
+                                  </Box>
                                 ) : (
-                                  <Select
-                                    value={selectedClientSheet}
-                                    onChange={(e) => handleClientSheetChange(e.target.value)}
-                                    MenuProps={sheetJoinSelectMenuProps}
-                                    sx={selectFieldSx}
-                                  >
-                                    {clientSheetNames.map(s => (
-                                      <MenuItem key={s} value={s}>{s}</MenuItem>
-                                    ))}
-                                  </Select>
+                                  <FormControl fullWidth size="small" sx={uploadSheetSelectControlSx}>
+                                    <InputLabel sx={inputLabelSx}>Sheet Name</InputLabel>
+                                    <Select
+                                      value={selectedClientSheet}
+                                      onChange={(e) => handleClientSheetChange(e.target.value)}
+                                      MenuProps={sheetJoinSelectMenuProps}
+                                      sx={selectFieldSx}
+                                    >
+                                      {clientSheetNames.map((s) => (
+                                        <MenuItem key={s} value={s}>{s}</MenuItem>
+                                      ))}
+                                    </Select>
+                                  </FormControl>
                                 )}
-                              </FormControl>
-                            )}
-                          </Grid>
-                          <Grid item xs={5}>
-                            <TextField
-                              label="Header Row"
-                              type="number"
-                              size="small"
-                              fullWidth
-                              InputProps={{ inputProps: { min: 1 } }}
-                              value={clientHeaderRow}
-                              onChange={(e) => handleClientHeaderRowChange(e.target.value)}
-                              sx={fieldSx}
-                            />
-                          </Grid>
-                        </Grid>
-
-
-                        {clientSheetNames.length > 1 && (
-                          <Box sx={{ mb: 1.5 }}>
-                            <FormControlLabel
-                              control={
-                                <Checkbox
-                                  checked={combineSheetsMode}
-                                  onChange={(e) => {
-                                    const on = e.target.checked;
-                                    setCombineSheetsMode(on);
-                                    // Start from every sheet; unticking any is
-                                    // easier than picking them all one by one.
-                                    setSelectedClientSheets(on ? [...clientSheetNames] : []);
-                                  }}
+                              </Grid>
+                              <Grid item xs={12} sm={5}>
+                                <TextField
+                                  label="Header Row"
+                                  type="number"
                                   size="small"
-                                  sx={{
-                                    color: isDarkMode ? '#60a5fa' : '#94a3b8',
-                                    '&.Mui-checked': { color: uploadActionColor }
-                                  }}
+                                  fullWidth
+                                  InputProps={{ inputProps: { min: 1 } }}
+                                  value={clientHeaderRow}
+                                  onChange={(e) => handleClientHeaderRowChange(e.target.value)}
+                                  sx={fieldSx}
                                 />
-                              }
-                              label={
-                                <Typography variant="body2" sx={{ color: Nn.tableText, fontSize: 13, fontWeight: 500 }}>
-                                  Combine multiple sheets into one (same layout, e.g. one sheet per BOM)
-                                </Typography>
-                              }
-                            />
-                            {combineSheetsMode && (
-                              <Typography variant="caption" sx={{ display: 'block', color: Nn.muted, fontSize: 12, mt: 0.25 }}>
-                                {selectedClientSheets.length > 1
-                                  ? `Rows from ${selectedClientSheets.length} sheets are stacked into one sheet, using the header row above.`
-                                  : 'Pick at least two sheets to combine.'}
-                              </Typography>
-                            )}
-                          </Box>
-                        )}
+                              </Grid>
+                            </Grid>
 
-                        </>}
+                            {clientSheetNames.length > 1 && (
+                              <Stack
+                                direction="row"
+                                alignItems="center"
+                                justifyContent="space-between"
+                                flexWrap="wrap"
+                                gap={1}
+                                sx={{ mb: 1.25 }}
+                              >
+                                <FormControlLabel
+                                  sx={{ m: 0 }}
+                                  control={
+                                    <Checkbox
+                                      checked={combineSheetsMode}
+                                      onChange={(e) => {
+                                        const on = e.target.checked;
+                                        setCombineSheetsMode(on);
+                                        setSelectedClientSheets(on ? [...clientSheetNames] : []);
+                                      }}
+                                      size="small"
+                                      sx={{
+                                        p: 0.5,
+                                        mr: 0.5,
+                                        color: isDarkMode ? '#94a3b8' : '#64748b',
+                                        '&.Mui-checked': { color: isDarkMode ? '#3b82f6' : '#007aff' },
+                                      }}
+                                    />
+                                  }
+                                  label={
+                                    <Typography variant="body2" sx={{ color: isDarkMode ? '#e2e8f0' : '#1e293b', fontSize: 12.75, fontWeight: 500 }}>
+                                      Combine multiple sheets (same columns)
+                                    </Typography>
+                                  }
+                                />
+                                {combineSheetsMode && (
+                                  <Typography
+                                    variant="caption"
+                                    sx={{
+                                      color: selectedClientSheets.length > 1
+                                        ? (isDarkMode ? '#93c5fd' : '#1d4ed8')
+                                        : (isDarkMode ? '#f87171' : '#dc2626'),
+                                      fontSize: 11.75,
+                                      fontWeight: 600,
+                                    }}
+                                  >
+                                    {selectedClientSheets.length > 1
+                                      ? `${selectedClientSheets.length} of ${clientSheetNames.length} sheets selected`
+                                      : 'Select at least 2 sheets'}
+                                  </Typography>
+                                )}
+                              </Stack>
+                            )}
+                          </>
+                        )}
 
                         {clientHeaderPreview.length > 0 && (
                           <Box sx={{ mb: 1.5 }}>
-                            <Typography variant="caption" sx={{ color: Nn.muted, fontSize: 12, fontWeight: 500, display: 'block', mb: 0.75 }}>
+                            <Typography variant="caption" sx={{ color: isDarkMode ? '#cbd5e1' : '#475569', fontSize: 12, fontWeight: 500, display: 'block', mb: 0.75 }}>
                               {clientHeaderAutoDetected
                                 ? `Header row auto-detected at row ${clientHeaderRow} — ${clientHeaderPreview.length} source columns found.`
                                 : `${clientHeaderPreview.length} source columns found on row ${clientHeaderRow}.`}
@@ -5181,7 +5366,14 @@ const UploadFiles = () => {
                                   size="small"
                                   variant="outlined"
                                   label={h.length > 22 ? `${h.slice(0, 22)}…` : h}
-                                  sx={{ height: 24, fontSize: 11, bgcolor: a.surface.subtle, borderColor: a.border.default, color: Nn.tableText, fontWeight: 500 }}
+                                  sx={{
+                                    height: 24,
+                                    fontSize: 11,
+                                    fontWeight: 500,
+                                    bgcolor: isDarkMode ? '#1e2633' : '#f8fafc',
+                                    borderColor: isDarkMode ? '#334155' : '#cbd5e1',
+                                    color: isDarkMode ? '#e2e8f0' : '#1e293b',
+                                  }}
                                 />
                               ))}
                               {clientHeaderPreview.length > 12 && (
@@ -5192,16 +5384,16 @@ const UploadFiles = () => {
                                   sx={{
                                     height: 24,
                                     fontSize: 11,
-                                    bgcolor: isDarkMode ? 'rgba(0, 122, 255, 0.18)' : 'rgba(0, 122, 255, 0.12)',
-                                    border: isDarkMode ? '1px solid rgba(96, 165, 250, 0.22)' : '1px solid rgba(0, 122, 255, 0.18)',
-                                    color: isDarkMode ? '#60a5fa' : uploadActionColor,
-                                    fontWeight: 500,
+                                    bgcolor: isDarkMode ? '#172e4d' : '#eff6ff',
+                                    border: `1px solid ${isDarkMode ? '#2563eb' : '#93c5fd'}`,
+                                    color: isDarkMode ? '#93c5fd' : '#1d4ed8',
+                                    fontWeight: 600,
                                     cursor: 'pointer',
                                     transition: 'background-color 160ms ease, color 160ms ease, border-color 160ms ease',
                                     '&:hover': {
-                                      bgcolor: isDarkMode ? 'rgba(0, 122, 255, 0.24)' : 'rgba(0, 122, 255, 0.18)',
-                                      borderColor: isDarkMode ? 'rgba(96, 165, 250, 0.34)' : 'rgba(0, 122, 255, 0.30)'
-                                    }
+                                      bgcolor: isDarkMode ? '#1e3a5f' : '#dbeafe',
+                                      borderColor: isDarkMode ? '#3b82f6' : '#60a5fa',
+                                    },
                                   }}
                                 />
                               )}
@@ -5210,7 +5402,7 @@ const UploadFiles = () => {
                         )}
 
                         {clientSheetNames.length > 0 && (
-                          <Box sx={{ mt: 1, display: 'flex', gap: 1, alignItems: 'center' }}>
+                          <Box sx={{ mt: 1, display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap' }}>
                             {pdfExtractionReview && (
                               <Button
                                 variant="outlined"
@@ -5222,14 +5414,14 @@ const UploadFiles = () => {
                                   borderRadius: '999px',
                                   px: 2,
                                   fontSize: 12,
-                                  fontWeight: 500,
-                                  borderColor: isDarkMode ? 'rgba(0, 122, 255, 0.36)' : 'rgba(0, 122, 255, 0.22)',
-                                  color: isDarkMode ? '#66b3ff' : uploadActionColor,
-                                  bgcolor: isDarkMode ? 'rgba(0, 122, 255, 0.12)' : 'rgba(0, 122, 255, 0.07)',
+                                  fontWeight: 600,
+                                  borderColor: isDarkMode ? '#2563eb' : '#93c5fd',
+                                  color: isDarkMode ? '#93c5fd' : '#1d4ed8',
+                                  bgcolor: isDarkMode ? '#172e4d' : '#eff6ff',
                                   '&:hover': {
-                                    borderColor: isDarkMode ? 'rgba(0, 122, 255, 0.52)' : 'rgba(0, 122, 255, 0.34)',
-                                    bgcolor: isDarkMode ? 'rgba(0, 122, 255, 0.18)' : 'rgba(0, 122, 255, 0.10)'
-                                  }
+                                    borderColor: isDarkMode ? '#3b82f6' : '#60a5fa',
+                                    bgcolor: isDarkMode ? '#1e3a5f' : '#dbeafe',
+                                  },
                                 }}
                               >
                                 Review extracted PDF
@@ -5245,14 +5437,14 @@ const UploadFiles = () => {
                                 borderRadius: '999px',
                                 px: 2,
                                 fontSize: 12,
-                                fontWeight: 500,
-                                borderColor: isDarkMode ? 'rgba(0, 122, 255, 0.36)' : 'rgba(0, 122, 255, 0.22)',
-                                color: isDarkMode ? '#66b3ff' : uploadActionColor,
-                                bgcolor: isDarkMode ? 'rgba(0, 122, 255, 0.12)' : 'rgba(0, 122, 255, 0.07)',
+                                fontWeight: 600,
+                                borderColor: isDarkMode ? '#2563eb' : '#93c5fd',
+                                color: isDarkMode ? '#93c5fd' : '#1d4ed8',
+                                bgcolor: isDarkMode ? '#172e4d' : '#eff6ff',
                                 '&:hover': {
-                                  borderColor: isDarkMode ? 'rgba(0, 122, 255, 0.52)' : 'rgba(0, 122, 255, 0.34)',
-                                  bgcolor: isDarkMode ? 'rgba(0, 122, 255, 0.18)' : 'rgba(0, 122, 255, 0.10)'
-                                }
+                                  borderColor: isDarkMode ? '#3b82f6' : '#60a5fa',
+                                  bgcolor: isDarkMode ? '#1e3a5f' : '#dbeafe',
+                                },
                               }}
                             >
                               Merge sheets
@@ -5268,87 +5460,130 @@ const UploadFiles = () => {
             </Grid>
 
             {/* Step 1 Bottom Action Bar */}
-            <Box sx={{ mt: userFile ? 2.5 : 'auto', pt: 2.5, borderTop: `1px solid ${Nn.divider}`, display: 'flex', alignItems: 'center', justifyContent: userFile ? 'space-between' : 'flex-end' }}>
-              {userFile && (
-                <Typography variant="caption" sx={{ color: '#60a5fa', fontWeight: 500 }}>
-                  {userFile?.name?.toLowerCase?.().endsWith('.pdf') && !clientWorkbook
-                    ? 'Extract this PDF first, then merge or continue.'
-                    : 'Client file ready. Destination: FactWise item default'}
-                </Typography>
-              )}
-              <Button
-                variant="contained"
-                onClick={() => {
-                  if (!userFile) {
-                    setError('Please select a client file');
-                    return;
-                  }
-                  if (userFile.name.toLowerCase().endsWith('.pdf') && !clientWorkbook) {
-                    preparePdfExtractionDialog(userFile, {
-                      target: 'primary',
-                      action: 'setup',
-                    });
-                    return;
-                  }
-                  setWizardStep(1);
-                }}
-                disabled={!userFile}
-                sx={{
-                  ...factWisePrimaryButtonSx,
-                  px: 3.5,
-                  py: 0.9,
-                  '&.Mui-disabled': {
-                    ...factWisePrimaryButtonSx['&.Mui-disabled'],
-                    color: isDarkMode ? '#64748b' : '#94a3b8'
-                  }
-                }}
-              >
-                {userFile?.name?.toLowerCase?.().endsWith('.pdf') && !clientWorkbook ? 'Extract PDF →' : 'Next →'}
-              </Button>
-            </Box>
-          </Box>
-        )}
+            {false && wizardStep === 0 && (
+              <Box sx={{ mt: userFile ? 2.5 : 'auto', pt: 2.5, borderTop: `1px solid ${Nn.divider}`, display: 'flex', alignItems: 'center', justifyContent: userFile ? 'space-between' : 'flex-end' }}>
+                {userFile && (
+                  <Typography variant="caption" sx={{ color: '#60a5fa', fontWeight: 500 }}>
+                    {userFile?.name?.toLowerCase?.().endsWith('.pdf') && !clientWorkbook
+                      ? 'Extract this PDF first, then merge or continue.'
+                      : 'Client file ready. Destination: FactWise item default'}
+                  </Typography>
+                )}
+                <Button
+                  variant="contained"
+                  onClick={() => {
+                    if (!userFile) {
+                      setError('Please select a client file');
+                      return;
+                    }
+                    if (userFile.name.toLowerCase().endsWith('.pdf') && !clientWorkbook) {
+                      preparePdfExtractionDialog(userFile, {
+                        target: 'primary',
+                        action: 'setup',
+                      });
+                      return;
+                    }
+                    setWizardStep(1);
+                  }}
+                  disabled={!userFile}
+                  sx={{
+                    ...factWisePrimaryButtonSx,
+                    px: 3.5,
+                    py: 0.9,
+                    '&.Mui-disabled': {
+                      ...factWisePrimaryButtonSx['&.Mui-disabled'],
+                      color: isDarkMode ? '#64748b' : '#94a3b8'
+                    }
+                  }}
+                >
+                  {userFile?.name?.toLowerCase?.().endsWith('.pdf') && !clientWorkbook ? 'Extract PDF →' : 'Next →'}
+                </Button>
+              </Box>
+            )}
 
-        {/* STEP 2: Choose Options (Mapping Template + Tag Template) */}
-        {wizardStep === 1 && (
-          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5, justifyContent: 'flex-start' }}>
-            <Grid container spacing={2}>
-              <Grid item xs={12}>
-                <Box sx={{ p: { xs: 1.75, md: 2 }, borderRadius: '14px', border: `1px solid ${Nn.divider}`, bgcolor: Nn.subtlePanelBg }}>
-                  <Box sx={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 1.5, mb: 1.25 }}>
-                    <Box sx={{ minWidth: 0, flex: '1 1 auto' }}>
-                      <Typography variant="subtitle2" sx={{ color: Nn.text, fontWeight: 500, fontSize: 13, lineHeight: 1.25, mb: 0.3 }}>
-                        Use Template
-                      </Typography>
-                      <Typography variant="caption" sx={{ color: Nn.muted, display: 'block', fontSize: 12, fontWeight: 400, lineHeight: 1.35 }}>
-                        Select an existing template if this file follows a known structure. Otherwise continue normally to create a new one.
-                      </Typography>
+            {/* Workflow selection and destinations follow sheet setup on this screen. */}
+            {userFile && (
+              <Box sx={{ mt: 1.25, display: 'flex', flexDirection: 'column', gap: 1.5, justifyContent: 'flex-start' }}>
+            <Grid container spacing={2.5} justifyContent="center">
+              <Grid item xs={12} md={10} lg={9}>
+                <Box sx={{ p: 2.25, minHeight: 280, display: 'flex', flexDirection: 'column', justifyContent: 'space-between', borderRadius: '14px', border: `1px solid ${Nn.panelBorder}`, bgcolor: Nn.panelBg, boxShadow: isDarkMode ? '0 10px 24px -22px rgba(0,0,0,0.9)' : '0 12px 28px -24px rgba(15, 23, 42, 0.28)' }}>
+                  <Box>
+                    <Box sx={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 1.5, mb: 2 }}>
+                      <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 1.25, minWidth: 0, flex: '1 1 auto' }}>
+                        <Box
+                          sx={{
+                            width: 32,
+                            height: 32,
+                            borderRadius: '9px',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            flexShrink: 0,
+                            bgcolor: selectedProcessingTemplateId
+                              ? (isDarkMode ? 'rgba(16, 185, 129, 0.16)' : '#ecfdf5')
+                              : (isDarkMode ? 'rgba(0, 122, 255, 0.16)' : '#eff6ff'),
+                            border: `1px solid ${
+                              selectedProcessingTemplateId
+                                ? (isDarkMode ? 'rgba(16, 185, 129, 0.35)' : '#a7f3d0')
+                                : (isDarkMode ? 'rgba(59, 130, 246, 0.3)' : '#bfdbfe')
+                            }`,
+                          }}
+                        >
+                          {selectedProcessingTemplateId ? (
+                            <CheckCircleIcon sx={{ color: isDarkMode ? '#34d399' : '#059669', fontSize: 18 }} />
+                          ) : (
+                            <LibraryBooksIcon sx={{ color: isDarkMode ? '#60a5fa' : '#007aff', fontSize: 17 }} />
+                          )}
+                        </Box>
+                        <Box sx={{ minWidth: 0 }}>
+                          <Typography variant="subtitle2" sx={{ color: Nn.text, fontWeight: 600, fontSize: 14, lineHeight: 1.3 }}>
+                            Select an existing template
+                          </Typography>
+                          <Typography variant="caption" sx={{ color: Nn.muted, display: 'block', fontSize: 12, fontWeight: 400, lineHeight: 1.4, mt: 0.25 }}>
+                            Reuse a saved workflow if this file follows a known layout, or leave blank to create a new one.
+                          </Typography>
+                        </Box>
+                      </Box>
+                      <Button
+                        size="small"
+                        variant="text"
+                        onClick={loadAvailableProcessingTemplates}
+                        disabled={processingTemplatesLoading}
+                        sx={{
+                          flexShrink: 0,
+                          minWidth: 0,
+                          height: 28,
+                          px: 1.25,
+                          borderRadius: '999px',
+                          textTransform: 'none',
+                          color: Nn.accent,
+                          fontSize: 12,
+                          fontWeight: 500,
+                          lineHeight: 1,
+                          '&:hover': {
+                            bgcolor: isDarkMode ? 'rgba(0, 122, 255, 0.12)' : 'rgba(0, 122, 255, 0.08)',
+                          },
+                        }}
+                      >
+                        Refresh
+                      </Button>
                     </Box>
-                    <Button
-                      size="small"
-                      variant="text"
-                      onClick={loadAvailableProcessingTemplates}
-                      disabled={processingTemplatesLoading}
+
+                    <Typography
+                      component="label"
                       sx={{
-                        flexShrink: 0,
-                        minWidth: 0,
-                        height: 28,
-                        px: 1,
-                        mt: -0.35,
-                        borderRadius: '999px',
-                        textTransform: 'none',
-                        color: Nn.accent,
+                        display: 'block',
+                        mb: 0.75,
                         fontSize: 12,
                         fontWeight: 500,
-                        lineHeight: 1,
-                        '&:hover': {
-                          bgcolor: isDarkMode ? 'rgba(0, 122, 255, 0.12)' : 'rgba(0, 122, 255, 0.08)',
-                        },
+                        color: Nn.text,
                       }}
                     >
-                      Refresh
-                    </Button>
-                  </Box>
+                      Saved workflow template{' '}
+                      <Typography component="span" sx={{ fontSize: 11.5, fontWeight: 400, color: Nn.muted }}>
+                        (optional)
+                      </Typography>
+                    </Typography>
 
                   <Grid container spacing={1.5} sx={{ display: 'none' }}>
                     {[
@@ -5392,16 +5627,16 @@ const UploadFiles = () => {
                     })}
                   </Grid>
 
-                  <FormControl fullWidth sx={{ mt: 1.25 }} disabled={processingTemplatesLoading}>
+                  <FormControl fullWidth disabled={processingTemplatesLoading}>
                       <Select
                         value={selectedProcessingTemplateId}
                         displayEmpty
                         renderValue={(selected) => {
                           if (!selected) {
-                            return <Typography sx={{ color: Nn.muted, fontSize: 12, fontWeight: 400 }}>Use Template</Typography>;
+                            return <Typography sx={{ color: Nn.muted, fontSize: 12.5, fontWeight: 400 }}>Choose a saved template...</Typography>;
                           }
                           const template = processingTemplates.find((item) => String(item.id) === String(selected));
-                          return <Typography sx={{ color: Nn.text, fontSize: 12, fontWeight: 400 }}>{template?.name || 'Use Template'}</Typography>;
+                          return <Typography sx={{ color: Nn.text, fontSize: 12.5, fontWeight: 500 }}>{template?.name || 'Choose a saved template...'}</Typography>;
                         }}
                         onChange={(event) => {
                           const nextValue = event.target.value;
@@ -5463,6 +5698,58 @@ const UploadFiles = () => {
                         ))}
                       </Select>
                   </FormControl>
+                  </Box>
+
+                  {/* Contextual guidance footer inside the template card */}
+                  <Box
+                    sx={{
+                      mt: 2,
+                      px: 1.5,
+                      py: 1.15,
+                      borderRadius: '10px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      gap: 1.25,
+                      bgcolor: selectedProcessingTemplateId
+                        ? (isDarkMode ? 'rgba(16, 185, 129, 0.1)' : '#f0fdf4')
+                        : (isDarkMode ? 'rgba(148, 163, 184, 0.08)' : '#f8fafc'),
+                      border: `1px solid ${
+                        selectedProcessingTemplateId
+                          ? (isDarkMode ? 'rgba(16, 185, 129, 0.25)' : '#bbf7d0')
+                          : Nn.divider
+                      }`,
+                    }}
+                  >
+                    <Typography sx={{ fontSize: 12, fontWeight: 400, color: selectedProcessingTemplateId ? (isDarkMode ? '#6ee7b7' : '#166534') : Nn.muted, lineHeight: 1.45 }}>
+                      {selectedProcessingTemplateId
+                        ? 'Template selected — click Process Upload → to apply this saved workflow directly.'
+                        : 'No template selected — click BOM Normalizer to normalize & map from scratch, or Process Upload → to continue.'}
+                    </Typography>
+                    {selectedProcessingTemplateId && (
+                      <Button
+                        size="small"
+                        variant="text"
+                        onClick={handleClearProcessingTemplateSelection}
+                        sx={{
+                          flexShrink: 0,
+                          minWidth: 0,
+                          px: 1.25,
+                          height: 26,
+                          borderRadius: '999px',
+                          textTransform: 'none',
+                          fontSize: 11.5,
+                          fontWeight: 500,
+                          color: isDarkMode ? '#f87171' : '#dc2626',
+                          '&:hover': {
+                            bgcolor: isDarkMode ? 'rgba(239, 68, 68, 0.16)' : '#fee2e2',
+                          },
+                        }}
+                      >
+                        Clear
+                      </Button>
+                    )}
+                  </Box>
                 </Box>
               </Grid>
 
@@ -5623,7 +5910,7 @@ const UploadFiles = () => {
               </Grid>
             </Grid>
 
-            {/* Step 2 Bottom Action Bar */}
+            {/* Upload destinations */}
             <Box sx={{
               mt: 'auto',
               pt: 2,
@@ -5639,6 +5926,7 @@ const UploadFiles = () => {
                 onClick={() => setWizardStep(0)}
                 sx={{
                   ...secondaryPillSx,
+                  display: 'none',
                   minWidth: 86,
                   height: 34,
                   px: 1.6,
@@ -5695,8 +5983,9 @@ const UploadFiles = () => {
                 </Button>
               </Box>
             </Box>
+              </Box>
+            )}
           </Box>
-        )}
       </Box>
 
       <Dialog

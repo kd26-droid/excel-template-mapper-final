@@ -8278,6 +8278,24 @@ const mergeExistingMappingsWithNormalizer = (existingMappings = [], normalizerMa
   return Array.from(byTarget.values());
 };
 
+const NORMALIZED_TABLE_COLUMN_PREFERENCES_KEY = 'factwise-bom-normalizer-column-preferences-v1';
+
+const readNormalizedTableColumnPreferences = () => {
+  try {
+    const stored = window.localStorage.getItem(NORMALIZED_TABLE_COLUMN_PREFERENCES_KEY);
+    if (!stored) return null;
+    const parsed = JSON.parse(stored);
+    if (Array.isArray(parsed)) return { visible: parsed, known: [] };
+    if (!parsed || !Array.isArray(parsed.visible)) return null;
+    return {
+      visible: parsed.visible.filter((key) => typeof key === 'string'),
+      known: Array.isArray(parsed.known) ? parsed.known.filter((key) => typeof key === 'string') : [],
+    };
+  } catch (_) {
+    return null;
+  }
+};
+
 const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenceOnlyChange }) => {
   const { isDarkMode, tokens: themeTokens } = useThemeContext();
   const pageTokens = buildFactWisePageTokens(isDarkMode, themeTokens);
@@ -8330,7 +8348,16 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
     return [...NORMALIZED_TABLE_BASE_COLUMNS, ...dynamicColumns];
   }, [rows]);
   const defaultVisibleColumns = ['relation', 'level', 'cpn', 'mpn', 'manufacturer', 'quantity', 'uom', 'Item code', 'confidence'];
-  const [visibleColumnKeys, setVisibleColumnKeys] = useState(defaultVisibleColumns);
+  const [visibleColumnKeys, setVisibleColumnKeys] = useState(() => (
+    readNormalizedTableColumnPreferences()?.visible || defaultVisibleColumns
+  ));
+  const knownColumnKeysRef = useRef(null);
+  if (knownColumnKeysRef.current === null) {
+    const saved = readNormalizedTableColumnPreferences();
+    knownColumnKeysRef.current = saved?.known?.length
+      ? saved.known
+      : columns.map((column) => column.key);
+  }
   const [searchQuery, setSearchQuery] = useState('');
   const [relationFilter, setRelationFilter] = useState('all');
   const [issueFilter, setIssueFilter] = useState('all');
@@ -8390,9 +8417,17 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
   }, [allRowsTotalPages]);
 
   useEffect(() => {
+    const currentKeys = columns.map((column) => column.key);
+    const newlyAvailableKeys = currentKeys.filter((key) => !knownColumnKeysRef.current.includes(key));
+    knownColumnKeysRef.current = Array.from(new Set([...knownColumnKeysRef.current, ...currentKeys]));
+    if (!newlyAvailableKeys.length) return;
+    setVisibleColumnKeys((current) => Array.from(new Set([...current, ...newlyAvailableKeys])));
+  }, [columns]);
+
+  useEffect(() => {
     const noteColumnsWithValues = ['Notes', 'Internal notes']
       .filter((column) => rows.some((row) => fmt(row?.[column])));
-    if (!noteColumnsWithValues.length) return;
+    if (!noteColumnsWithValues.length || readNormalizedTableColumnPreferences()) return;
     setVisibleColumnKeys((current) => {
       const next = [...current];
       noteColumnsWithValues.forEach((column) => {
@@ -8401,6 +8436,17 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
       return next.length === current.length ? current : next;
     });
   }, [rows]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(NORMALIZED_TABLE_COLUMN_PREFERENCES_KEY, JSON.stringify({
+        visible: visibleColumnKeys,
+        known: knownColumnKeysRef.current,
+      }));
+    } catch (_) {
+      // Keep column visibility usable when browser storage is unavailable.
+    }
+  }, [columns, visibleColumnKeys]);
 
   const handleCellChange = (rowIndex, key, value) => {
     if (!onRowsChange) return;

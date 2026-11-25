@@ -1,3 +1,6 @@
+import SheetSortPopover from '../components/SheetSortPopover';
+import FactWiseToast from '../components/FactWiseToast';
+import SheetColumnsPopover from './SheetColumnsPopover';
 // EnhancedDataEditor.js - DataEditor with comprehensive synchronization
 // Fixes all refresh issues on Azure deployment
 
@@ -17,7 +20,6 @@ import {
   DialogContent,
   DialogContentText,
   DialogTitle,
-  Snackbar,
   Tooltip,
   Card,
   CardContent,
@@ -48,6 +50,7 @@ import {
   ListItemText,
   ListSubheader,
   Menu,
+  Popover,
   Tabs,
   Tab,
   ToggleButton,
@@ -65,6 +68,7 @@ import {
   HelpOutline as HelpOutlineIcon,
   Edit as EditIcon,
   Check as CheckIcon,
+  ChevronLeft as ChevronLeftIcon,
   ArrowBack as ArrowBackIcon,
   AutoAwesome as AutoAwesomeIcon,
   ContentCopy as ContentCopyIcon,
@@ -90,7 +94,8 @@ import {
   Add as AddIcon,
   DeleteOutline as DeleteIcon,
   Fullscreen as FullscreenIcon,
-  FullscreenExit as FullscreenExitIcon
+  FullscreenExit as FullscreenExitIcon,
+  SwapVert as SwapVertIcon
 } from '@mui/icons-material';
 import api from '../services/api';
 import { uploadFileToFactwiseBulkImport } from '../services/factwiseApi';
@@ -110,6 +115,8 @@ import { displayHeaderName } from '../utils/columnHeaderNames';
 import {
   factWiseAlertSx,
   buildFactWiseTableTone,
+  factWiseTableHeaderCellSx,
+  factWiseTableBodyCellSx,
   buildFactWisePageTokens,
   factWiseCancelButtonSx,
   factWiseDialogPaperSx,
@@ -120,7 +127,6 @@ import {
   factWisePrimaryButtonSx,
   factWiseSelectFieldSx,
   factWiseSelectMenuProps,
-  factWiseToastAlertSx,
   factWiseTopShadeSx,
 } from '../utils/factwisePageStyles';
 
@@ -510,6 +516,25 @@ const EnhancedDataEditor = () => {
   const [error, setError] = useState(null);
   const [rowData, setRowData] = useState([]);
   const [columnDefs, setColumnDefs] = useState([]);
+  const [hiddenColumnFields, setHiddenColumnFields] = useState(() => {
+    try {
+      const stored = window.localStorage.getItem(`factwise-editor-hidden-columns:${sessionId || 'default'}`);
+      const fields = stored ? JSON.parse(stored) : [];
+      return new Set(Array.isArray(fields) ? fields.filter((field) => typeof field === 'string') : []);
+    } catch (_) {
+      return new Set();
+    }
+  });
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        `factwise-editor-hidden-columns:${sessionId || 'default'}`,
+        JSON.stringify(Array.from(hiddenColumnFields))
+      );
+    } catch (_) {
+      // Keep column visibility usable when browser storage is unavailable.
+    }
+  }, [hiddenColumnFields, sessionId]);
   const [rowSearchTerm, setRowSearchTerm] = useState('');
   const [columnWidths, setColumnWidths] = useState({});
   const [autoFitApplied, setAutoFitApplied] = useState(false);
@@ -575,7 +600,7 @@ const EnhancedDataEditor = () => {
   // captured an older one.
   const pageRef = useRef(page);
   pageRef.current = page;
-  const [pageSize, setPageSize] = useState(100);
+  const [pageSize, setPageSize] = useState(20);
   const [pageLoading, setPageLoading] = useState(false);
   // Per-column filter text, keyed by column field. Empty/absent means no filter.
   const [columnFilters, setColumnFilters] = useState({});
@@ -584,6 +609,12 @@ const EnhancedDataEditor = () => {
   // so the grid needs its own value-set filter to show them together.
   const [issueRowFilter, setIssueRowFilter] = useState(null);
   const [showColumnFilters, setShowColumnFilters] = useState(false);
+  // Column freeze / pinning state
+  const [frozenFields, setFrozenFields] = useState(() => new Set(['__row_number__']));
+  // Column sort state: { field: string | null, direction: 'asc' | 'desc' | null }
+  const [sortRules, setSortRules] = useState([]);
+  // Persistent row selection state: Set of stable row indices
+  const [selectedRows, setSelectedRows] = useState(() => new Set());
 
   // Formula Builder state
   const [createColumnDialogOpen, setCreateColumnDialogOpen] = useState(false);
@@ -755,9 +786,13 @@ const EnhancedDataEditor = () => {
   const [showDeletedRows, setShowDeletedRows] = useState(false);
 
   // Toolbar dropdown menu anchors
+  const [exportAnchor, setExportAnchor] = useState(null);
   const [toolsMenuAnchor, setToolsMenuAnchor] = useState(null);
   const [mpnMenuAnchor, setMpnMenuAnchor] = useState(null);
   const [rowFilterMenuAnchor, setRowFilterMenuAnchor] = useState(null);
+  const [columnsPopoverAnchor, setColumnsPopoverAnchor] = useState(null);
+  const [sortPopoverAnchor, setSortPopoverAnchor] = useState(null);
+  const [sortDraft, setSortDraft] = useState([]);
   const [rowFilterMode, setRowFilterMode] = useState('all');
   const [moreMenuAnchor, setMoreMenuAnchor] = useState(null);
 
@@ -972,6 +1007,7 @@ const EnhancedDataEditor = () => {
   // Values highlight duplicate cells; rows highlight the lines a BOM issue
   // names, which is the only thing that works when the offending cell is blank.
   const [dupHighlight, setDupHighlight] = useState(null);
+  const [factwiseErrorHighlight, setFactwiseErrorHighlight] = useState(null);
 
   // Helper function to identify MPN validation columns
   const isMpnValidationColumn = useCallback((columnName) => {
@@ -999,7 +1035,7 @@ const EnhancedDataEditor = () => {
   }, []);
 
   // Filter columns based on MPN visibility toggle
-  const getVisibleColumnDefs = useCallback(() => {
+  const getVisibleColumnDefs = useCallback((includeHidden = false) => {
     if (!columnDefs || !Array.isArray(columnDefs)) return [];
 
     const { selectedColumns, labelsByField } = getConfiguredMpnValidationColumns();
@@ -1018,6 +1054,7 @@ const EnhancedDataEditor = () => {
         rowNumberColumns.push(col);
         return;
       }
+      if (!includeHidden && hiddenColumnFields.has(col.field)) return;
 
       // Filter MPN columns based on toggle - check both field and headerName
       const isCoreValidation = isMpnValidationColumn(col.field) || isMpnValidationColumn(col.headerName);
@@ -1048,7 +1085,7 @@ const EnhancedDataEditor = () => {
       ...providerColumns.mouser,
       ...providerColumns.element14,
     ];
-  }, [columnDefs, showMpnColumns, isMpnValidationColumn]);
+  }, [columnDefs, hiddenColumnFields, showMpnColumns, isMpnValidationColumn]);
 
   const hasMpnValidationColumns = useMemo(() => {
     if (!columnDefs || !Array.isArray(columnDefs)) return false;
@@ -4470,6 +4507,7 @@ const EnhancedDataEditor = () => {
         });
         return null;
       }
+      setFactwiseErrorHighlight(null);
       setFwValidation({ status: 'done', result, error: '' });
       return result;
     } catch (e) {
@@ -4482,6 +4520,19 @@ const EnhancedDataEditor = () => {
     }
   }, [factwiseApiUrl, factwiseToken, factwiseEnterpriseId, sessionId,
       getCurrentExportColumnOrder, getFriendlyErrorMessage]);
+
+  const highlightFactwiseErrors = useCallback(() => {
+    const errors = fwValidation.result?.errors || [];
+    const rows = new Set(errors.map(issue => Number(issue.row)).filter(row => Number.isInteger(row) && row > 0));
+    const fields = new Set(errors.map(issue => String(issue.column || issue.field_code || '').trim().toLowerCase()).filter(Boolean));
+    setFactwiseErrorHighlight({ rows, fields });
+    setPage(1);
+    setRowSearchTerm('');
+    setColumnFilters({});
+    setIssueRowFilter(null);
+    setFactwisePreviewOpen(false);
+    requestAnimationFrame(() => scrollContainerRef.current?.scrollTo({ top: 0, behavior: 'smooth' }));
+  }, [fwValidation.result]);
 
   const factwise40 = useCallback(async (op, extra = {}) => {
     const response = await api.factwise40Call({
@@ -6447,15 +6498,43 @@ const EnhancedDataEditor = () => {
   ), [rowData, rowFilterMode, mpnFilterInvalidOnly, mpnSourceField, rowSearchQuery, activeColumnFilters, issueRowFilter]);
 
   const activeColumnFilterCount = activeColumnFilters.length;
-  const isFiltering = Boolean(rowSearchQuery) || activeColumnFilterCount > 0
-    || rowFilterMode !== 'all' || mpnFilterInvalidOnly || Boolean(issueRowFilter);
   const filteredRowCount = filteredRows.length;
   const totalPages = Math.max(1, Math.ceil(filteredRowCount / Math.max(1, pageSize)));
   const safePage = Math.min(Math.max(1, page), totalPages);
+  const sortedRows = useMemo(() => {
+    if (!sortRules.length) return filteredRows;
+    const compare = (a, b, { field, direction }) => {
+      const mult = direction === 'asc' ? 1 : -1;
+      const valA = a.row?.[field];
+      const valB = b.row?.[field];
+      const isEmptyA = valA === null || valA === undefined || String(valA).trim() === '';
+      const isEmptyB = valB === null || valB === undefined || String(valB).trim() === '';
+      if (isEmptyA && isEmptyB) return 0;
+      if (isEmptyA) return 1;
+      if (isEmptyB) return -1;
+
+      const cleanA = String(valA).replace(/,/g, '').trim();
+      const cleanB = String(valB).replace(/,/g, '').trim();
+      const numA = Number(cleanA);
+      const numB = Number(cleanB);
+      if (!isNaN(numA) && !isNaN(numB) && cleanA !== '' && cleanB !== '') {
+        return (numA - numB) * mult;
+      }
+      return String(valA).localeCompare(String(valB), undefined, { numeric: true, sensitivity: 'base' }) * mult;
+    };
+    return [...filteredRows].sort((a, b) => {
+      for (const rule of sortRules) {
+        const result = compare(a, b, rule);
+        if (result) return result;
+      }
+      return 0;
+    });
+  }, [filteredRows, sortRules]);
+
   const displayedRows = useMemo(() => {
     const start = (safePage - 1) * pageSize;
-    return filteredRows.slice(start, start + pageSize);
-  }, [filteredRows, safePage, pageSize]);
+    return sortedRows.slice(start, start + pageSize);
+  }, [sortedRows, safePage, pageSize]);
 
   // Narrowing the result set can strand the user on a page that no longer
   // exists; snap back rather than showing an empty grid.
@@ -6477,6 +6556,83 @@ const EnhancedDataEditor = () => {
     });
     setPage(1);
   }, []);
+
+  // Persistent row selection handlers
+  const toggleRowSelection = useCallback((rowIndex) => {
+    setSelectedRows(prev => {
+      const next = new Set(prev);
+      if (next.has(rowIndex)) {
+        next.delete(rowIndex);
+      } else {
+        next.add(rowIndex);
+      }
+      return next;
+    });
+  }, []);
+
+  const selectAllVisibleRows = useCallback(() => {
+    setSelectedRows(prev => {
+      const next = new Set(prev);
+      const allVisibleSelected = displayedRows.length > 0 && displayedRows.every(({ rowIndex }) => next.has(rowIndex));
+      if (allVisibleSelected) {
+        displayedRows.forEach(({ rowIndex }) => next.delete(rowIndex));
+      } else {
+        displayedRows.forEach(({ rowIndex }) => next.add(rowIndex));
+      }
+      return next;
+    });
+  }, [displayedRows]);
+
+  const clearRowSelection = useCallback(() => {
+    setSelectedRows(new Set());
+  }, []);
+
+  // Column freeze / pinning handlers
+  const toggleFreezeColumn = useCallback((field) => {
+    if (field === '__row_number__') return;
+    setFrozenFields(prev => {
+      const next = new Set(prev);
+      if (next.has(field)) {
+        next.delete(field);
+      } else {
+        next.add(field);
+      }
+      return next;
+    });
+  }, []);
+
+  // Compute ordered visible column defs (pinned columns placed first)
+  const orderedColumnDefs = useMemo(() => {
+    const visible = getVisibleColumnDefs();
+    if (!frozenFields || frozenFields.size <= 1) return visible;
+    const frozen = [];
+    const unfrozen = [];
+    visible.forEach(col => {
+      if (col.field === '__row_number__' || frozenFields.has(col.field)) {
+        frozen.push(col);
+      } else {
+        unfrozen.push(col);
+      }
+    });
+    return [...frozen, ...unfrozen];
+  }, [getVisibleColumnDefs, frozenFields]);
+
+  // Compute sticky horizontal offsets for frozen columns
+  const { frozenOffsets, lastFrozenField } = useMemo(() => {
+    const offsets = {};
+    let currentLeft = 0;
+    let lastField = null;
+    for (const col of orderedColumnDefs) {
+      if (col.field === '__row_number__' || frozenFields.has(col.field)) {
+        offsets[col.field] = currentLeft;
+        const base = col.field === '__row_number__' ? 100 : 180;
+        const w = columnWidths[col.field] || base;
+        currentLeft += w;
+        lastField = col.field;
+      }
+    }
+    return { frozenOffsets: offsets, lastFrozenField: lastField };
+  }, [orderedColumnDefs, frozenFields, columnWidths]);
 
   // ─── RENDER CONDITIONS ──────────────────────────────────────────────────────
   if (loading) {
@@ -6619,29 +6775,7 @@ const EnhancedDataEditor = () => {
       color: 'rgba(226, 232, 240, 0.58) !important'
     }
   };
-  const exportFactwiseActionSx = {
-    ...toolbarButtonSx,
-    minHeight: 30,
-    height: 30,
-    px: 1.45,
-    fontWeight: 500,
-    color: '#ffffff !important',
-    borderColor: '#2563eb',
-    backgroundColor: '#2563eb',
-    boxShadow: 'none',
-    '&:hover': {
-      color: '#ffffff !important',
-      borderColor: '#2563eb',
-      backgroundColor: '#2563eb',
-      boxShadow: 'none'
-    },
-    '&.Mui-disabled': {
-      color: t.text.disabled,
-      borderColor: t.border.default,
-      backgroundColor: t.surface.controlSoft,
-      boxShadow: 'none'
-    }
-  };
+  const exportFactwiseActionSx = { ...factWisePrimaryButtonSx, minHeight: 36, height: 36, px: 1.8 };
   const exportDialogTone = isDarkMode
     ? {
         paper: '#0f172a',
@@ -6863,9 +6997,6 @@ const EnhancedDataEditor = () => {
       },
     },
   };
-  const snackbarAlertSx = factWiseToastAlertSx(fwPageTokens, snackbar.severity, {
-    boxShadow: isDarkMode ? '0 18px 44px -24px rgba(0,0,0,0.82)' : '0 18px 42px -28px rgba(15,23,42,0.24)',
-  });
   const dialogFieldSx = factWiseFieldSx(fwPageTokens, { height: 36 });
   const dialogSelectSx = factWiseSelectFieldSx(fwPageTokens, { height: 36 });
   const dialogSecondaryButtonSx = {
@@ -6942,9 +7073,9 @@ const EnhancedDataEditor = () => {
     alignItems: 'center',
     gap: 1.5,
     flexWrap: 'wrap',
-    px: 1.5,
-    py: 0.95,
-    minHeight: 52,
+    px: 2,
+    py: 1.1,
+    minHeight: 64,
     backgroundColor: tableTone.panel,
     borderTop: `1px solid ${tableTone.outerLine}`,
     color: t.text.secondary,
@@ -6958,7 +7089,7 @@ const EnhancedDataEditor = () => {
       : '0 10px 18px -18px rgba(15, 23, 42, 0.38)',
   };
   const tableBaseStyle = {
-    width: '100%',
+    width: orderedColumnDefs.reduce((width, col) => width + (columnWidths[col.field] || (col.field === '__row_number__' ? 100 : 180)), 0),
     borderCollapse: 'separate',
     borderSpacing: 0,
     tableLayout: 'fixed',
@@ -6971,15 +7102,28 @@ const EnhancedDataEditor = () => {
     overflowY: 'auto',
     maxHeight: 'calc(100vh - 312px)',
     minHeight: 0,
-    border: 'none',
-    borderRadius: 0,
+    border: `1px solid ${tableTone.outerLine}`,
+    borderRadius: '12px',
     backgroundColor: 'transparent',
     flex: '1 1 auto',
     scrollbarColor: `${isDarkMode ? 'rgba(148, 163, 184, 0.38)' : 'rgba(86, 96, 112, 0.34)'} transparent`,
   };
   // The session id is a UUID that means nothing to the user; the row count
   // is the part worth showing.
-  const editorSubtitle = `${totalRows.toLocaleString()} rows`;
+  const editorToolbarButtonSx = {
+    ...outlinedActionSx,
+    minHeight: 36,
+    height: 36,
+    px: 1.6,
+    fontSize: '13px',
+    color: isDarkMode ? '#cbd5e1' : '#475569',
+    borderColor: isDarkMode ? '#475569' : '#d8dee7',
+    backgroundColor: isDarkMode ? t.surface.controlSoft : '#fff',
+    boxShadow: 'none',
+    '&:hover': { bgcolor: t.action.hover, borderColor: t.border.hover },
+  };
+  const rangeStart = filteredRowCount === 0 ? 0 : ((safePage - 1) * pageSize) + 1;
+  const rangeEnd = Math.min(safePage * pageSize, filteredRowCount);
   return (
     <Box sx={editorPageSx}>
       <Box className="fw-editor-bg-layer" sx={factWiseTopShadeSx(isDarkMode)} />
@@ -7860,13 +8004,16 @@ const EnhancedDataEditor = () => {
                   size="small"
                   sx={{
                     ...iconButtonSx,
-                    width: 30,
-                    height: 30,
-                    flex: '0 0 30px',
+                    width: 34,
+                    height: 34,
+                    flex: '0 0 34px',
+                    bgcolor: fwPageTokens.surfaceSolid,
+                    borderColor: fwPageTokens.strongBorder,
+                    '&:hover': { bgcolor: fwPageTokens.primarySoft, color: fwPageTokens.primaryText, borderColor: fwPageTokens.primary },
                   }}
                   aria-label="Back to previous step"
                 >
-                  <ArrowBackIcon sx={{ fontSize: 17 }} />
+                  <ChevronLeftIcon fontSize="small" />
                 </IconButton>
                 <Box sx={{ minWidth: 0 }}>
                   <Typography
@@ -7883,52 +8030,52 @@ const EnhancedDataEditor = () => {
                   </Typography>
                   <Typography
                     variant="body2"
-                    sx={{
-                      mt: 0.3,
-                      color: t.text.secondary,
-                      fontSize: '0.78rem',
-                      fontWeight: 400,
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
-                      maxWidth: { xs: '64vw', md: 520 }
-                    }}
+                    sx={{ mt: 0.35, color: t.text.secondary, fontSize: '12.5px', lineHeight: 1.35 }}
                   >
-                    {editorSubtitle}
+                    Review, edit, and prepare BOM data for FactWise.
                   </Typography>
                 </Box>
               </Box>
 
               {/* Right - Primary Actions */}
               <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', justifyContent: { xs: 'flex-start', lg: 'flex-end' }, flexWrap: 'wrap', flex: { xs: '1 1 100%', lg: '0 0 auto' } }}>
+              <Tooltip title={isExistingProcessingTemplate ? 'Existing templates cannot be saved from this run' : (templateSaved ? 'Update this workflow template' : 'Save this workflow template')}>
+                <span>
+                  <Button
+                    size="small"
+                    onClick={handleSaveTemplateFromToolbar}
+                    disabled={templateSaving || syncStatus.inProgress || isExistingProcessingTemplate}
+                    startIcon={templateSaving ? <CircularProgress size={16} /> : <SaveIcon sx={{ fontSize: 18 }} />}
+                    sx={editorToolbarButtonSx}
+                    variant="outlined"
+                  >
+                    {templateSaving ? 'Saving...' : (templateSaved ? 'Update Template' : 'Save Template')}
+                  </Button>
+                </span>
+              </Tooltip>
                 {/* The end of the workflow, so it sits apart from the editing
                     tools rather than among them. */}
                 <Button
                   size="small"
-                  onClick={openFactwiseExport}
+                  aria-haspopup="menu"
+                  aria-expanded={Boolean(exportAnchor)}
+                  onClick={(event) => setExportAnchor(event.currentTarget)}
                   disabled={downloadLoading || syncStatus.inProgress}
-                  startIcon={<FolderOpenIcon sx={{ fontSize: 18 }} />}
+                  startIcon={<DownloadIcon />}
+                  endIcon={<KeyboardArrowDownIcon />}
                   sx={exportFactwiseActionSx}
                   variant="contained"
                 >
                   Export
                 </Button>
+                <Menu anchorEl={exportAnchor} open={Boolean(exportAnchor)} onClose={() => setExportAnchor(null)}>
+                  <MenuItem onClick={() => { setExportAnchor(null); openFactwiseExport(); }}>Export to FactWise</MenuItem>
+                  <MenuItem disabled={exportingSheet} onClick={() => { setExportAnchor(null); handleExportSheetForEditing(); }}>Download Excel sheet</MenuItem>
+                </Menu>
                 <IconButton
                   onClick={handleManualRefresh}
                   disabled={syncStatus.inProgress}
-                  sx={{
-                    width: 32,
-                    height: 32,
-                    color: '#ffffff',
-                    bgcolor: isDarkMode ? '#334155' : '#1e293b',
-                    '&:hover': {
-                      bgcolor: isDarkMode ? '#334155' : '#1e293b'
-                    },
-                    '&.Mui-disabled': {
-                      bgcolor: isDarkMode ? '#1e293b' : '#cbd5e1',
-                      color: isDarkMode ? '#64748b' : '#64748b'
-                    }
-                  }}
+                  sx={{ ...iconButtonSx, width: 36, height: 36, color: t.color.primary }}
                   aria-label="Refresh"
                 >
                   <RefreshIcon sx={{ fontSize: 17 }} />
@@ -7940,18 +8087,8 @@ const EnhancedDataEditor = () => {
                   <IconButton
                     onClick={(e) => setMoreActionsAnchor(e.currentTarget)}
                     disabled={syncStatus.inProgress}
-                    sx={{
-                      width: 32,
-                      height: 32,
-                      color: '#ffffff',
-                      bgcolor: isDarkMode ? '#334155' : '#1e293b',
-                      '&:hover': { bgcolor: isDarkMode ? '#334155' : '#1e293b' },
-                      '&.Mui-disabled': {
-                        bgcolor: isDarkMode ? '#1e293b' : '#cbd5e1',
-                        color: '#64748b'
-                      }
-                    }}
-                    aria-label="More actions"
+                    sx={{ ...iconButtonSx, width: 36, height: 36, color: t.color.primary }}
+                  aria-label="More actions"
                   >
                     <MoreVertIcon sx={{ fontSize: 17 }} />
                   </IconButton>
@@ -8007,7 +8144,7 @@ const EnhancedDataEditor = () => {
             <Box sx={{
               display: 'flex',
               gap: 1,
-              justifyContent: 'space-between',
+              justifyContent: 'flex-start',
               alignItems: 'center',
               flexWrap: 'wrap',
               pt: 0.75
@@ -8016,33 +8153,7 @@ const EnhancedDataEditor = () => {
                   Tools ▸ Expand Alternates into Rows (the "two matching lists"
                   arrangement), alongside the other alternate shapes. */}
 
-              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap', minWidth: 0 }}>
-              {/* TOOLS dropdown */}
-              <Button
-                onClick={(e) => setToolsMenuAnchor(e.currentTarget)}
-                variant="outlined"
-                endIcon={<KeyboardArrowDownIcon />}
-                startIcon={<BuildIcon />}
-                sx={outlinedActionSx}
-              >
-                Tools
-              </Button>
-              <Tooltip title={isExistingProcessingTemplate ? 'Existing templates cannot be saved from this run' : (templateSaved ? 'Update this workflow template' : 'Save this workflow template')}>
-                <span>
-                  <Button
-                    size="small"
-                    onClick={handleSaveTemplateFromToolbar}
-                    disabled={templateSaving || syncStatus.inProgress || isExistingProcessingTemplate}
-                    startIcon={templateSaving ? <CircularProgress size={16} /> : <SaveIcon sx={{ fontSize: 18 }} />}
-                    sx={outlinedActionSx}
-                    variant="outlined"
-                  >
-                    {templateSaving ? 'Saving...' : (templateSaved ? 'Update Template' : 'Save Template')}
-                  </Button>
-                </span>
-              </Tooltip>
 
-              </Box>
               <Menu
                 anchorEl={toolsMenuAnchor}
                 open={Boolean(toolsMenuAnchor)}
@@ -8083,180 +8194,6 @@ const EnhancedDataEditor = () => {
                 </MenuItem>
               </Menu>
 
-              {/* MPN VALIDATION dropdown */}
-              <Button
-                onClick={(e) => setMpnMenuAnchor(e.currentTarget)}
-                variant="outlined"
-                endIcon={<KeyboardArrowDownIcon />}
-                startIcon={mpnValidating ? <CircularProgress size={16} sx={{ color: t.text.primary }} /> : <VerifiedUserIcon />}
-                sx={{
-                  ...outlinedActionSx,
-                  borderColor: mpnValidationCompleted ? t.color.success : t.border.default,
-                  backgroundColor: mpnValidationCompleted ? t.state.successBg : t.surface.controlSoft,
-                  '&:hover': {
-                    backgroundColor: mpnValidationCompleted ? t.state.successBg : t.action.hover,
-                    borderColor: mpnValidationCompleted ? t.color.success : t.border.hover
-                  }
-                }}
-              >
-                {mpnValidating
-                  ? (mpnProgress && mpnProgress.total ? `MPN unique ${mpnProgress.done}/${mpnProgress.total}` : 'MPN...')
-                  : 'MPN'}
-              </Button>
-              {/* A value-set filter is invisible in the Filter menu, so it says
-                  so here and can be cleared in one click. */}
-              {issueRowFilter && (
-                <Chip
-                  size="small"
-                  color="warning"
-                  variant="outlined"
-                  label={`Showing rows: ${issueRowFilter.label}`}
-                  onDelete={clearIssueRowFilter}
-                  sx={{ fontWeight: 500, borderRadius: '8px', fontSize: '12px' }}
-                />
-              )}
-              <Button
-                onClick={(e) => setRowFilterMenuAnchor(e.currentTarget)}
-                variant="outlined"
-                endIcon={<KeyboardArrowDownIcon />}
-                startIcon={<FilterListIcon />}
-                sx={{
-                  ...outlinedActionSx,
-                  ml: { xs: 0, md: 'auto' },
-                  borderColor: (rowFilterMode !== 'all' || mpnFilterInvalidOnly || activeColumnFilterCount > 0) ? t.color.primary : t.border.default,
-                  backgroundColor: (rowFilterMode !== 'all' || mpnFilterInvalidOnly || activeColumnFilterCount > 0) ? t.state.infoBg : t.surface.controlSoft,
-                  '&:hover': {
-                    backgroundColor: (rowFilterMode !== 'all' || mpnFilterInvalidOnly || activeColumnFilterCount > 0) ? t.state.infoBg : t.action.hover,
-                    borderColor: (rowFilterMode !== 'all' || mpnFilterInvalidOnly || activeColumnFilterCount > 0) ? t.color.primary : t.border.hover
-                  }
-                }}
-              >
-                {activeColumnFilterCount > 0 ? `Filter (${activeColumnFilterCount})` : 'Filter'}
-              </Button>
-              <Menu
-                anchorEl={rowFilterMenuAnchor}
-                open={Boolean(rowFilterMenuAnchor)}
-                onClose={() => setRowFilterMenuAnchor(null)}
-                PaperProps={{ sx: { ...compactMenuPaperSx, minWidth: 232 } }}
-              >
-                {/* Column filters sit in a row under the headers; this just shows
-                    or hides that row. */}
-                <MenuItem onClick={() => { setRowFilterMenuAnchor(null); setShowColumnFilters(v => !v); }}>
-                  <ListItemIcon>
-                    <FilterAltIcon sx={{ color: showColumnFilters ? t.color.primary : t.text.secondary }} />
-                  </ListItemIcon>
-                  <ListItemText>{showColumnFilters ? 'Hide column filters' : 'Filter by column'}</ListItemText>
-                </MenuItem>
-                {activeColumnFilterCount > 0 && (
-                  <MenuItem onClick={() => { setRowFilterMenuAnchor(null); clearColumnFilters(); }}>
-                    <ListItemIcon><ClearIcon sx={{ color: t.text.secondary }} /></ListItemIcon>
-                    <ListItemText>{`Clear ${activeColumnFilterCount} column filter${activeColumnFilterCount === 1 ? '' : 's'}`}</ListItemText>
-                  </MenuItem>
-                )}
-                <Divider />
-                <MenuItem onClick={() => { setRowFilterMenuAnchor(null); setRowFilterMode('all'); setMpnFilterInvalidOnly(false); setIssueRowFilter(null); setPage(1); }}>
-                  <ListItemIcon>{rowFilterMode === 'all' && !mpnFilterInvalidOnly && !issueRowFilter ? <CheckIcon sx={{ color: t.color.primary }} /> : null}</ListItemIcon>
-                  <ListItemText>All rows</ListItemText>
-                </MenuItem>
-                <MenuItem
-                  onClick={() => {
-                    setRowFilterMenuAnchor(null);
-                    if (hasDuplicateItemCodeRows) {
-                      setDupHighlight({
-                        field: duplicateItemCodeInfo.field,
-                        values: duplicateItemCodeValues,
-                      });
-                    }
-                  }}
-                  disabled={!hasDuplicateItemCodeRows}
-                >
-                  <ListItemIcon>{dupHighlight?.field === duplicateItemCodeInfo.field ? <CheckIcon sx={{ color: t.color.warningText }} /> : <ContentCopyIcon sx={{ color: t.color.warningText }} />}</ListItemIcon>
-                  <ListItemText>Highlight duplicate Item codes</ListItemText>
-                </MenuItem>
-                <MenuItem
-                  onClick={() => {
-                    setRowFilterMenuAnchor(null);
-                    if (!hasDuplicateItemCodeRows) return;
-                    // Highlight as well as filter: once only the repeats are on
-                    // screen the amber cells are what tells the pairs apart.
-                    setDupHighlight({
-                      field: duplicateItemCodeInfo.field,
-                      values: duplicateItemCodeValues,
-                    });
-                    showIssueRows(
-                      duplicateItemCodeInfo.field,
-                      Array.from(duplicateItemCodeValues),
-                      'Duplicate Item codes'
-                    );
-                  }}
-                  disabled={!hasDuplicateItemCodeRows}
-                >
-                  <ListItemIcon>{issueRowFilter?.label === 'Duplicate Item codes' ? <CheckIcon sx={{ color: t.color.warningText }} /> : <FilterAltIcon sx={{ color: t.color.warningText }} />}</ListItemIcon>
-                  <ListItemText>Show only duplicate Item codes</ListItemText>
-                </MenuItem>
-                <MenuItem
-                  onClick={() => { setRowFilterMenuAnchor(null); setRowFilterMode('valid_mpn'); setMpnFilterInvalidOnly(false); setPage(1); }}
-                  disabled={!hasMpnValidationColumns}
-                >
-                  <ListItemIcon>{rowFilterMode === 'valid_mpn' ? <CheckIcon sx={{ color: t.color.success }} /> : <VerifiedUserIcon sx={{ color: t.color.success }} />}</ListItemIcon>
-                  <ListItemText>Valid MPN rows</ListItemText>
-                </MenuItem>
-                <MenuItem
-                  onClick={() => { setRowFilterMenuAnchor(null); setRowFilterMode('invalid_mpn'); setMpnFilterInvalidOnly(false); setPage(1); }}
-                  disabled={!hasMpnValidationColumns}
-                >
-                  <ListItemIcon>{(rowFilterMode === 'invalid_mpn' || mpnFilterInvalidOnly) ? <CheckIcon sx={{ color: t.color.danger }} /> : <VerifiedUserIcon sx={{ color: t.color.danger }} />}</ListItemIcon>
-                  <ListItemText>Invalid MPN rows</ListItemText>
-                </MenuItem>
-                <MenuItem
-                  onClick={() => { setRowFilterMenuAnchor(null); setRowFilterMode('unknown'); setMpnFilterInvalidOnly(false); setPage(1); }}
-                  disabled={!hasMpnValidationColumns}
-                >
-                  <ListItemIcon>{rowFilterMode === 'unknown' ? <CheckIcon sx={{ color: t.color.warningText }} /> : <ErrorIcon sx={{ color: t.color.warningText }} />}</ListItemIcon>
-                  <ListItemText>Unknown MPN rows</ListItemText>
-                </MenuItem>
-                {/* Not gated on validation: an empty MPN cell is knowable before
-                    anything is looked up, and these are exactly the rows someone
-                    has to go source a part number for. It does need to know
-                    which column holds the MPN. */}
-                <MenuItem
-                  onClick={() => { setRowFilterMenuAnchor(null); setRowFilterMode('missing_mpn'); setMpnFilterInvalidOnly(false); setPage(1); }}
-                  disabled={!mpnSourceField}
-                >
-                  <ListItemIcon>{rowFilterMode === 'missing_mpn' ? <CheckIcon sx={{ color: t.text.secondary }} /> : <HelpOutlineIcon sx={{ color: t.text.secondary }} />}</ListItemIcon>
-                  <ListItemText>Missing MPN rows</ListItemText>
-                </MenuItem>
-              </Menu>
-              <TextField
-                value={rowSearchTerm}
-                disabled={Boolean(partialLoad)}
-                onChange={(e) => { setRowSearchTerm(e.target.value); setPage(1); }}
-                placeholder={`Search all ${totalRows.toLocaleString()} rows...`}
-                size="small"
-                sx={{
-                  width: { xs: '100%', sm: 260, lg: 320 },
-                  '& .MuiOutlinedInput-root': {
-                    minHeight: 34,
-                    height: 34,
-                    borderRadius: '999px',
-                    color: t.text.primary,
-                    backgroundColor: t.surface.controlSoft,
-                    '& fieldset': { borderColor: t.border.default },
-                    '&:hover fieldset': { borderColor: t.border.hover },
-                    '&.Mui-focused fieldset': { borderColor: t.color.primary }
-                  },
-                  '& .MuiInputBase-input': {
-                    py: 0,
-                    fontSize: '13px',
-                    fontWeight: 400,
-                    height: 34,
-                    boxSizing: 'border-box',
-                  }
-                }}
-                InputProps={{
-                  startAdornment: <SearchIcon sx={{ mr: 0.8, fontSize: 17, color: t.text.secondary }} />
-                }}
-              />
               <Menu
                 anchorEl={mpnMenuAnchor}
                 open={Boolean(mpnMenuAnchor)}
@@ -8644,6 +8581,13 @@ const EnhancedDataEditor = () => {
         </Box>
       )}
 
+      <Box sx={{ px: 2, pt: 1.25 }}>
+        <BomDuplicatePolicyBanner
+          sessionId={sessionId}
+          refreshKey={`${totalRows}:${sessionVersion}`}
+        />
+      </Box>
+
       {/* Main Grid Container */}
       <Box sx={{ flexGrow: 1, px: 2, pt: 1.5, pb: 2, overflow: 'hidden' }}>
         <Paper 
@@ -8663,10 +8607,6 @@ const EnhancedDataEditor = () => {
                 sign it was out of date; the only way back was reloading the page.
                 `sessionVersion` mirrors the session's template_version, which the
                 backend bumps on every write, so a value-only edit refreshes too. */}
-            <BomDuplicatePolicyBanner
-              sessionId={sessionId}
-              refreshKey={`${totalRows}:${sessionVersion}`}
-            />
             {dupHighlight && (
               <Alert
                 severity="warning"
@@ -8703,12 +8643,251 @@ const EnhancedDataEditor = () => {
               </Alert>
             )}
             {pageLoading && !partialLoad && <LinearProgress sx={{ mb: 1 }} />}
+            <Box role="group" aria-label="Table controls" sx={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 1, flexShrink: 0 }}>
+              <TextField
+                value={rowSearchTerm}
+                disabled={Boolean(partialLoad)}
+                onChange={(e) => { setRowSearchTerm(e.target.value); setPage(1); }}
+                placeholder="Search rows..."
+                size="small"
+                sx={{
+                  width: { xs: '100%', sm: 375, lg: 375 },
+                  '& .MuiOutlinedInput-root': {
+                    minHeight: 36,
+                    height: 36,
+                    borderRadius: '999px',
+                    color: t.text.primary,
+                    backgroundColor: t.surface.controlSoft,
+                    '& fieldset': { borderColor: t.border.default },
+                    '&:hover fieldset': { borderColor: t.border.hover },
+                    '&.Mui-focused fieldset': { borderColor: t.color.primary }
+                  },
+                  '& .MuiInputBase-input': {
+                    py: 0,
+                    fontSize: '13px',
+                    fontWeight: 400,
+                    height: 36,
+                    boxSizing: 'border-box',
+                  }
+                }}
+                InputProps={{
+                  startAdornment: <SearchIcon sx={{ mr: 0.8, fontSize: 17, color: t.text.secondary }} />
+                }}
+              />
+              {/* TOOLS dropdown */}
+              <Button
+                onClick={(e) => setToolsMenuAnchor(e.currentTarget)}
+                variant="outlined"
+                endIcon={<KeyboardArrowDownIcon />}
+                startIcon={<BuildIcon />}
+                sx={editorToolbarButtonSx}
+              >
+                Tools
+              </Button>
+
+              {/* MPN VALIDATION dropdown */}
+              <Button
+                onClick={(e) => setMpnMenuAnchor(e.currentTarget)}
+                variant="outlined"
+                endIcon={<KeyboardArrowDownIcon />}
+                startIcon={mpnValidating ? <CircularProgress size={16} sx={{ color: t.text.primary }} /> : <VerifiedUserIcon />}
+                sx={{
+                  ...editorToolbarButtonSx,
+                  borderColor: mpnValidationCompleted ? t.color.success : editorToolbarButtonSx.borderColor,
+                  backgroundColor: mpnValidationCompleted ? t.state.successBg : editorToolbarButtonSx.backgroundColor,
+                  '&:hover': {
+                    backgroundColor: mpnValidationCompleted ? t.state.successBg : t.action.hover,
+                    borderColor: mpnValidationCompleted ? t.color.success : t.border.hover
+                  }
+                }}
+              >
+                {mpnValidating
+                  ? (mpnProgress && mpnProgress.total ? `MPN unique ${mpnProgress.done}/${mpnProgress.total}` : 'MPN...')
+                  : 'MPN'}
+              </Button>
+              {/* A value-set filter is invisible in the Filter menu, so it says
+                  so here and can be cleared in one click. */}
+              {issueRowFilter && (
+                <Chip
+                  size="small"
+                  color="warning"
+                  variant="outlined"
+                  label={`Showing rows: ${issueRowFilter.label}`}
+                  onDelete={clearIssueRowFilter}
+                  sx={{ fontWeight: 500, borderRadius: '8px', fontSize: '12px' }}
+                />
+              )}
+              <Button
+                onClick={(event) => setColumnsPopoverAnchor(event.currentTarget)}
+                variant="outlined"
+                startIcon={<TableRowsIcon />}
+                sx={{
+                  ...editorToolbarButtonSx,
+                  borderRadius: '999px',
+                  ml: { sm: 'auto' },
+                  ...(columnsPopoverAnchor && { borderColor: t.color.primary, bgcolor: t.state.infoBg }),
+                }}
+              >
+                Columns <Box component="span" sx={{ ml: 0.6, px: 0.7, py: 0.1, borderRadius: '999px', bgcolor: t.color.primary, color: '#fff', fontSize: 11, lineHeight: 1.5 }}>{Math.max(0, orderedColumnDefs.length - 1)}</Box>
+              </Button>
+              <SheetColumnsPopover
+                anchor={columnsPopoverAnchor}
+                onClose={() => setColumnsPopoverAnchor(null)}
+                columns={getVisibleColumnDefs(true).filter((col) => col.field !== '__row_number__').map((col) => ({
+                  key: col.field, label: col.headerName || col.field,
+                }))}
+                visibleColumnKeys={orderedColumnDefs.filter((col) => col.field !== '__row_number__').map((col) => col.field)}
+                activeFrozenSet={frozenFields}
+                toggleFreezeColumn={toggleFreezeColumn}
+                onShowAll={() => setHiddenColumnFields(new Set())}
+                onResetPins={() => setFrozenFields(new Set(['__row_number__']))}
+                onToggleColumn={(field) => {
+                  const hiding = !hiddenColumnFields.has(field);
+                  setHiddenColumnFields((prev) => {
+                    const next = new Set(prev);
+                    if (hiding) next.add(field);
+                    else next.delete(field);
+                    return next;
+                  });
+                  if (hiding) {
+                    handleColumnFilterChange(field, '');
+                    setSortRules(prev => prev.filter(rule => rule.field !== field));
+                  }
+                }}
+                tableTone={{ ...tableTone, isDark: isDarkMode, muted: t.text.secondary }}
+              />
+              <Button
+                onClick={(e) => setRowFilterMenuAnchor(e.currentTarget)}
+                variant="outlined"
+                startIcon={<FilterListIcon />}
+                sx={{
+                  ...editorToolbarButtonSx,
+                  borderRadius: '999px',
+                  ...((rowFilterMode !== 'all' || mpnFilterInvalidOnly || activeColumnFilterCount > 0) && { borderColor: t.color.primary, bgcolor: t.state.infoBg }),
+                }}
+              >
+                {activeColumnFilterCount > 0 ? `Filter (${activeColumnFilterCount})` : 'Filter'}
+              </Button>
+              <Button
+                onClick={(event) => {
+                  setSortDraft([...sortRules]);
+                  setSortPopoverAnchor(event.currentTarget);
+                }}
+                variant="outlined"
+                startIcon={<SwapVertIcon />}
+                sx={{
+                  ...editorToolbarButtonSx,
+                  borderRadius: '999px',
+                  ...(sortRules.length > 0 && { borderColor: t.color.primary, bgcolor: t.state.infoBg }),
+                }}
+              >
+                Sort{sortRules.length ? ` (${sortRules.length})` : ''}
+              </Button>
+              <SheetSortPopover sortAnchor={sortPopoverAnchor} sortDraft={sortDraft} setSortDraft={setSortDraft}
+                columns={orderedColumnDefs.filter(col => col.field !== '__row_number__').map(col => ({ key: col.field, label: col.headerName || col.field }))}
+                tableTone={{ ...tableTone, muted: t.text.secondary }} onClose={() => setSortPopoverAnchor(null)}
+                onApply={(rules) => { setSortRules(rules); setPage(1); }} />
+              <Menu
+                anchorEl={rowFilterMenuAnchor}
+                open={Boolean(rowFilterMenuAnchor)}
+                onClose={() => setRowFilterMenuAnchor(null)}
+                PaperProps={{ sx: { ...compactMenuPaperSx, minWidth: 232 } }}
+              >
+                {/* Column filters sit in a row under the headers; this just shows
+                    or hides that row. */}
+                <MenuItem onClick={() => { setRowFilterMenuAnchor(null); setShowColumnFilters(v => !v); }}>
+                  <ListItemIcon>
+                    <FilterAltIcon sx={{ color: showColumnFilters ? t.color.primary : t.text.secondary }} />
+                  </ListItemIcon>
+                  <ListItemText>{showColumnFilters ? 'Hide column filters' : 'Show column filters'}</ListItemText>
+                </MenuItem>
+                {activeColumnFilterCount > 0 && (
+                  <MenuItem onClick={() => { setRowFilterMenuAnchor(null); clearColumnFilters(); }}>
+                    <ListItemIcon><ClearIcon sx={{ color: t.text.secondary }} /></ListItemIcon>
+                    <ListItemText>{`Clear ${activeColumnFilterCount} column filter${activeColumnFilterCount === 1 ? '' : 's'}`}</ListItemText>
+                  </MenuItem>
+                )}
+                <Divider />
+                <MenuItem onClick={() => { setRowFilterMenuAnchor(null); setRowFilterMode('all'); setMpnFilterInvalidOnly(false); setIssueRowFilter(null); setPage(1); }}>
+                  <ListItemIcon>{rowFilterMode === 'all' && !mpnFilterInvalidOnly && !issueRowFilter ? <CheckIcon sx={{ color: t.color.primary }} /> : null}</ListItemIcon>
+                  <ListItemText>All rows</ListItemText>
+                </MenuItem>
+                <MenuItem
+                  onClick={() => {
+                    setRowFilterMenuAnchor(null);
+                    if (hasDuplicateItemCodeRows) {
+                      setDupHighlight({
+                        field: duplicateItemCodeInfo.field,
+                        values: duplicateItemCodeValues,
+                      });
+                    }
+                  }}
+                  disabled={!hasDuplicateItemCodeRows}
+                >
+                  <ListItemIcon>{dupHighlight?.field === duplicateItemCodeInfo.field ? <CheckIcon sx={{ color: t.color.warningText }} /> : <ContentCopyIcon sx={{ color: t.color.warningText }} />}</ListItemIcon>
+                  <ListItemText>Highlight duplicate Item codes</ListItemText>
+                </MenuItem>
+                <MenuItem
+                  onClick={() => {
+                    setRowFilterMenuAnchor(null);
+                    if (!hasDuplicateItemCodeRows) return;
+                    // Highlight as well as filter: once only the repeats are on
+                    // screen the amber cells are what tells the pairs apart.
+                    setDupHighlight({
+                      field: duplicateItemCodeInfo.field,
+                      values: duplicateItemCodeValues,
+                    });
+                    showIssueRows(
+                      duplicateItemCodeInfo.field,
+                      Array.from(duplicateItemCodeValues),
+                      'Duplicate Item codes'
+                    );
+                  }}
+                  disabled={!hasDuplicateItemCodeRows}
+                >
+                  <ListItemIcon>{issueRowFilter?.label === 'Duplicate Item codes' ? <CheckIcon sx={{ color: t.color.warningText }} /> : <FilterAltIcon sx={{ color: t.color.warningText }} />}</ListItemIcon>
+                  <ListItemText>Show only duplicate Item codes</ListItemText>
+                </MenuItem>
+                <MenuItem
+                  onClick={() => { setRowFilterMenuAnchor(null); setRowFilterMode('valid_mpn'); setMpnFilterInvalidOnly(false); setPage(1); }}
+                  disabled={!hasMpnValidationColumns}
+                >
+                  <ListItemIcon>{rowFilterMode === 'valid_mpn' ? <CheckIcon sx={{ color: t.color.success }} /> : <VerifiedUserIcon sx={{ color: t.color.success }} />}</ListItemIcon>
+                  <ListItemText>Valid MPN rows</ListItemText>
+                </MenuItem>
+                <MenuItem
+                  onClick={() => { setRowFilterMenuAnchor(null); setRowFilterMode('invalid_mpn'); setMpnFilterInvalidOnly(false); setPage(1); }}
+                  disabled={!hasMpnValidationColumns}
+                >
+                  <ListItemIcon>{(rowFilterMode === 'invalid_mpn' || mpnFilterInvalidOnly) ? <CheckIcon sx={{ color: t.color.danger }} /> : <VerifiedUserIcon sx={{ color: t.color.danger }} />}</ListItemIcon>
+                  <ListItemText>Invalid MPN rows</ListItemText>
+                </MenuItem>
+                <MenuItem
+                  onClick={() => { setRowFilterMenuAnchor(null); setRowFilterMode('unknown'); setMpnFilterInvalidOnly(false); setPage(1); }}
+                  disabled={!hasMpnValidationColumns}
+                >
+                  <ListItemIcon>{rowFilterMode === 'unknown' ? <CheckIcon sx={{ color: t.color.warningText }} /> : <ErrorIcon sx={{ color: t.color.warningText }} />}</ListItemIcon>
+                  <ListItemText>Unknown MPN rows</ListItemText>
+                </MenuItem>
+                {/* Not gated on validation: an empty MPN cell is knowable before
+                    anything is looked up, and these are exactly the rows someone
+                    has to go source a part number for. It does need to know
+                    which column holds the MPN. */}
+                <MenuItem
+                  onClick={() => { setRowFilterMenuAnchor(null); setRowFilterMode('missing_mpn'); setMpnFilterInvalidOnly(false); setPage(1); }}
+                  disabled={!mpnSourceField}
+                >
+                  <ListItemIcon>{rowFilterMode === 'missing_mpn' ? <CheckIcon sx={{ color: t.text.secondary }} /> : <HelpOutlineIcon sx={{ color: t.text.secondary }} />}</ListItemIcon>
+                  <ListItemText>Missing MPN rows</ListItemText>
+                </MenuItem>
+              </Menu>
+            </Box>
             <div style={tableScrollStyle}>
               <table style={tableBaseStyle}>
                 <colgroup>
-                  {getVisibleColumnDefs().map(col => {
+                  {orderedColumnDefs.map(col => {
                     const field = col.field;
-                    const base = field === '__row_number__' ? 80 : 180;
+                    const base = field === '__row_number__' ? 100 : 180;
                     const w = columnWidths[field] || base;
                     return (
                       <col key={field} style={{ width: `${w}px` }} />
@@ -8717,26 +8896,31 @@ const EnhancedDataEditor = () => {
                 </colgroup>
                 <thead>
                   <tr style={tableHeaderStyle}>
-                    {getVisibleColumnDefs().map((col, index) => (
-                      <th
+                    {orderedColumnDefs.map((col, index) => {
+                      const isRowNumber = col.field === '__row_number__';
+                      const isFrozen = isRowNumber || frozenFields.has(col.field);
+                      const isLastFrozen = isFrozen && col.field === lastFrozenField;
+                      const base = isRowNumber ? 100 : 180;
+                      const colWidth = columnWidths[col.field] || base;
+                      const stickyLeft = isFrozen ? frozenOffsets[col.field] : undefined;
+
+                      return (
+                      <Box component="th" sx={factWiseTableHeaderCellSx(tableTone)}
                         key={col.field}
                         onDoubleClick={() => {
-                          // Auto-fit to content width using measured pixels
+                          if (isRowNumber) return;
                           try {
                             const px = computeColumnWidthPx(col);
                             setColumnWidths(prev => ({ ...prev, [col.field]: px }));
                           } catch (_) {}
                         }}
                         onMouseDown={(e) => {
-                          // Resize when:
-                          //  - User holds Shift and drags anywhere on header, OR
-                          //  - User clicks within 12px of the right edge (natural resize zone)
+                          if (isRowNumber) return;
                           const field = col.field;
                           const rect = e.currentTarget.getBoundingClientRect();
                           const withinRightEdge = (rect.right - e.clientX) <= 12;
                           if (!e.shiftKey && !withinRightEdge) return;
                           e.preventDefault();
-                          const base = field === '__row_number__' ? 80 : 180;
                           const startWidth = columnWidths[field] || base;
                           resizingRef.current = { active: true, field, startX: e.clientX, startWidth };
                           const onMove = (ev) => {
@@ -8754,104 +8938,173 @@ const EnhancedDataEditor = () => {
                           window.addEventListener('mouseup', onUp);
                         }}
                         style={{
-                          padding: '11px 14px',
+                          padding: isRowNumber ? '8px 10px' : '11px 12px',
                           textAlign: 'left',
-                          fontWeight: 500,
                           color: tableTone.headerText,
                           borderRight: `1px solid ${tableTone.line}`,
                           borderBottom: `1px solid ${tableTone.outerLine}`,
                           background: tableTone.header,
-                          fontSize: '12.5px',
-                          lineHeight: 1.25,
                           position: 'sticky',
                           top: 0,
-                          zIndex: 3,
+                          left: stickyLeft != null ? `${stickyLeft}px` : undefined,
+                          zIndex: isFrozen ? 5 : 3,
+                          boxShadow: isLastFrozen && !isRowNumber ? (isDarkMode ? '3px 0 8px -2px rgba(0,0,0,0.6)' : '3px 0 8px -2px rgba(15,23,42,0.18)') : undefined,
                           userSelect: 'none',
-                          // Fixed so the filter row below can stick at a known offset.
                           height: `${HEADER_ROW_HEIGHT}px`,
                           boxSizing: 'border-box',
-                          width: `${columnWidths[col.field] || (col.field === '__row_number__' ? 80 : 180)}px`
+                          width: `${colWidth}px`,
+                          borderTopLeftRadius: index === 0 ? '10px' : undefined,
+                          borderTopRightRadius: index === orderedColumnDefs.length - 1 ? '10px' : undefined,
                         }}
-                        title="Tip: Drag edge to resize. Shift+Drag anywhere to resize. Double‑click to auto‑fit."
+                        title={isRowNumber ? undefined : "Click pin to freeze. Drag edge to resize."}
                       >
-                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-                          {col.headerName}
-                          {(() => {
-                            // Check if this is an MPN validation column
-                            const mpnTooltip = getMpnColumnTooltip(col.field) || getMpnColumnTooltip(col.headerName);
-                            if (mpnTooltip) {
-                              return (
-                                <Tooltip title={mpnTooltip} arrow placement="top">
-                                  <InfoIcon
-                                    sx={{
-                                      fontSize: 14,
-                                      color: t.text.secondary,
-                                      cursor: 'help',
-                                      ml: 0.5,
-                                      '&:hover': { color: t.color.primary }
-                                    }}
-                                    onClick={(e) => e.stopPropagation()} // Prevent column resize on icon click
-                                  />
-                                </Tooltip>
-                              );
-                            }
-                            return null;
-                          })()}
+                        {isRowNumber ? (
+                          <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 0.5, width: '100%' }}>
+                            <Checkbox
+                              size="small"
+                              checked={displayedRows.length > 0 && displayedRows.every(({ rowIndex }) => selectedRows.has(rowIndex))}
+                              indeterminate={displayedRows.some(({ rowIndex }) => selectedRows.has(rowIndex)) && !displayedRows.every(({ rowIndex }) => selectedRows.has(rowIndex))}
+                              onChange={selectAllVisibleRows}
+                              sx={{
+                                p: 0.25,
+                                color: t.border.hover,
+                                '&.Mui-checked, &.MuiCheckbox-indeterminate': { color: t.color.primary },
+                              }}
+                              title="Select all visible rows"
+                              inputProps={{ 'aria-label': 'Select all visible rows' }}
+                            />
+                            <span style={{ fontWeight: 600, color: tableTone.headerText, fontSize: 'inherit' }}>Actions</span>
+                          </Box>
+                        ) : (
+                          <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%', gap: 0.5 }}>
+                            <Box
+                              sx={{ display: 'flex', alignItems: 'center', gap: 0.5, minWidth: 0 }}
+                            >
+                              <span title={col.headerName} style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                {col.headerName}
+                              </span>
+                              {(() => {
+                                const mpnTooltip = getMpnColumnTooltip(col.field) || getMpnColumnTooltip(col.headerName);
+                                if (mpnTooltip) {
+                                  return (
+                                    <Tooltip title={mpnTooltip} arrow placement="top">
+                                      <InfoIcon
+                                        sx={{
+                                          fontSize: 14,
+                                          color: t.text.secondary,
+                                          cursor: 'help',
+                                          ml: 0.25,
+                                          flexShrink: 0,
+                                          '&:hover': { color: t.color.primary }
+                                        }}
+                                        onClick={(e) => e.stopPropagation()}
+                                      />
+                                    </Tooltip>
+                                  );
+                                }
+                                return null;
+                              })()}
+                            </Box>
+
+                            <Tooltip title={frozenFields.has(col.field) ? "Unfreeze column" : "Freeze column to left"} arrow placement="top">
+                              <IconButton
+                                size="small"
+                                aria-label={`${isFrozen ? 'Unfreeze' : 'Freeze'} ${col.headerName}`}
+                                aria-pressed={isFrozen}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  toggleFreezeColumn(col.field);
+                                }}
+                                sx={{
+                                  p: 0.25,
+                                  flexShrink: 0,
+                                  bgcolor: isFrozen ? (isDarkMode ? '#193b62' : '#e5f1ff') : 'transparent',
+                                  color: frozenFields.has(col.field) ? t.color.primary : t.text.secondary,
+                                  opacity: frozenFields.has(col.field) ? 1 : 0.45,
+                                  transition: 'opacity 120ms ease, color 120ms ease',
+                                  '&:hover': { opacity: 1, color: t.color.primary }
+                                }}
+                              >
+                        <Box
+                          component="svg"
+                          viewBox="0 0 24 24"
+                          sx={{
+                            width: 14,
+                            height: 14,
+                            fill: isFrozen ? 'currentColor' : 'none',
+                            stroke: 'currentColor',
+                            strokeWidth: 2,
+                            strokeLinecap: 'round',
+                            strokeLinejoin: 'round',
+                            transform: isFrozen ? 'rotate(0deg)' : 'rotate(35deg)',
+                            transition: 'transform 140ms ease',
+                          }}
+                        >
+                          <path d="M12 17v5" />
+                          <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
                         </Box>
-                        <span
-                          onMouseDown={(e) => {
-                            e.preventDefault();
-                            const field = col.field;
-                            const base = field === '__row_number__' ? 80 : 180;
-                            const startWidth = columnWidths[field] || base;
-                            resizingRef.current = { active: true, field, startX: e.clientX, startWidth };
-                            const onMove = (ev) => {
-                              if (!resizingRef.current.active) return;
-                              const dx = ev.clientX - resizingRef.current.startX;
-                              const newW = Math.max(80, resizingRef.current.startWidth + dx);
-                              setColumnWidths(prev => ({ ...prev, [field]: newW }));
-                            };
-                            const onUp = () => {
-                              resizingRef.current = { active: false, field: null, startX: 0, startWidth: 0 };
-                              window.removeEventListener('mousemove', onMove);
-                              window.removeEventListener('mouseup', onUp);
-                            };
-                            window.addEventListener('mousemove', onMove);
-                            window.addEventListener('mouseup', onUp);
-                          }}
-                          style={{
-                            position: 'absolute',
-                            right: 0,
-                            top: 0,
-                            width: '12px',
-                            height: '100%',
-                            cursor: 'col-resize',
-                            userSelect: 'none'
-                          }}
-                          title="Drag to resize"
-                        />
-                      </th>
-                    ))}
+                              </IconButton>
+                            </Tooltip>
+                          </Box>
+                        )}
+                        {!isRowNumber && (
+                          <span
+                            onMouseDown={(e) => {
+                              e.preventDefault();
+                              const field = col.field;
+                              const startWidth = columnWidths[field] || base;
+                              resizingRef.current = { active: true, field, startX: e.clientX, startWidth };
+                              const onMove = (ev) => {
+                                if (!resizingRef.current.active) return;
+                                const dx = ev.clientX - resizingRef.current.startX;
+                                const newW = Math.max(80, resizingRef.current.startWidth + dx);
+                                setColumnWidths(prev => ({ ...prev, [field]: newW }));
+                              };
+                              const onUp = () => {
+                                resizingRef.current = { active: false, field: null, startX: 0, startWidth: 0 };
+                                window.removeEventListener('mousemove', onMove);
+                                window.removeEventListener('mouseup', onUp);
+                              };
+                              window.addEventListener('mousemove', onMove);
+                              window.addEventListener('mouseup', onUp);
+                            }}
+                            style={{
+                              position: 'absolute',
+                              right: 0,
+                              top: 0,
+                              width: '10px',
+                              height: '100%',
+                              cursor: 'col-resize',
+                              userSelect: 'none'
+                            }}
+                            title="Drag to resize"
+                          />
+                        )}
+                      </Box>
+                      );
+                    })}
                   </tr>
-                  {/* Per-column filters. Every column gets one; they combine with
-                      each other and with the global search, and all of them run
-                      over the whole sheet rather than the visible page. */}
                   {showColumnFilters && (
                     <tr>
-                      {getVisibleColumnDefs().map(col => {
+                      {orderedColumnDefs.map(col => {
                         const isRowNumber = col.field === '__row_number__';
+                        const isFrozen = isRowNumber || frozenFields.has(col.field);
+                        const isLastFrozen = isFrozen && col.field === lastFrozenField;
+                        const stickyLeft = isFrozen ? frozenOffsets[col.field] : undefined;
                         const value = columnFilters[col.field] || '';
                         return (
                           <th
                             key={`filter-${col.field}`}
                             style={{
-                              padding: isRowNumber ? '7px 10px' : '7px 12px',
+                              padding: isRowNumber ? '7px 8px' : '7px 10px',
                               borderRight: `1px solid ${tableTone.line}`,
                               borderBottom: `1px solid ${tableTone.outerLine}`,
                               background: tableTone.header,
                               position: 'sticky',
                               top: `${HEADER_ROW_HEIGHT}px`,
-                              zIndex: 3,
+                              left: stickyLeft != null ? `${stickyLeft}px` : undefined,
+                              zIndex: isFrozen ? 5 : 3,
+                              boxShadow: isLastFrozen && !isRowNumber ? (isDarkMode ? '3px 0 8px -2px rgba(0,0,0,0.6)' : '3px 0 8px -2px rgba(15,23,42,0.18)') : undefined,
                               boxSizing: 'border-box'
                             }}
                           >
@@ -8899,17 +9152,37 @@ const EnhancedDataEditor = () => {
                 <tbody>
                   {displayedRows
                     .map(({ row, rowIndex }) => {
-                    const rowBackgroundColor = tableTone.rowEven;
+                    const isSelected = selectedRows.has(rowIndex);
+                    const rowBackgroundColor = isSelected
+                      ? (isDarkMode ? 'rgba(30, 58, 138, 0.35)' : '#eff6ff')
+                      : tableTone.rowEven;
 
                     return (
-                      <tr key={rowIndex} style={{
-                        backgroundColor: rowBackgroundColor,
-                        height: `${rowHeight}px`,
-                        transition: 'background-color 120ms ease'
-                      }}
-                      onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = tableTone.rowHover; }}
-                      onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = rowBackgroundColor; }}>
-                        {getVisibleColumnDefs().map((col) => {
+                      <tr
+                        key={rowIndex}
+                        onClick={(e) => {
+                          if (e.target.tagName === 'INPUT' || e.target.tagName === 'BUTTON' || e.target.tagName === 'A' || e.target.closest('button')) {
+                            return;
+                          }
+                          toggleRowSelection(rowIndex);
+                        }}
+                        style={{
+                          backgroundColor: rowBackgroundColor,
+                          height: `${rowHeight}px`,
+                          transition: 'background-color 120ms ease',
+                          cursor: 'pointer',
+                          boxShadow: isSelected ? `inset 3px 0 0 ${t.color.primary}` : undefined,
+                        }}
+                        onMouseEnter={(e) => { if (!isSelected) e.currentTarget.style.backgroundColor = tableTone.rowHover; }}
+                        onMouseLeave={(e) => { if (!isSelected) e.currentTarget.style.backgroundColor = factwiseErrorHighlight?.rows.has(rowIndex + 1) ? (isDarkMode ? 'rgba(239, 68, 68, 0.14)' : '#fff1f2') : rowBackgroundColor; }}
+                        style={factwiseErrorHighlight?.rows.has(rowIndex + 1) ? { backgroundColor: isDarkMode ? 'rgba(239, 68, 68, 0.14)' : '#fff1f2' } : undefined}
+                      >
+                        {orderedColumnDefs.map((col) => {
+                          const isRowNumber = col.field === '__row_number__';
+                          const isFrozen = isRowNumber || frozenFields.has(col.field);
+                          const isLastFrozen = isFrozen && col.field === lastFrozenField;
+                          const stickyLeft = isFrozen ? frozenOffsets[col.field] : undefined;
+
                           const raw = row[col.field];
                           const cellValue = raw == null ? '' : String(raw);
                           const isUnknown = cellValue.toLowerCase() === 'unknown';
@@ -8925,52 +9198,84 @@ const EnhancedDataEditor = () => {
                           );
                           const matchesDupValue = !!(dupHighlight && col.field === dupHighlight.field
                             && cellValue.trim() && dupHighlight.values?.has(cellValue.trim()));
-                          // One cell, never the whole line: the issue is in a
-                          // specific column. When the rule names no column
-                          // (a cycle, a row referencing nothing) the row number
-                          // itself is marked, so the row is still findable
-                          // without washing every cell in amber.
                           const matchesDupRow = !!(dupHighlight?.rows?.has(rowIndex + 1)
                             && col.field === (dupHighlight.field || '__row_number__'));
                           const isDupHighlighted = matchesDupValue || matchesDupRow;
+                          const isFactwiseErrorRow = Boolean(factwiseErrorHighlight?.rows.has(rowIndex + 1));
+                          const isFactwiseErrorCell = isFactwiseErrorRow && factwiseErrorHighlight.fields.has(String(col.headerName || col.field).trim().toLowerCase());
+
+                          const cellBg = isFactwiseErrorCell
+                            ? (isDarkMode ? 'rgba(239, 68, 68, 0.28)' : '#fee2e2')
+                            : isFactwiseErrorRow
+                              ? (isDarkMode ? 'rgba(239, 68, 68, 0.14)' : '#fff1f2')
+                              : isDupHighlighted
+                            ? t.state.warningBg
+                            : (isUnknown
+                              ? t.state.dangerBg
+                              : rowBackgroundColor);
+
                           return (
-                            <td key={`${col.field}-${rowIndex}`} style={{
-                              padding: '11px 14px',
-                              borderRight: isDupHighlighted ? '2px solid #f59e0b' : `1px solid ${tableTone.rowLine}`,
-                              borderBottom: isDupHighlighted ? '2px solid #f59e0b' : `1px dashed ${tableTone.rowLine}`,
-                              backgroundColor: isDupHighlighted ? t.state.warningBg : (isUnknown ? t.state.dangerBg : 'inherit'),
-                              color: isDupHighlighted ? t.color.warningText : (isInvalidMpn ? t.color.danger : (isUnknown ? t.color.danger : tableTone.text)),
-                              fontWeight: (isDupHighlighted || isInvalidMpn) ? 500 : 400,
-                              width: `${columnWidths[col.field] || (col.field === '__row_number__' ? 80 : 180)}px`
-                            }}>
-                              {col.field === '__row_number__' ? (
-                                // This column was rendering an empty text input:
-                                // its number comes from an ag-Grid valueGetter
-                                // that this hand-rolled table never ran. It is
-                                // the row's own gutter, so the number and the
-                                // row's delete button both belong here.
-                                <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 0.5 }}>
-                                  <span style={{ color: t.text.secondary, fontWeight: 400 }}>{rowIndex + 1}</span>
+                            <Box component="td" sx={factWiseTableBodyCellSx(tableTone)}
+                              key={`${col.field}-${rowIndex}`}
+                              style={{
+                                padding: isRowNumber ? '8px 10px' : '11px 14px',
+                                borderRight: isDupHighlighted ? '2px solid #f59e0b' : (isFrozen ? `1px solid ${tableTone.line}` : 0),
+                                borderBottom: isDupHighlighted ? '2px solid #f59e0b' : `1px dashed ${tableTone.rowLine}`,
+                                backgroundColor: cellBg,
+                                color: isFactwiseErrorCell ? (isDarkMode ? '#fecaca' : '#991b1b') : (isDupHighlighted ? t.color.warningText : (isInvalidMpn ? t.color.danger : (isUnknown ? t.color.danger : tableTone.text))),
+                                fontWeight: (isFactwiseErrorCell || isDupHighlighted || isInvalidMpn) ? 500 : 400,
+                                outline: isFactwiseErrorCell ? `1px solid ${isDarkMode ? '#f87171' : '#ef4444'}` : undefined,
+                                outlineOffset: '-1px',
+                                width: `${columnWidths[col.field] || (isRowNumber ? 100 : 180)}px`,
+                                position: isFrozen ? 'sticky' : undefined,
+                                left: stickyLeft != null ? `${stickyLeft}px` : undefined,
+                                zIndex: isFrozen ? 2 : 1,
+                                boxShadow: isLastFrozen && !isRowNumber ? (isDarkMode ? '3px 0 8px -2px rgba(0,0,0,0.6)' : '3px 0 8px -2px rgba(15,23,42,0.18)') : undefined,
+                              }}
+                            >
+                              {isRowNumber ? (
+                                <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 0.5, width: '100%' }}>
+                                  <Checkbox
+                                    size="small"
+                                    checked={isSelected}
+                                    onClick={(e) => e.stopPropagation()}
+                                    onChange={(e) => {
+                                      e.stopPropagation();
+                                      const shouldSelect = e.target.checked;
+                                      setSelectedRows((previous) => {
+                                        const next = new Set(previous);
+                                        if (shouldSelect) next.add(rowIndex);
+                                        else next.delete(rowIndex);
+                                        return next;
+                                      });
+                                    }}
+                                    sx={{
+                                      p: 0.25,
+                                      color: isSelected ? t.color.primary : t.text.secondary,
+                                      '&.Mui-checked': { color: t.color.primary },
+                                    }}
+                                    inputProps={{ 'aria-label': `Select row ${rowIndex + 1}` }}
+                                  />
+                                  <span style={{ color: isSelected ? t.color.primary : t.text.secondary, fontWeight: isSelected ? 600 : 400, fontSize: '12px' }}>
+                                    {rowIndex + 1}
+                                  </span>
                                   <Tooltip
                                     title={delBusy ? 'Deleting…' : 'Delete this row — permanent, no undo'}
                                     arrow
                                     placement="right"
                                   >
-                                    {/* span so the tooltip still shows while disabled */}
                                     <span>
                                       <IconButton
                                         size="small"
                                         disabled={delBusy}
-                                        onClick={() => handleDeleteSingleRow(rowIndex)}
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handleDeleteSingleRow(rowIndex);
+                                        }}
                                         sx={{
                                           p: 0.25,
                                           color: t.color.danger,
-                                          // Dimmed rather than hidden. One click
-                                          // and the row is gone, so it should not
-                                          // shout — but a control nobody can find
-                                          // until they happen to hover the right
-                                          // 20 pixels is a control nobody uses.
-                                          opacity: deletingRowIndex === rowIndex ? 1 : 0.45,
+                                          opacity: 1,
                                           transition: 'opacity 120ms ease',
                                           'tr:hover &': { opacity: 1 },
                                           '&:hover': { opacity: 1 },
@@ -9005,20 +9310,19 @@ const EnhancedDataEditor = () => {
                                   onFocus={(e) => e.target.select()}
                                 />
                               )}
-                            </td>
+                            </Box>
                           );
                         })}
                       </tr>
                     );
                   })}
                 </tbody>
-              </table>
-            </div>
+              </table>            </div>
             {/* Bottom pagination controls. Paging is a slice of the in-memory
                 dataset now, so none of these refetch. */}
             <Box sx={paginationBarSx}>
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
-                <Typography variant="body2" sx={{ color: t.text.secondary, fontSize: 12.5, fontWeight: 400 }}>Rows per page</Typography>
+                <Typography variant="body2" sx={{ color: t.text.secondary, fontSize: 12.5, fontWeight: 500 }}>Rows per page</Typography>
                 <Select
                   size="small"
                   value={pageSize}
@@ -9031,18 +9335,18 @@ const EnhancedDataEditor = () => {
                   sx={{
                     ...compactSelectSx,
                     minWidth: 70,
+                    height: 40,
+                    borderRadius: '10px',
                     bgcolor: tableTone.controlBg,
                     '& .MuiOutlinedInput-notchedOutline': { borderColor: tableTone.outerLine },
                     '&:hover .MuiOutlinedInput-notchedOutline': { borderColor: t.color.primary },
                     '&.Mui-focused .MuiOutlinedInput-notchedOutline': { borderColor: t.color.primary },
                   }}
                 >
-                  {[50,100,200,500,1000,2000,3000].map(sz => <MenuItem key={sz} value={sz}>{sz}</MenuItem>)}
+                  {[20,50,100,200,500,1000,2000,3000].map(sz => <MenuItem key={sz} value={sz}>{sz}</MenuItem>)}
                 </Select>
                 <Typography variant="body2" sx={{ color: t.text.secondary, fontSize: 12.5, fontWeight: 400 }}>
-                  Page {safePage} of {totalPages} | {isFiltering
-                    ? `${filteredRowCount.toLocaleString()} of ${totalRows.toLocaleString()} rows match`
-                    : `Total: ${totalRows.toLocaleString()}`}
+                  {`${rangeStart.toLocaleString()}–${rangeEnd.toLocaleString()} of ${filteredRowCount.toLocaleString()}`}
                 </Typography>
               </Box>
               <Pagination
@@ -11277,6 +11581,9 @@ const EnhancedDataEditor = () => {
                         Fix them in the grid, then re-check. The sheet can be imported once
                         these are cleared.
                       </Typography>
+                      <Button size="small" variant="outlined" onClick={highlightFactwiseErrors} sx={{ mb: 1.25, color: 'text.primary', borderColor: 'divider' }}>
+                        Highlight errors in grid
+                      </Button>
                       <TableContainer sx={{ maxHeight: 190, bgcolor: 'transparent' }}>
                         <Table size="small" stickyHeader>
                           <TableHead>
@@ -12055,30 +12362,15 @@ const EnhancedDataEditor = () => {
       </Dialog>
 
       {/* Snackbar for notifications */}
-      <Snackbar
+      <FactWiseToast
         open={snackbar.open}
         autoHideDuration={3500}
         onClose={closeSnackbar}
-        anchorOrigin={{ vertical: 'top', horizontal: 'right' }}
-        sx={{
-          position: 'fixed !important',
-          top: '72px !important',
-          right: '20px !important',
-          left: 'auto !important',
-          bottom: 'auto !important',
-          transform: 'none !important',
-          maxWidth: 360,
-          zIndex: 1600,
-        }}
+        tokens={fwPageTokens}
+        severity={snackbar.severity}
       >
-        <Alert 
-          onClose={closeSnackbar} 
-          severity={snackbar.severity}
-          sx={snackbarAlertSx}
-        >
-          {snackbar.message}
-        </Alert>
-      </Snackbar>
+        {snackbar.message}
+      </FactWiseToast>
 
       {/* Export / Import — one entry point, both halves of the same round trip.
           Export writes the grid exactly as it is; import reads that file back

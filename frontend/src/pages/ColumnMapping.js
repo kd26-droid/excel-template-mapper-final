@@ -1,3 +1,4 @@
+import FactWiseToast from '../components/FactWiseToast';
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import LoaderOverlay, { useGlobalBlock } from '../components/LoaderOverlay';
@@ -38,7 +39,6 @@ import {
   Button,
   Typography,
   Tooltip,
-  Snackbar,
   Alert,
   FormControl,
   InputLabel,
@@ -59,7 +59,6 @@ import {
   factWisePrimaryButtonSx,
   factWiseSelectFieldSx,
   factWiseSelectMenuProps,
-  factWiseToastAlertSx,
   factWiseTopShadeSx,
 } from '../utils/factwisePageStyles';
 // Optional: lightweight import of synchronizer helpers later if needed
@@ -525,16 +524,6 @@ const getFlowLayout = () => {
 export default function ColumnMapping() {
   const { isDarkMode, tokens: themeTokens } = useThemeContext();
   const fwTokens = buildFactWisePageTokens(isDarkMode, themeTokens);
-  const snackbarAlertSx = (severity = 'info') => factWiseToastAlertSx(fwTokens, severity, {
-    minHeight: 38,
-    maxWidth: 'min(360px, calc(100vw - 40px))',
-    boxShadow: isDarkMode
-      ? '0 18px 44px -24px rgba(0,0,0,0.82)'
-      : '0 18px 42px -28px rgba(15,23,42,0.24)',
-    sx: {
-      width: 'fit-content',
-    },
-  });
   const inlineDialogAlertSx = (severity = 'info', sx = {}) => factWiseAlertSx(fwTokens, severity, {
     minHeight: 34,
     py: 0.45,
@@ -5972,21 +5961,15 @@ export default function ColumnMapping() {
       </Dialog>
 
       {/* Snackbar */}
-      <Snackbar
+      <FactWiseToast
         open={snackbar.open}
         autoHideDuration={4000}
         onClose={() => setSnackbar(prev => ({ ...prev, open: false }))}
-        anchorOrigin={{ vertical: 'top', horizontal: 'right' }}
-        sx={{ mt: 7, maxWidth: 360, zIndex: 1600 }}
+        tokens={fwTokens}
+        severity={snackbar.severity || 'info'}
       >
-        <Alert
-          onClose={() => setSnackbar(prev => ({ ...prev, open: false }))}
-          severity={snackbar.severity || 'info'}
-          sx={snackbarAlertSx(snackbar.severity || 'info')}
-        >
-          {snackbar.message}
-        </Alert>
-      </Snackbar>
+        {snackbar.message}
+      </FactWiseToast>
 
       {/* Debug panel removed */}
 
