@@ -8723,11 +8723,13 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
                 sx={{
                   ...factWiseTableRowSx(tableTone, { warning: isWarning }),
                   cursor: 'pointer',
+                  '&:hover': {
+                    bgcolor: isSelected
+                      ? `${tableTone.isDark ? '#16263d' : '#e8f2ff'} !important`
+                      : `${stickyCellBg} !important`,
+                  },
                   ...(isSelected ? {
                     bgcolor: `${tableTone.isDark ? '#16263d' : '#e8f2ff'} !important`,
-                    '&:hover': {
-                      bgcolor: `${tableTone.isDark ? '#1b2e4a' : '#dcebff'} !important`,
-                    },
                   } : {}),
                 }}
               >
