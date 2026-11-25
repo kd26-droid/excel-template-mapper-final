@@ -10127,9 +10127,10 @@ const OptionExampleTooltip = ({ option, children }) => {
   );
 };
 
-const BomNormalizer = () => {
+const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = null, onAdvanceToFactwisePage, onReturnToMapping, onBackToUpload }) => {
   const navigate = useNavigate();
   const location = useLocation();
+  const routeState = launchState || location.state;
   const { isDarkMode, tokens: themeTokens } = useThemeContext();
   const normalizerTheme = useMemo(() => {
     const pageTokens = buildFactWisePageTokens(isDarkMode, themeTokens);
@@ -10152,6 +10153,15 @@ const BomNormalizer = () => {
       pageTokens,
     };
   }, [isDarkMode, themeTokens]);
+  const advanceToFactwiseInterpretation = () => {
+    setConfigureSubStep('review');
+    if (!fieldPatternLoading) handleTeachFieldPattern(null, { openModal: false });
+    if (inlineMode) onAdvanceToFactwisePage?.();
+  };
+  const returnToColumnMapping = () => {
+    setConfigureSubStep('mapping');
+    if (!inlineMode) onReturnToMapping?.();
+  };
   const normalizerTableTone = useMemo(
     () => buildFactWiseTableTone(normalizerTheme.pageTokens),
     [normalizerTheme.pageTokens]
@@ -10743,6 +10753,7 @@ const BomNormalizer = () => {
   const [bomStructureSeed, setBomStructureSeed] = useState(null);
   const [pendingBomAction, setPendingBomAction] = useState(null);
   const [workbook, setWorkbook] = useState(null);
+  const isPreparingLaunchFile = Boolean((modalMode || inlineMode) && routeState?.initialFile && !workbook);
   const [fileName, setFileName] = useState('');
   const [sheetName, setSheetName] = useState('');
   const [sheetScope, setSheetScope] = useState('single');
@@ -12567,7 +12578,7 @@ const BomNormalizer = () => {
   }, [buildNormalizedResultsSnapshot, currentStep, normalizedRows]);
 
   useEffect(() => {
-    const state = location.state || {};
+    const state = routeState || {};
     const snapshotKey = state.bomNormalizerReturnKey;
     const routeRestoreId = snapshotKey || (state.bomNormalizerReturnSnapshot ? 'route-snapshot' : '');
 
@@ -12691,12 +12702,12 @@ const BomNormalizer = () => {
       setError(err.message || 'Could not restore the BOM Normalizer page.');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [location.pathname, location.state, navigate]);
+  }, [location.pathname, routeState, navigate]);
 
   useEffect(() => {
     if (workspaceRestoredRef.current) return;
 
-    const state = location.state || {};
+    const state = routeState || {};
     const routeIsProvidingSource = Boolean(
       state.initialFile ||
       state.fromPdfZone ||
@@ -12833,7 +12844,7 @@ const BomNormalizer = () => {
       if (!workspaceRestoredRef.current) restoreInFlightRef.current = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [location.state]);
+  }, [routeState]);
 
   useEffect(() => {
     if (!workspaceRestoredRef.current || restoreInFlightRef.current) return undefined;
@@ -13209,7 +13220,7 @@ const BomNormalizer = () => {
   }, [config, inferNormalizerRoles, restoreInferenceNonce]);
 
   useEffect(() => {
-    const state = location.state || {};
+    const state = routeState || {};
     if (!state.fromPdfZone || !state.pdfSessionId) return;
 
     let cancelled = false;
@@ -13264,7 +13275,7 @@ const BomNormalizer = () => {
     return () => {
       cancelled = true;
     };
-  }, [handleWorkbookLoaded, location.state, navigate]);
+  }, [handleWorkbookLoaded, routeState, navigate]);
 
   const parseFilesForCombine = useCallback(async (files, idPrefix = 'source') => {
     return Promise.all(files.map(async (file, index) => {
@@ -13306,7 +13317,7 @@ const BomNormalizer = () => {
   }, []);
 
   useEffect(() => {
-    const state = location.state || {};
+    const state = routeState || {};
     const initialFile = state.initialFile;
     const seedKey = initialFile
       ? `${initialFile.name || 'file'}-${initialFile.size || 0}-${initialFile.lastModified || 0}-${state.initialFileMode || 'source'}-${state.initialSheetName || ''}-${state.initialHeaderRow || ''}-${state.initialSheetScope || ''}-${(state.initialSelectedSheets || []).join('|')}`
@@ -13366,7 +13377,7 @@ const BomNormalizer = () => {
         delete remainingState.initialSheetScope;
         delete remainingState.initialSelectedSheets;
         delete remainingState.initialHeaderRowExplicit;
-        navigate(location.pathname, { replace: true, state: remainingState });
+        if (!launchState) navigate(location.pathname, { replace: true, state: remainingState });
       } catch (err) {
         setCombineError(err.message || 'Unable to prepare the uploaded file for BOM Normalizer.');
       } finally {
@@ -13375,10 +13386,10 @@ const BomNormalizer = () => {
     };
 
     seedInitialFileAsSource();
-  }, [handleWorkbookLoaded, location.pathname, location.state, navigate, parseFilesForCombine]);
+  }, [handleWorkbookLoaded, launchState, location.pathname, routeState, navigate, parseFilesForCombine]);
 
   useEffect(() => {
-    const state = location.state || {};
+    const state = routeState || {};
     const processingTemplate = state.autoReplayProcessingTemplate;
     const workflow = getProcessingTemplateNormalizerWorkflow(processingTemplate);
     const mappingTemplateId = state.autoReplayMappingTemplateId || getProcessingTemplateMappingId(processingTemplate);
@@ -13460,8 +13471,8 @@ const BomNormalizer = () => {
         formData.append('headerRow', '1');
         // Template replay runs without the gate; answers only exist if they were
         // captured earlier and travelled in on the route state.
-        if (bomStructureAnswers || location.state?.bomStructure) {
-          formData.append('bomStructure', JSON.stringify(bomStructureAnswers || location.state.bomStructure));
+        if (bomStructureAnswers || routeState?.bomStructure) {
+          formData.append('bomStructure', JSON.stringify(bomStructureAnswers || routeState.bomStructure));
         }
 
         const response = await api.uploadFilesWithTemplate(formData, mappingTemplateId);
@@ -13495,7 +13506,7 @@ const BomNormalizer = () => {
     config,
     fileName,
     headerRowIndex,
-    location.state,
+    routeState,
     navigate,
     preparedDataRows,
     preparedHeaders,
@@ -13924,7 +13935,7 @@ const BomNormalizer = () => {
     const passed = (maybeAnswers && maybeAnswers.sheets) ? maybeAnswers : null;
     // Answers may already have been captured on the upload page; asking a
     // second time for the same workbook would just be noise.
-    let answers = passed || bomStructureAnswers || location.state?.bomStructure || null;
+    let answers = passed || bomStructureAnswers || routeState?.bomStructure || null;
 
     // A reused mapping template pre-answers the gate but never replaces it. Its
     // format answers always apply and its identity answers only while they
@@ -13938,7 +13949,7 @@ const BomNormalizer = () => {
     // it — and defaulting it to "new" without asking is how a file meant to
     // revise a BOM silently becomes a second BOM beside it.
     if (!answers) {
-      const saved = location.state?.savedBomStructure
+      const saved = routeState?.savedBomStructure
         || workflowTemplateInUse?.workflow?.bomStructure;
       if (saved) {
         const reconciled = reconcileSavedBomStructure(saved, {
@@ -13989,8 +14000,8 @@ const BomNormalizer = () => {
     formData.append('headerRow', '1');
     // Forward the BOM structure answers captured on the upload page so the
     // session created here keeps them.
-    if (answers || location.state?.bomStructure) {
-      formData.append('bomStructure', JSON.stringify(answers || location.state.bomStructure));
+    if (answers || routeState?.bomStructure) {
+      formData.append('bomStructure', JSON.stringify(answers || routeState.bomStructure));
     }
     const returnSnapshotKey = saveReturnSnapshot('normalized-results');
     const returnSnapshot = buildNormalizedResultsSnapshot(handoffRows);
@@ -14008,7 +14019,7 @@ const BomNormalizer = () => {
         const sessionId = response.data?.session_id;
         if (!sessionId) throw new Error('Upload response missing session id.');
 
-        const uploadSource = location.state?.uploadSource || null;
+        const uploadSource = routeState?.uploadSource || null;
         const workflow = buildNormalizerWorkflowRecipe('normalized-results', handoffRows);
         const nextUploadSource = uploadSource ? {
           ...uploadSource,
@@ -14032,7 +14043,7 @@ const BomNormalizer = () => {
           let existingDefaultValues = {};
           let existingDefaultValueRules = {};
           let existingColumnCounts = null;
-          const sourceMappingSessionId = location.state?.sourceMappingSessionId
+          const sourceMappingSessionId = routeState?.sourceMappingSessionId
             || sessionStorage.getItem('bomNormalizer.sourceMappingSessionId')
             || '';
           try {
@@ -14109,7 +14120,7 @@ const BomNormalizer = () => {
     fileName,
     headerRowIndex,
     headers,
-    location.state,
+    routeState,
     lowConfidenceOnly,
     navigate,
     normalizationSummary,
@@ -14129,7 +14140,7 @@ const BomNormalizer = () => {
     const passed = (maybeAnswers && maybeAnswers.sheets) ? maybeAnswers : null;
     // Answers may already have been captured on the upload page; asking a
     // second time for the same workbook would just be noise.
-    let answers = passed || bomStructureAnswers || location.state?.bomStructure || null;
+    let answers = passed || bomStructureAnswers || routeState?.bomStructure || null;
 
     // A reused mapping template pre-answers the gate but never replaces it. Its
     // format answers always apply and its identity answers only while they
@@ -14143,7 +14154,7 @@ const BomNormalizer = () => {
     // it — and defaulting it to "new" without asking is how a file meant to
     // revise a BOM silently becomes a second BOM beside it.
     if (!answers) {
-      const saved = location.state?.savedBomStructure
+      const saved = routeState?.savedBomStructure
         || workflowTemplateInUse?.workflow?.bomStructure;
       if (saved) {
         const reconciled = reconcileSavedBomStructure(saved, {
@@ -14189,8 +14200,8 @@ const BomNormalizer = () => {
     formData.append('headerRow', '1');
     // Forward the BOM structure answers captured on the upload page so the
     // session created here keeps them.
-    if (answers || location.state?.bomStructure) {
-      formData.append('bomStructure', JSON.stringify(answers || location.state.bomStructure));
+    if (answers || routeState?.bomStructure) {
+      formData.append('bomStructure', JSON.stringify(answers || routeState.bomStructure));
     }
     const returnSnapshotKey = saveReturnSnapshot('merge-preview');
 
@@ -14205,8 +14216,8 @@ const BomNormalizer = () => {
             fromUpload: true,
             fromBomNormalizer: true,
             normalizerSuggestedMappings: suggestedMappings,
-            uploadSource: location.state?.uploadSource ? {
-              ...location.state.uploadSource,
+            uploadSource: routeState?.uploadSource ? {
+              ...routeState.uploadSource,
               processingPath: 'normalize',
               normalizerWorkflow: buildNormalizerWorkflowRecipe('merge-preview', rows),
             } : null,
@@ -14221,7 +14232,7 @@ const BomNormalizer = () => {
         setCombineError(err.response?.data?.error || err.message || 'Could not continue to BOM Mapping.');
       })
       .finally(() => setBusy(false));
-  }, [buildNormalizerWorkflowRecipe, location.state, mergePreview, mergePreviewFilter, mergeVisibleColumns, navigate, saveReturnSnapshot, workflowTemplateInUse]);
+  }, [buildNormalizerWorkflowRecipe, routeState, mergePreview, mergePreviewFilter, mergeVisibleColumns, navigate, saveReturnSnapshot, workflowTemplateInUse]);
 
   // Sheets offered to the gate: whichever the user actually normalized.
   // A column saying which source each row came from, when there is more than
@@ -16434,8 +16445,8 @@ const BomNormalizer = () => {
   }, []);
 
   const handleBackFromSourceSetup = useCallback(() => {
-    if (location.state?.uploadSource) {
-      const uploadSource = location.state.uploadSource || {};
+    if (routeState?.uploadSource) {
+      const uploadSource = routeState.uploadSource || {};
       const selectedProcessingTemplateId = uploadSource.selectedProcessingTemplateId
         || uploadSource.selectedProcessingTemplate?.id
         || '';
@@ -16518,7 +16529,7 @@ const BomNormalizer = () => {
     setManufacturerMatchOpen(false);
     setMergeStage('preview');
     setError('');
-  }, [handleReset, headerRowIndex, location.state, mergePreview, navigate, selectedSheetNames, sheetName, sheetScope]);
+  }, [handleReset, headerRowIndex, routeState, mergePreview, navigate, selectedSheetNames, sheetName, sheetScope]);
 
   // Changing the source or parser settings invalidates any previous run. Skipped
   // while a restore is applying: that path sets roles/config and currentStep in the
@@ -16639,7 +16650,7 @@ const BomNormalizer = () => {
     });
   }, [config, currentStep, dataRows, headers, parserTouched, roles]);
 
-  const autoReplayTemplate = location.state?.autoReplayProcessingTemplate || null;
+  const autoReplayTemplate = routeState?.autoReplayProcessingTemplate || null;
   if (autoReplayTemplate) {
     const replayName = autoReplayTemplate.name || 'selected template';
     const progressTotal = Number(progress.total || 0);
@@ -16974,6 +16985,18 @@ const BomNormalizer = () => {
       sx={{
         ...factWisePageShellSx(normalizerTheme.pageTokens),
         minHeight: 'calc(100vh - 66px)',
+        ...(inlineMode ? {
+          width: 'min(1320px, calc(100vw - 64px))',
+          maxHeight: 'calc(100dvh - 92px)',
+          minHeight: 0,
+          overflow: 'auto',
+          overscrollBehavior: 'contain',
+          mx: 'auto',
+          my: 2,
+          border: `1px solid ${normalizerTheme.borderStrong}`,
+          borderRadius: '18px',
+          boxShadow: isDarkMode ? '0 18px 48px rgba(0,0,0,0.3)' : '0 18px 48px rgba(15,23,42,0.14)',
+        } : {}),
         '& .MuiPaper-root, & .MuiCard-root': {
           background: `${normalizerTheme.panelGradient} !important`,
           color: `${normalizerTheme.text} !important`,
@@ -17070,6 +17093,23 @@ const BomNormalizer = () => {
         },
       }}
     >
+      {isPreparingLaunchFile && (
+        <Box sx={{
+          position: 'absolute',
+          inset: 0,
+          zIndex: 20,
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: 1.5,
+          bgcolor: normalizerTheme.page,
+        }}>
+          <CircularProgress size={36} thickness={4} sx={{ color: normalizerTheme.pageTokens.primary }} />
+          <Typography sx={{ fontSize: 15, fontWeight: 600, color: normalizerTheme.text }}>Preparing your BOM…</Typography>
+          <Typography sx={{ fontSize: 13, color: normalizerTheme.muted }}>Loading the workbook and its columns</Typography>
+        </Box>
+      )}
       <GlobalStyles styles={normalizerGlobalFieldStyles} />
       <Box sx={factWiseTopShadeSx(isDarkMode)} />
       <Box sx={factWiseGlowSx(normalizerTheme.pageTokens)} />
@@ -17080,7 +17120,7 @@ const BomNormalizer = () => {
           <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 1.25, minWidth: 0 }}>
             <IconButton
               aria-label="Back"
-              onClick={() => navigate(-1)}
+            onClick={() => (inlineMode ? onBackToUpload?.() : navigate(-1))}
               size="small"
               sx={{
                 width: 34,
@@ -17122,11 +17162,8 @@ const BomNormalizer = () => {
                 : 1;
           const pipelineSteps = [
             { index: 0, label: 'Upload File' },
-            { index: 1, label: 'Map Columns & Values', onClick: (currentStep === 1 || currentStep === 2) ? () => setConfigureSubStep('mapping') : undefined },
-            { index: 2, label: 'FactWise Interpretation', onClick: (currentStep === 1 || currentStep === 2) && Object.values(roles).filter(Boolean).length > 0 ? () => {
-              setConfigureSubStep('review');
-              if (!fieldPatternLoading) handleTeachFieldPattern(null, { openModal: false });
-            } : undefined },
+            { index: 1, label: 'Map Columns & Values', onClick: (currentStep === 1 || currentStep === 2) ? returnToColumnMapping : undefined },
+            { index: 2, label: 'FactWise Interpretation', onClick: (currentStep === 1 || currentStep === 2) && Object.values(roles).filter(Boolean).length > 0 ? advanceToFactwiseInterpretation : undefined },
             { index: 3, label: 'Results' },
           ];
           return (
@@ -18480,12 +18517,7 @@ const BomNormalizer = () => {
                           </Button>
                           <Button
                             variant="contained"
-                            onClick={() => {
-                              setConfigureSubStep('review');
-                              if (!fieldPatternLoading) {
-                                handleTeachFieldPattern(null, { openModal: false });
-                              }
-                            }}
+                            onClick={advanceToFactwiseInterpretation}
                             disabled={matchedCount === 0}
                             sx={{ textTransform: 'none', fontSize: 13, fontWeight: 500, height: 36, px: 2.5, borderRadius: '999px', bgcolor: '#007aff', boxShadow: '0 4px 14px -4px rgba(0, 122, 255, 0.45)', '&:hover': { bgcolor: '#0062cc', transform: 'translateY(-1px)' } }}
                           >
@@ -18620,7 +18652,7 @@ const BomNormalizer = () => {
                         hideBottomPagination={false}
                         onViewPatterns={() => { setFieldPatternReviewStage('patterns'); setFieldPatternReviewOpen(true); }}
                         onApplyPatterns={handleApplyFieldPatternReview}
-                        onBack={() => setConfigureSubStep('mapping')}
+                        onBack={returnToColumnMapping}
                         onConfigureMapping={() => setMappingDrawerOpen(true)}
                         mappedColumnCount={Object.values(roles).filter(Boolean).length}
                       />

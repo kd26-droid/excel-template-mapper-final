@@ -2,6 +2,7 @@ import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom';
 import LoaderOverlay, { useGlobalBlock } from '../components/LoaderOverlay';
 import BomStructureDialog, { reconcileSavedBomStructure } from '../components/BomStructureDialog';
+import BomNormalizer from './BomNormalizer';
 import {
   Typography,
   Button,
@@ -14,6 +15,7 @@ import {
   Select,
   MenuItem,
   FormControl,
+  FormHelperText,
   InputLabel,
   TextField,
   Dialog,
@@ -53,7 +55,8 @@ import {
   FileDownloadOutlined as FileDownloadOutlinedIcon,
   UnfoldMore as UnfoldMoreIcon,
   ArrowUpward as ArrowUpwardIcon,
-  ArrowDownward as ArrowDownwardIcon
+  ArrowDownward as ArrowDownwardIcon,
+  InfoOutlined as InfoOutlinedIcon
 } from '@mui/icons-material';
 import * as XLSX from 'xlsx';
 import api, { setGlobalLoaderCallback } from '../services/api';
@@ -1543,6 +1546,8 @@ const UploadFiles = () => {
   const [sheetJoinSourceFileInputKey, setSheetJoinSourceFileInputKey] = useState(0);
   const [sheetJoinGroupedDialogOpen, setSheetJoinGroupedDialogOpen] = useState(false);
   const [sheetJoinGroupedSuggestion, setSheetJoinGroupedSuggestion] = useState(null);
+  const [normalizerLaunchState, setNormalizerLaunchState] = useState(null);
+  const [normalizerInlineMode, setNormalizerInlineMode] = useState(true);
 
   const navigate = useNavigate();
   const location = useLocation();
@@ -3835,8 +3840,7 @@ const UploadFiles = () => {
         const combinedFile = new File([sourceResponse.data], 'combined-bom.xlsx', {
           type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         });
-        navigate('/bom-normalizer', {
-          state: {
+        setNormalizerLaunchState({
             initialFile: combinedFile,
             initialFileMode: 'workbook',
             initialSheetName: 'Combined',
@@ -3850,8 +3854,8 @@ const UploadFiles = () => {
               ...getProcessingTemplateState({ processingTemplateMode: selectedProcessingTemplateId ? 'use' : 'new', ...templateOptions }),
               processingPath: 'normalize',
             },
-          },
         });
+        setNormalizerInlineMode(true);
         return;
       } catch (err) {
         setError(err.response?.data?.error || err.message || 'Could not prepare the combined BOM.');
@@ -3866,8 +3870,7 @@ const UploadFiles = () => {
     // reopens as whichever single sheet the picker happened to be showing.
     const combiningSheets = combineSheetsMode && selectedClientSheets.length > 1;
 
-    navigate('/bom-normalizer', {
-      state: {
+    setNormalizerLaunchState({
         initialFile: userFile,
         initialFileMode: 'workbook',
         initialSheetName: selectedClientSheet,
@@ -3887,8 +3890,8 @@ const UploadFiles = () => {
           }),
           processingPath: 'normalize',
         },
-      }
     });
+    setNormalizerInlineMode(true);
   };
 
   const handleUpload = async (templateOptions = {}, passedAnswers = null) => {
@@ -4567,6 +4570,18 @@ const UploadFiles = () => {
     height: 46,
   });
 
+  if (normalizerLaunchState) {
+    return (
+      <BomNormalizer
+        launchState={normalizerLaunchState}
+        inlineMode={normalizerInlineMode}
+        onAdvanceToFactwisePage={() => setNormalizerInlineMode(false)}
+        onReturnToMapping={() => setNormalizerInlineMode(true)}
+        onBackToUpload={() => setNormalizerLaunchState(null)}
+      />
+    );
+  }
+
   return (
     <Box sx={{ position: 'relative', minHeight: 'calc(100vh - 64px)', px: { xs: 1.5, md: 3 }, py: { xs: 2, md: 3 }, bgcolor: fwPageTokens.bg, background: Nn.pageBg, color: Nn.text, overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
       <Box sx={factWiseTopShadeSx(isDarkMode)} />
@@ -4810,7 +4825,6 @@ const UploadFiles = () => {
               {/* Client File Dropzone Column */}
               <Grid item xs={12} md={10} lg={9}>
                 <Typography variant="subtitle2" sx={{ color: Nn.muted, fontWeight: 500, fontSize: 13, mb: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 1 }}>
-                  Client File
                 </Typography>
 
                 <Box
@@ -5081,24 +5095,69 @@ const UploadFiles = () => {
                   </Box>
                 )}
 
-                {/* Client File Sheet & Columns Preview Card (Step 1 only; replaced by Select Template on Step 2) */}
+                {/* Client file, sheet setup, and workflow selection */}
                 {userFile && (
-                  <Box sx={{ mt: 1.25, p: 2, minHeight: 280, borderRadius: '14px', border: `1px solid ${Nn.panelBorder}`, bgcolor: Nn.panelBg, boxShadow: isDarkMode ? '0 10px 24px -22px rgba(0,0,0,0.9)' : '0 12px 28px -24px rgba(15, 23, 42, 0.28)' }}>
+                  <Box sx={{ mt: 1.25, p: 2, borderRadius: '14px', border: `1px solid ${Nn.panelBorder}`, bgcolor: Nn.panelBg, boxShadow: isDarkMode ? '0 10px 24px -22px rgba(0,0,0,0.9)' : '0 12px 28px -24px rgba(15, 23, 42, 0.28)' }}>
                     <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1.5 }}>
                       <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                         <CheckCircleIcon sx={{ color: isDarkMode ? '#4ade80' : '#16a34a', fontSize: 18 }} />
                         <Box sx={{ minWidth: 0 }}>
-                          <Typography variant="subtitle2" sx={{ color: Nn.text, fontWeight: 600, fontSize: 13.5, lineHeight: 1.25 }}>
-                            Sheet setup
-                          </Typography>
+                          <Stack direction="row" spacing={0.25} alignItems="center">
+                            <Typography variant="subtitle2" sx={{ color: Nn.text, fontWeight: 600, fontSize: 13.5, lineHeight: 1.25 }}>
+                              Sheet setup
+                            </Typography>
+                            {clientHeaderPreview.length > 0 && (
+                              <Tooltip
+                                arrow
+                                title={(
+                                  <Box sx={{ maxWidth: 360 }}>
+                                    <Typography sx={{ fontSize: 12, fontWeight: 600, mb: 0.5 }}>
+                                      Header row {clientHeaderRow} · {clientHeaderPreview.length} columns detected
+                                    </Typography>
+                                    <Typography sx={{ fontSize: 11.5, lineHeight: 1.5 }}>
+                                      {clientHeaderPreview.join(' · ')}
+                                    </Typography>
+                                  </Box>
+                                )}
+                                componentsProps={{ tooltip: { sx: { maxWidth: 390 } } }}
+                              >
+                                <IconButton size="small" aria-label="View detected column headers" sx={{ p: 0.35, color: Nn.muted }}>
+                                  <InfoOutlinedIcon sx={{ fontSize: 16 }} />
+                                </IconButton>
+                              </Tooltip>
+                            )}
+                          </Stack>
                           <Typography variant="caption" sx={{ color: Nn.muted, fontSize: 12, lineHeight: 1.25, display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: { xs: 220, sm: 420 } }}>
                             {userFile.name}
                           </Typography>
                         </Box>
                       </Box>
-                      <IconButton size="small" onClick={handleRemoveClientFile} sx={{ color: Nn.muted, '&:hover': { color: Nn.text } }}>
-                        <CloseIcon fontSize="small" />
-                      </IconButton>
+                      <Stack direction="row" spacing={0.75} alignItems="center">
+                        {clientSheetNames.length > 1 && (
+                          <Button
+                            variant="outlined"
+                            size="small"
+                            startIcon={<AddIcon />}
+                            onClick={handleOpenSheetJoinSetup}
+                            sx={{
+                              textTransform: 'none',
+                              borderRadius: '999px',
+                              px: 1.5,
+                              fontSize: 12,
+                              fontWeight: 600,
+                              borderColor: isDarkMode ? '#2563eb' : '#93c5fd',
+                              color: isDarkMode ? '#93c5fd' : '#1d4ed8',
+                              bgcolor: isDarkMode ? '#172e4d' : '#eff6ff',
+                              '&:hover': { borderColor: isDarkMode ? '#3b82f6' : '#60a5fa', bgcolor: isDarkMode ? '#1e3a5f' : '#dbeafe' },
+                            }}
+                          >
+                            Merge sheets
+                          </Button>
+                        )}
+                        <IconButton size="small" onClick={handleRemoveClientFile} aria-label="Remove file" sx={{ color: Nn.muted, '&:hover': { color: Nn.text } }}>
+                          <CloseIcon fontSize="small" />
+                        </IconButton>
+                      </Stack>
                     </Box>
 
                     {clientSheetNames.length > 0 && (
@@ -5167,7 +5226,57 @@ const UploadFiles = () => {
                                     InputProps={{ readOnly: true }}
                                     sx={fieldSx}
                                   />
-                                ) : combineSheetsMode ? (
+                                ) : clientSheetNames.length > 1 ? (
+                                  <FormControl fullWidth size="small" sx={uploadSheetSelectControlSx}>
+                                    <InputLabel sx={inputLabelSx}>Sheets</InputLabel>
+                                    <Select
+                                      multiple
+                                      label="Sheets"
+                                      value={combineSheetsMode && selectedClientSheets.length > 1
+                                        ? selectedClientSheets
+                                        : selectedClientSheet ? [selectedClientSheet] : []}
+                                      onChange={(event) => {
+                                        const nextSheets = typeof event.target.value === 'string'
+                                          ? event.target.value.split(',')
+                                          : event.target.value;
+                                        if (!nextSheets.length) {
+                                          setCombineSheetsMode(false);
+                                          setSelectedClientSheets([]);
+                                          setSelectedClientSheet('');
+                                          return;
+                                        }
+                                        if (nextSheets.length > 1) {
+                                          setCombineSheetsMode(true);
+                                          setSelectedClientSheets(nextSheets);
+                                        } else {
+                                          setCombineSheetsMode(false);
+                                          setSelectedClientSheets([]);
+                                          handleClientSheetChange(nextSheets[0]);
+                                        }
+                                      }}
+                                      renderValue={(selected) => (
+                                        selected.length === clientSheetNames.length
+                                          ? `All ${selected.length} sheets`
+                                          : selected.join(', ')
+                                      )}
+                                      MenuProps={sheetJoinSelectMenuProps}
+                                      sx={selectFieldSx}
+                                    >
+                                      {clientSheetNames.map((sheet) => {
+                                        const selected = combineSheetsMode && selectedClientSheets.length > 1
+                                          ? selectedClientSheets
+                                          : selectedClientSheet ? [selectedClientSheet] : [];
+                                        return (
+                                          <MenuItem key={sheet} value={sheet}>
+                                            <Checkbox size="small" checked={selected.includes(sheet)} sx={{ mr: 0.75, p: 0.5 }} />
+                                            <Typography variant="body2">{sheet}</Typography>
+                                          </MenuItem>
+                                        );
+                                      })}
+                                    </Select>
+                                    <FormHelperText>Select one sheet, or multiple sheets with matching columns.</FormHelperText>
+                                  </FormControl>
+                                ) : false && combineSheetsMode ? (
                                   <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
                                     <Typography
                                       sx={{
@@ -5297,7 +5406,7 @@ const UploadFiles = () => {
                               </Grid>
                             </Grid>
 
-                            {clientSheetNames.length > 1 && (
+                            {false && clientSheetNames.length > 1 && (
                               <Stack
                                 direction="row"
                                 alignItems="center"
@@ -5352,7 +5461,7 @@ const UploadFiles = () => {
                           </>
                         )}
 
-                        {clientHeaderPreview.length > 0 && (
+                        {false && clientHeaderPreview.length > 0 && (
                           <Box sx={{ mb: 1.5 }}>
                             <Typography variant="caption" sx={{ color: isDarkMode ? '#cbd5e1' : '#475569', fontSize: 12, fontWeight: 500, display: 'block', mb: 0.75 }}>
                               {clientHeaderAutoDetected
@@ -5427,86 +5536,17 @@ const UploadFiles = () => {
                                 Review extracted PDF
                               </Button>
                             )}
-                            <Button
-                              variant="outlined"
-                              size="small"
-                              startIcon={<AddIcon />}
-                              onClick={handleOpenSheetJoinSetup}
-                              sx={{
-                                textTransform: 'none',
-                                borderRadius: '999px',
-                                px: 2,
-                                fontSize: 12,
-                                fontWeight: 600,
-                                borderColor: isDarkMode ? '#2563eb' : '#93c5fd',
-                                color: isDarkMode ? '#93c5fd' : '#1d4ed8',
-                                bgcolor: isDarkMode ? '#172e4d' : '#eff6ff',
-                                '&:hover': {
-                                  borderColor: isDarkMode ? '#3b82f6' : '#60a5fa',
-                                  bgcolor: isDarkMode ? '#1e3a5f' : '#dbeafe',
-                                },
-                              }}
-                            >
-                              Merge sheets
-                            </Button>
                           </Box>
                         )}
                       </Box>
                     )}
-                  </Box>
-                )}
-              </Grid>
 
-            </Grid>
 
-            {/* Step 1 Bottom Action Bar */}
-            {false && wizardStep === 0 && (
-              <Box sx={{ mt: userFile ? 2.5 : 'auto', pt: 2.5, borderTop: `1px solid ${Nn.divider}`, display: 'flex', alignItems: 'center', justifyContent: userFile ? 'space-between' : 'flex-end' }}>
-                {userFile && (
-                  <Typography variant="caption" sx={{ color: '#60a5fa', fontWeight: 500 }}>
-                    {userFile?.name?.toLowerCase?.().endsWith('.pdf') && !clientWorkbook
-                      ? 'Extract this PDF first, then merge or continue.'
-                      : 'Client file ready. Destination: FactWise item default'}
-                  </Typography>
-                )}
-                <Button
-                  variant="contained"
-                  onClick={() => {
-                    if (!userFile) {
-                      setError('Please select a client file');
-                      return;
-                    }
-                    if (userFile.name.toLowerCase().endsWith('.pdf') && !clientWorkbook) {
-                      preparePdfExtractionDialog(userFile, {
-                        target: 'primary',
-                        action: 'setup',
-                      });
-                      return;
-                    }
-                    setWizardStep(1);
-                  }}
-                  disabled={!userFile}
-                  sx={{
-                    ...factWisePrimaryButtonSx,
-                    px: 3.5,
-                    py: 0.9,
-                    '&.Mui-disabled': {
-                      ...factWisePrimaryButtonSx['&.Mui-disabled'],
-                      color: isDarkMode ? '#64748b' : '#94a3b8'
-                    }
-                  }}
-                >
-                  {userFile?.name?.toLowerCase?.().endsWith('.pdf') && !clientWorkbook ? 'Extract PDF →' : 'Next →'}
-                </Button>
-              </Box>
-            )}
-
-            {/* Workflow selection and destinations follow sheet setup on this screen. */}
             {userFile && (
-              <Box sx={{ mt: 1.25, display: 'flex', flexDirection: 'column', gap: 1.5, justifyContent: 'flex-start' }}>
+              <Box sx={{ mt: 2, pt: 2, borderTop: `1px solid ${Nn.divider}`, display: 'flex', flexDirection: 'column', gap: 1.5, justifyContent: 'flex-start' }}>
             <Grid container spacing={2.5} justifyContent="center">
-              <Grid item xs={12} md={10} lg={9}>
-                <Box sx={{ p: 2.25, minHeight: 280, display: 'flex', flexDirection: 'column', justifyContent: 'space-between', borderRadius: '14px', border: `1px solid ${Nn.panelBorder}`, bgcolor: Nn.panelBg, boxShadow: isDarkMode ? '0 10px 24px -22px rgba(0,0,0,0.9)' : '0 12px 28px -24px rgba(15, 23, 42, 0.28)' }}>
+              <Grid item xs={12}>
+                <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
                   <Box>
                     <Box sx={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 1.5, mb: 2 }}>
                       <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 1.25, minWidth: 0, flex: '1 1 auto' }}>
@@ -5537,10 +5577,10 @@ const UploadFiles = () => {
                         </Box>
                         <Box sx={{ minWidth: 0 }}>
                           <Typography variant="subtitle2" sx={{ color: Nn.text, fontWeight: 600, fontSize: 14, lineHeight: 1.3 }}>
-                            Select an existing template
+                            Select template
                           </Typography>
-                          <Typography variant="caption" sx={{ color: Nn.muted, display: 'block', fontSize: 12, fontWeight: 400, lineHeight: 1.4, mt: 0.25 }}>
-                            Reuse a saved workflow if this file follows a known layout, or leave blank to create a new one.
+                          <Typography variant="caption" sx={{ color: Nn.muted, display: 'block', mt: 0.25, fontSize: 12, lineHeight: 1.4 }}>
+                            Optional. Reuse saved mappings and workflow settings.
                           </Typography>
                         </Box>
                       </Box>
@@ -5568,22 +5608,6 @@ const UploadFiles = () => {
                         Refresh
                       </Button>
                     </Box>
-
-                    <Typography
-                      component="label"
-                      sx={{
-                        display: 'block',
-                        mb: 0.75,
-                        fontSize: 12,
-                        fontWeight: 500,
-                        color: Nn.text,
-                      }}
-                    >
-                      Saved workflow template{' '}
-                      <Typography component="span" sx={{ fontSize: 11.5, fontWeight: 400, color: Nn.muted }}>
-                        (optional)
-                      </Typography>
-                    </Typography>
 
                   <Grid container spacing={1.5} sx={{ display: 'none' }}>
                     {[
@@ -5633,10 +5657,10 @@ const UploadFiles = () => {
                         displayEmpty
                         renderValue={(selected) => {
                           if (!selected) {
-                            return <Typography sx={{ color: Nn.muted, fontSize: 12.5, fontWeight: 400 }}>Choose a saved template...</Typography>;
+                            return <Typography sx={{ color: Nn.muted, fontSize: 12.5, fontWeight: 400 }}>Choose a template...</Typography>;
                           }
                           const template = processingTemplates.find((item) => String(item.id) === String(selected));
-                          return <Typography sx={{ color: Nn.text, fontSize: 12.5, fontWeight: 500 }}>{template?.name || 'Choose a saved template...'}</Typography>;
+                          return <Typography sx={{ color: Nn.text, fontSize: 12.5, fontWeight: 500 }}>{template?.name || 'Choose a template...'}</Typography>;
                         }}
                         onChange={(event) => {
                           const nextValue = event.target.value;
@@ -5700,56 +5724,7 @@ const UploadFiles = () => {
                   </FormControl>
                   </Box>
 
-                  {/* Contextual guidance footer inside the template card */}
-                  <Box
-                    sx={{
-                      mt: 2,
-                      px: 1.5,
-                      py: 1.15,
-                      borderRadius: '10px',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                      gap: 1.25,
-                      bgcolor: selectedProcessingTemplateId
-                        ? (isDarkMode ? 'rgba(16, 185, 129, 0.1)' : '#f0fdf4')
-                        : (isDarkMode ? 'rgba(148, 163, 184, 0.08)' : '#f8fafc'),
-                      border: `1px solid ${
-                        selectedProcessingTemplateId
-                          ? (isDarkMode ? 'rgba(16, 185, 129, 0.25)' : '#bbf7d0')
-                          : Nn.divider
-                      }`,
-                    }}
-                  >
-                    <Typography sx={{ fontSize: 12, fontWeight: 400, color: selectedProcessingTemplateId ? (isDarkMode ? '#6ee7b7' : '#166534') : Nn.muted, lineHeight: 1.45 }}>
-                      {selectedProcessingTemplateId
-                        ? 'Template selected — click Process Upload → to apply this saved workflow directly.'
-                        : 'No template selected — click BOM Normalizer to normalize & map from scratch, or Process Upload → to continue.'}
-                    </Typography>
-                    {selectedProcessingTemplateId && (
-                      <Button
-                        size="small"
-                        variant="text"
-                        onClick={handleClearProcessingTemplateSelection}
-                        sx={{
-                          flexShrink: 0,
-                          minWidth: 0,
-                          px: 1.25,
-                          height: 26,
-                          borderRadius: '999px',
-                          textTransform: 'none',
-                          fontSize: 11.5,
-                          fontWeight: 500,
-                          color: isDarkMode ? '#f87171' : '#dc2626',
-                          '&:hover': {
-                            bgcolor: isDarkMode ? 'rgba(239, 68, 68, 0.16)' : '#fee2e2',
-                          },
-                        }}
-                      >
-                        Clear
-                      </Button>
-                    )}
-                  </Box>
+
                 </Box>
               </Grid>
 
@@ -5909,15 +5884,20 @@ const UploadFiles = () => {
                 </Box>
               </Grid>
             </Grid>
+                  </Box>
+                )}
 
-            {/* Upload destinations */}
+
+                  </Box>
+                )}
+            {/* Upload actions, outside the sheet setup card */}
+            {userFile && (
             <Box sx={{
-              mt: 'auto',
-              pt: 2,
-              borderTop: `1px solid ${Nn.divider}`,
+              mt: 1.5,
+              pt: 0,
               display: 'flex',
               alignItems: 'center',
-              justifyContent: 'space-between',
+              justifyContent: 'flex-end',
               gap: 1,
               flexWrap: 'wrap'
             }}>
@@ -5983,8 +5963,54 @@ const UploadFiles = () => {
                 </Button>
               </Box>
             </Box>
+            )}
+              </Grid>
+
+            </Grid>
+
+            {/* Step 1 Bottom Action Bar */}
+            {false && wizardStep === 0 && (
+              <Box sx={{ mt: userFile ? 2.5 : 'auto', pt: 2.5, borderTop: `1px solid ${Nn.divider}`, display: 'flex', alignItems: 'center', justifyContent: userFile ? 'space-between' : 'flex-end' }}>
+                {userFile && (
+                  <Typography variant="caption" sx={{ color: '#60a5fa', fontWeight: 500 }}>
+                    {userFile?.name?.toLowerCase?.().endsWith('.pdf') && !clientWorkbook
+                      ? 'Extract this PDF first, then merge or continue.'
+                      : 'Client file ready. Destination: FactWise item default'}
+                  </Typography>
+                )}
+                <Button
+                  variant="contained"
+                  onClick={() => {
+                    if (!userFile) {
+                      setError('Please select a client file');
+                      return;
+                    }
+                    if (userFile.name.toLowerCase().endsWith('.pdf') && !clientWorkbook) {
+                      preparePdfExtractionDialog(userFile, {
+                        target: 'primary',
+                        action: 'setup',
+                      });
+                      return;
+                    }
+                    setWizardStep(1);
+                  }}
+                  disabled={!userFile}
+                  sx={{
+                    ...factWisePrimaryButtonSx,
+                    px: 3.5,
+                    py: 0.9,
+                    '&.Mui-disabled': {
+                      ...factWisePrimaryButtonSx['&.Mui-disabled'],
+                      color: isDarkMode ? '#64748b' : '#94a3b8'
+                    }
+                  }}
+                >
+                  {userFile?.name?.toLowerCase?.().endsWith('.pdf') && !clientWorkbook ? 'Extract PDF →' : 'Next →'}
+                </Button>
               </Box>
             )}
+
+
           </Box>
       </Box>
 
