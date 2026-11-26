@@ -5890,16 +5890,24 @@ const UploadFiles = () => {
 
                   </Box>
                 )}
+
+
+              </Grid>
+
+            </Grid>
+
             {/* Upload actions, outside the sheet setup card */}
             {userFile && (
             <Box sx={{
-              mt: 1.5,
-              pt: 0,
+              mt: 2.5,
+              pt: 2,
+              borderTop: `1px solid ${Nn.divider}`,
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'flex-end',
               gap: 1,
-              flexWrap: 'wrap'
+              flexWrap: 'wrap',
+              width: '100%',
             }}>
               <Button
                 variant="outlined"
@@ -5964,10 +5972,6 @@ const UploadFiles = () => {
               </Box>
             </Box>
             )}
-              </Grid>
-
-            </Grid>
-
             {/* Step 1 Bottom Action Bar */}
             {false && wizardStep === 0 && (
               <Box sx={{ mt: userFile ? 2.5 : 'auto', pt: 2.5, borderTop: `1px solid ${Nn.divider}`, display: 'flex', alignItems: 'center', justifyContent: userFile ? 'space-between' : 'flex-end' }}>

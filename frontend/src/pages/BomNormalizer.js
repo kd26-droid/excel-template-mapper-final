@@ -1,3 +1,4 @@
+import GridViewIcon from '@mui/icons-material/GridView';
 import SheetSortPopover from '../components/SheetSortPopover';
 import FactWiseToast from '../components/FactWiseToast';
 import SheetColumnsPopover from '../components/SheetColumnsPopover';
@@ -17055,22 +17056,30 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
   };
 
   const hasMappingFooter = inlineMode && (currentStep === 1 || currentStep === 2) && configureSubStep === 'mapping';
+  const mappingSectionSx = hasMappingFooter ? { display: 'flex', flexDirection: 'column', flex: '1 1 auto', minHeight: 0 } : undefined;
   return (
     <Box
       className="bom-normalizer-page"
       sx={{
         ...factWisePageShellSx(normalizerTheme.pageTokens),
-        width: configureSubStep === 'review' ? 'calc(100vw - 48px)' : 'min(1120px, calc(100vw - 48px))',
+        width: configureSubStep === 'review' ? 'calc(100vw - 48px)' : 'min(1240px, calc(100vw - 48px))',
         maxWidth: configureSubStep === 'review' ? 1800 : undefined,
         mx: 'auto',
         minHeight: 'calc(100vh - 66px)',
         ...(inlineMode ? {
-          width: configureSubStep === 'review' ? 'calc(100vw - 48px)' : 'min(1120px, calc(100vw - 48px))',
-          maxHeight: 'calc(100dvh - 92px)',
+          width: configureSubStep === 'review' ? 'calc(100vw - 48px)' : 'min(1240px, calc(100vw - 48px))',
+            maxHeight: 'calc(100dvh - 64px)',
           minHeight: 0,
           overflowY: 'auto',
           overflowX: 'hidden',
-          ...(hasMappingFooter && { display: 'flex', flexDirection: 'column', overflow: 'hidden' }),
+          ...(hasMappingFooter && {
+            height: 'calc(100dvh - 64px)',
+            boxSizing: 'border-box',
+            display: 'flex',
+            flexDirection: 'column',
+            overflowX: 'hidden',
+            overflowY: 'hidden',
+          }),
           overscrollBehavior: 'contain',
           mx: 'auto',
           my: 2,
@@ -17196,7 +17205,7 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
       <Box sx={factWiseGlowSx(normalizerTheme.pageTokens)} />
       <Box sx={factWiseGridOverlaySx(normalizerTheme.pageTokens)} />
 
-      <Box sx={{ position: 'relative', zIndex: 1, px: { xs: 2, lg: 4 }, pt: 2.25, pb: 1.75, ...(hasMappingFooter && { minHeight: 0, overflowY: 'auto' }) }}>
+      <Box sx={{ position: 'relative', zIndex: 1, px: { xs: 2, lg: 4 }, pt: 2.25, pb: 1.75, flexShrink: 0 }}>
         <Stack direction={{ xs: 'column', md: 'row' }} alignItems={{ xs: 'flex-start', md: 'center' }} justifyContent="space-between" gap={2}>
           <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 1.25, minWidth: 0 }}>
             <IconButton
@@ -17231,7 +17240,7 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
         </Stack>
       </Box>
 
-      <Box sx={{ position: 'relative', zIndex: 1, px: { xs: 2, lg: 4 }, pt: 1.5, pb: 3 }}>
+      <Box sx={{ position: 'relative', zIndex: 1, px: { xs: 2, lg: 4 }, pt: 1.5, pb: 3, ...mappingSectionSx, ...(hasMappingFooter && { overflowY: 'auto' }) }}>
         {/* Animated 4-Step FactWise 4.0 Pipeline Stepper (on page background) */}
         {(() => {
           const animatedStepIndex = (!workbook || currentStep === -1)
@@ -17366,14 +17375,39 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
 
         {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
         {busy && (
-          <Paper elevation={0} sx={{ mb: 2, p: 1.5, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}>
-            <Typography sx={{ mb: 1, fontSize: 13, fontWeight: 600 }}>
-              Processing workbook{progress.total ? `: ${progress.processed}/${progress.total} rows, ${progress.outputRows} output rows, ${progress.skippedRows || 0} skipped` : '...'}
-            </Typography>
-            <LinearProgress
-              variant={progress.total ? 'determinate' : 'indeterminate'}
-              value={progress.total ? Math.round((progress.processed / progress.total) * 100) : undefined}
-            />
+          <Paper elevation={0} sx={{
+            width: '100%', maxWidth: 600, mx: 'auto', my: { xs: 3, md: 5 }, p: { xs: 2, sm: 3 },
+            boxSizing: 'border-box', border: `1px solid ${normalizerTheme.border}`, borderRadius: '16px',
+            bgcolor: normalizerTheme.paper, color: normalizerTheme.text,
+            '@media (prefers-reduced-motion: reduce)': {
+              '& *, & *::before, & *::after': { animation: 'none !important', transition: 'none !important' },
+            },
+          }}>
+            <Stack direction="row" alignItems="center" spacing={1.5}>
+              <Box aria-hidden="true" sx={{ position: 'relative', width: 40, height: 40, flexShrink: 0, display: 'grid', placeItems: 'center', borderRadius: '50%', bgcolor: isDarkMode ? '#192e46' : '#eef5ff' }}>
+                <CircularProgress size={40} thickness={2} sx={{ position: 'absolute', inset: 0, color: '#007aff' }} />
+                <GridViewIcon sx={{ fontSize: 18, color: isDarkMode ? '#93c5fd' : '#005ecb' }} />
+              </Box>
+              <Box sx={{ minWidth: 0 }}>
+                <Typography role="status" sx={{ fontWeight: 600, fontSize: 18 }}>
+                  {progress.total > 0 && progress.processed >= progress.total ? 'Preparing results' : 'Processing workbook'}
+                </Typography>
+                {fileName && <Typography noWrap sx={{ fontSize: 13, color: normalizerTheme.muted }}>{fileName}</Typography>}
+              </Box>
+            </Stack>
+            {progress.total > 0 && (
+              <Box sx={{ mt: 2.5 }}>
+                <LinearProgress aria-label="Workbook rows processed" variant="determinate"
+                  value={Math.min(100, progress.processed / progress.total * 100)}
+                  sx={{ height: 6, borderRadius: 4, bgcolor: normalizerTheme.border, '& .MuiLinearProgress-bar': { borderRadius: 4, bgcolor: '#007aff' } }}
+                />
+                <Stack direction="row" gap={2} flexWrap="wrap" sx={{ mt: 1.25, fontSize: 12, color: normalizerTheme.muted, fontVariantNumeric: 'tabular-nums' }}>
+                  <span>{progress.processed} of {progress.total} rows processed</span>
+                  <span>{progress.outputRows} output rows</span>
+                  <span>{progress.skippedRows || 0} skipped</span>
+                </Stack>
+              </Box>
+            )}
           </Paper>
         )}
 
@@ -17816,7 +17850,7 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
             </Grid>
           </Grid>
         ) : (
-          <Stack spacing={2.5}>
+          <Stack spacing={2.5} sx={mappingSectionSx}>
             {currentStep === -1 && (
               <Paper elevation={0} sx={{ p: 2.25, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}>
                 <Typography sx={{ fontSize: 17, fontWeight: 600 }}>Source setup</Typography>
@@ -18018,12 +18052,13 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
             )}
 
             {(currentStep === 1 || currentStep === 2) && (
-              <Stack spacing={2}>
+              <Stack spacing={2} sx={mappingSectionSx}>
                 {/* 1. Collapsible Header & Source Setup (collapsed by default) */}
                 <Paper
                   elevation={0}
                   sx={{
                     border: `1px solid ${normalizerTheme.border}`,
+                    flexShrink: 0,
                     borderRadius: '14px',
                     overflow: 'hidden',
                     bgcolor: normalizerTheme.paper,
@@ -18323,6 +18358,8 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
                       sx={{
                         border: `1px solid ${normalizerTheme.border}`,
                         borderRadius: '14px',
+                        ...mappingSectionSx,
+                        ...(hasMappingFooter && { minHeight: 320, '& > .MuiStack-root': { flexShrink: 0 } }),
                         overflow: 'hidden',
                         bgcolor: normalizerTheme.paper,
                         boxShadow: isDarkMode ? 'none' : '0 10px 30px -24px rgba(15, 23, 42, 0.25)',
@@ -18366,7 +18403,7 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
                         </Stack>
                       </Stack>
 
-                      <Stack direction={{ xs: 'column', sm: 'row' }} alignItems={{ xs: 'stretch', sm: 'center' }} justifyContent="space-between" gap={1.25} sx={{ px: 2.25, py: 1.25, borderBottom: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}>
+                      <Stack direction={{ xs: 'column', sm: 'row' }} alignItems={{ xs: 'stretch', sm: 'center' }} justifyContent="space-between" gap={1} sx={{ px: 2, py: 0.65, minHeight: 48, boxSizing: 'border-box', borderBottom: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}>
                         <Stack direction="row" alignItems="center" gap={0.75} flexWrap="wrap">
                           {[
                             { key: 'all', label: 'All', count: columnRows.length, dotColor: '#007aff' },
@@ -18375,7 +18412,7 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
                           ].map((tab) => {
                             const active = columnMapFilter === tab.key;
                             return (
-                              <Button key={tab.key} size="small" onClick={() => setColumnMapFilter(tab.key)} sx={{ height: 30, px: 1.35, borderRadius: '999px', textTransform: 'none', fontSize: 12, fontWeight: active ? 600 : 500, color: active ? (isDarkMode ? '#93c5fd' : '#007aff') : normalizerTheme.muted, bgcolor: active ? (isDarkMode ? 'rgba(0, 122, 255, 0.16)' : '#eff6ff') : 'transparent', border: `1px solid ${active ? (isDarkMode ? 'rgba(59, 130, 246, 0.4)' : '#bfdbfe') : 'transparent'}` }}>
+                              <Button key={tab.key} size="small" onClick={() => setColumnMapFilter(tab.key)} sx={{ height: 27, minHeight: 27, px: 1.15, borderRadius: '999px', textTransform: 'none', fontSize: 11.5, fontWeight: active ? 600 : 500, color: active ? (isDarkMode ? '#93c5fd' : '#007aff') : normalizerTheme.muted, bgcolor: active ? (isDarkMode ? 'rgba(0, 122, 255, 0.16)' : '#eff6ff') : 'transparent', border: `1px solid ${active ? (isDarkMode ? 'rgba(59, 130, 246, 0.4)' : '#bfdbfe') : 'transparent'}` }}>
                                 <Box component="span" sx={{ width: 6, height: 6, borderRadius: '50%', bgcolor: tab.dotColor, mr: 0.75, flexShrink: 0 }} />
                                 {tab.label}
                                 <Box component="span" sx={{ ml: 0.6, opacity: 0.75, fontSize: 11.5 }}>{tab.count}</Box>
@@ -18383,10 +18420,10 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
                             );
                           })}
                         </Stack>
-                        <TextField size="small" value={columnMapSearch} onChange={(e) => setColumnMapSearch(e.target.value)} placeholder="Search columns..." InputProps={{ startAdornment: <InputAdornment position="start"><SearchIcon sx={{ fontSize: 16, color: normalizerTheme.muted }} /></InputAdornment> }} sx={{ width: { xs: '100%', sm: 240 } }} />
+                        <TextField size="small" value={columnMapSearch} onChange={(e) => setColumnMapSearch(e.target.value)} placeholder="Search columns..." InputProps={{ startAdornment: <InputAdornment position="start"><SearchIcon sx={{ fontSize: 15, color: normalizerTheme.muted }} /></InputAdornment> }} sx={{ width: { xs: '100%', sm: 240 }, '& .MuiOutlinedInput-root': { height: 34, fontSize: 12.5, borderRadius: '999px' }, '& .MuiInputBase-input': { py: 0.5 } }} />
                       </Stack>
 
-                      <Box sx={{ maxHeight: hasMappingFooter ? 'none' : 460, overflowY: hasMappingFooter ? 'visible' : 'auto', px: 1.5, py: 1.25 }}>
+                      <Box role="region" aria-label="Column mapping list" tabIndex={0} sx={{ flex: '1 1 0px', minHeight: hasMappingFooter ? 96 : 0, maxHeight: hasMappingFooter ? undefined : 460, overflowY: 'auto', overscrollBehaviorY: 'contain', scrollbarGutter: 'stable', px: 1.5, py: 1.25 }}>
                         <Box sx={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', alignItems: 'start', gap: 1.1 }}>
                         {filteredColumnRows.map((row, rowIdx) => {
                           const targetField = ROLE_FIELDS.find((f) => f.key === row.roleKey) || null;
@@ -18409,11 +18446,11 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
                               key={`col-map-${row.header}`}
                               sx={{
                                 display: 'grid',
-                                gridTemplateColumns: { xs: '1fr', sm: 'minmax(0, 0.9fr) minmax(0, 1.1fr)' },
+                                gridTemplateColumns: { xs: '1fr', md: 'minmax(220px, 0.8fr) 112px minmax(0, 1.2fr)' },
                                 alignItems: 'center',
                                 gap: 1,
                                 px: 1.25,
-                                py: 1.1,
+                                py: 0.65,
                                 border: `1px solid ${normalizerTheme.border}`,
                                 borderLeft: `3.5px solid ${rowAccentColor}`,
                                 borderRadius: '10px',
@@ -18427,7 +18464,7 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
                                 },
                               }}
                             >
-                              <Stack direction="row" alignItems="center" gap={1.1} sx={{ minWidth: 0, gridRow: { xs: 'auto', sm: '1 / span 2' } }}>
+                              <Stack direction="row" alignItems="center" gap={1.1} sx={{ minWidth: 0 }}>
                                 <Chip size="small" label={sheetBadgeLabel} sx={{ height: 22, maxWidth: 96, fontSize: 11, fontWeight: 500, borderRadius: '6px', bgcolor: isDarkMode ? 'rgba(148, 163, 184, 0.14)' : '#f1f5f9', color: isDarkMode ? '#cbd5e1' : '#475569', flexShrink: 0 }} />
                                 <Box sx={{ minWidth: 0 }}>
                                   <Typography noWrap sx={{ fontSize: 13.5, fontWeight: 600, color: normalizerTheme.text, lineHeight: 1.3 }}>{row.header}</Typography>
@@ -18435,7 +18472,7 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
                                 </Box>
                               </Stack>
 
-                              <Stack direction="row" alignItems="center" justifyContent="space-between" gap={1} sx={{ gridColumn: { xs: 'auto', sm: '2' }, minWidth: 0 }}>
+                              <Stack direction="row" alignItems="center" justifyContent="center" gap={1} sx={{ gridColumn: { xs: 'auto', md: '2' }, minWidth: 0 }}>
                                 {row.isAlternate ? (
                                   <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5, px: 1.15, py: 0.38, borderRadius: '999px', bgcolor: isDarkMode ? 'rgba(0, 122, 255, 0.2)' : '#dbeafe', border: `1px solid ${isDarkMode ? 'rgba(59, 130, 246, 0.45)' : '#93c5fd'}`, animation: 'fwBadgePop 0.28s cubic-bezier(0.16, 1, 0.3, 1) both' }}>
                                     <CheckCircleOutlineIcon sx={{ fontSize: 13.5, color: isDarkMode ? '#60a5fa' : '#007aff' }} />
@@ -18454,7 +18491,7 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
                                 <Typography className="fw-map-arrow" sx={{ color: normalizerTheme.muted, fontSize: 15, display: { xs: 'none', md: 'block' }, transition: 'transform 0.18s ease, color 0.18s ease' }}>→</Typography>
                               </Stack>
 
-                              <Stack direction="row" alignItems="center" gap={1} sx={{ gridColumn: { xs: 'auto', sm: '2' }, minWidth: 0 }}>
+                              <Stack direction="row" alignItems="center" gap={1} sx={{ gridColumn: { xs: 'auto', md: '3' }, minWidth: 0 }}>
                                 <FormControl fullWidth size="small">
                                   <Select
                                     displayEmpty
@@ -18472,7 +18509,7 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
                                       const target = ROLE_FIELDS.find((f) => f.key === selected);
                                       return <Typography sx={{ fontSize: 12.5, color: normalizerTheme.text, fontWeight: 500 }}>BOM · {target?.label || selected}</Typography>;
                                     }}
-                                    sx={{ height: 36, borderRadius: '8px', bgcolor: normalizerTheme.paper }}
+                                    sx={{ height: 34, borderRadius: '8px', bgcolor: normalizerTheme.paper }}
                                   >
                                     <MenuItem value=""><Typography sx={{ fontSize: 12.5, color: normalizerTheme.muted }}>{row.altLabel ? `Keep as ${row.altLabel}` : 'Do not map (Ignore)'}</Typography></MenuItem>
                                     {ROLE_FIELDS.map((field) => (
@@ -18538,18 +18575,19 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
                                       </Typography>
                                     </Box>
                                   )}
-                                  <Collapse in={isRowRuleExpanded} unmountOnExit>
-                                    <Paper elevation={0} sx={{ p: 2, borderRadius: '10px', border: `1px solid ${isDarkMode ? 'rgba(59, 130, 246, 0.35)' : '#bfdbfe'}`, bgcolor: isDarkMode ? 'rgba(15, 23, 42, 0.55)' : '#f8fafc' }}>
-                                      <Stack direction="row" alignItems="flex-start" justifyContent="space-between" gap={1} sx={{ mb: 1.5 }}>
+                                  <Dialog open={isRowRuleExpanded} onClose={closeConditionalFieldMapping} fullWidth maxWidth="sm"
+                                    aria-label={`Fallback rule for ${targetField.label}`}
+                                    PaperProps={{ sx: { borderRadius: '14px', bgcolor: normalizerTheme.paper, color: normalizerTheme.text, overflow: 'hidden' } }}>
+                                      <Stack direction="row" alignItems="flex-start" justifyContent="space-between" gap={1} sx={{ p: 2, flexShrink: 0, borderBottom: `1px solid ${normalizerTheme.border}` }}>
                                         <Box>
-                                          <Typography sx={{ fontSize: 13.5, fontWeight: 600, color: normalizerTheme.text }}>Fallback rule — {targetField.label}</Typography>
+                                          <Typography sx={{ fontSize: 17, fontWeight: 600, color: normalizerTheme.text }}>Fallback rule — {targetField.label}</Typography>
                                           <Typography sx={{ mt: 0.2, fontSize: 12, color: normalizerTheme.muted }}>Automatically pull from a backup column when a cell is empty or matches a condition.</Typography>
                                         </Box>
-                                        <IconButton size="small" onClick={closeConditionalFieldMapping} sx={{ p: 0.5, color: normalizerTheme.muted, '&:hover': { bgcolor: isDarkMode ? 'rgba(239, 68, 68, 0.16)' : '#fee2e2', color: isDarkMode ? '#f87171' : '#dc2626' } }}>
+                                        <IconButton aria-label="Close rule editor" size="small" onClick={closeConditionalFieldMapping} sx={{ p: 0.5, color: normalizerTheme.muted, '&:hover': { bgcolor: isDarkMode ? 'rgba(239, 68, 68, 0.16)' : '#fee2e2', color: isDarkMode ? '#f87171' : '#dc2626' } }}>
                                           <CloseIcon sx={{ fontSize: 16 }} />
                                         </IconButton>
                                       </Stack>
-                                      <Stack gap={1.5}>
+                                      <Stack gap={2.5} sx={{ p: 2.5, minHeight: 0, overflowY: 'auto' }}>
                                         <Stack direction={{ xs: 'column', sm: 'row' }} gap={1.25} alignItems={{ sm: 'flex-end' }}>
                                           <Chip label="WHEN" size="small" sx={{ width: 60, height: 22, mb: { sm: '7px' }, flexShrink: 0, fontSize: 10.5, fontWeight: 600, bgcolor: isDarkMode ? 'rgba(59, 130, 246, 0.16)' : '#dbeafe', color: isDarkMode ? '#93c5fd' : '#1d4ed8' }} />
                                           <FormControl fullWidth size="small"><InputLabel>Check client column</InputLabel><Select label="Check client column" value={conditionalMappingDraft.conditionColumn} onChange={(e) => setConditionalMappingDraft((p) => ({ ...p, conditionColumn: e.target.value }))}>{visibleSourceHeaders.map((h) => <MenuItem key={h} value={h}>{h}</MenuItem>)}</Select></FormControl>
@@ -18566,16 +18604,15 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
                                           <Chip label="ELSE" size="small" sx={{ width: 60, height: 22, mb: { sm: '7px' }, flexShrink: 0, fontSize: 10.5, fontWeight: 600, bgcolor: isDarkMode ? 'rgba(148, 163, 184, 0.16)' : '#e2e8f0', color: isDarkMode ? '#cbd5e1' : '#475569' }} />
                                           <FormControl fullWidth size="small"><InputLabel>Otherwise use client column</InputLabel><Select label="Otherwise use client column" value={conditionalMappingDraft.elseColumn} onChange={(e) => setConditionalMappingDraft((p) => ({ ...p, elseColumn: e.target.value }))}>{visibleSourceHeaders.map((h) => <MenuItem key={h} value={h}>{h}</MenuItem>)}</Select></FormControl>
                                         </Stack>
-                                        <Stack direction="row" alignItems="center" justifyContent="space-between" gap={1}>
+                                        </Stack>
+                                      <Stack direction="row" alignItems="center" justifyContent="space-between" gap={1} sx={{ px: 2, py: 1.5, flexShrink: 0, borderTop: `1px solid ${normalizerTheme.border}` }}>
                                           <Box>{rowConditionalRule && <Button size="small" color="error" onClick={removeConditionalFieldMapping} sx={{ textTransform: 'none', fontSize: 12 }}>Remove rule</Button>}</Box>
                                           <Stack direction="row" gap={1}>
                                             <Button size="small" variant="outlined" onClick={closeConditionalFieldMapping} sx={{ textTransform: 'none', fontSize: 12.5, height: 32, px: 2, borderRadius: '999px', borderColor: normalizerTheme.borderStrong, color: normalizerTheme.text, '&:hover': { bgcolor: isDarkMode ? 'rgba(239, 68, 68, 0.16)' : '#fee2e2', color: isDarkMode ? '#f87171' : '#dc2626', borderColor: '#fca5a5' } }}>Cancel</Button>
                                             <Button size="small" variant="contained" onClick={saveConditionalFieldMapping} sx={{ textTransform: 'none', fontSize: 12.5, height: 32, px: 2.25, borderRadius: '999px', bgcolor: '#007aff', boxShadow: 'none', '&:hover': { bgcolor: '#0062cc', boxShadow: 'none' } }}>Save rule</Button>
                                           </Stack>
                                         </Stack>
-                                      </Stack>
-                                    </Paper>
-                                  </Collapse>
+                                  </Dialog>
                                 </Box>
                               )}
                             </Box>
