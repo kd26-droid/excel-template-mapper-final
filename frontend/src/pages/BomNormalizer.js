@@ -17104,12 +17104,12 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
         minHeight: 'calc(100vh - 66px)',
         ...(inlineMode ? {
           width: configureSubStep === 'review' ? 'calc(100vw - 48px)' : 'min(1240px, calc(100vw - 48px))',
-          maxHeight: 'calc(100dvh - 92px)',
+          maxHeight: 'calc(100dvh - 90px)',
           minHeight: 0,
           overflowY: 'auto',
           overflowX: 'hidden',
           ...(hasMappingFooter && {
-            height: 'calc(100dvh - 92px)',
+            height: 'calc(100dvh - 90px)',
             boxSizing: 'border-box',
             display: 'flex',
             flexDirection: 'column',
@@ -17118,10 +17118,12 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
           }),
           overscrollBehavior: 'contain',
           mx: 'auto',
-          my: 2,
-          border: `1px solid ${normalizerTheme.borderStrong}`,
-          borderRadius: '18px',
-          boxShadow: isDarkMode ? '0 18px 48px rgba(0,0,0,0.3)' : '0 18px 48px rgba(15,23,42,0.14)',
+          my: 1.5,
+          borderRadius: '22px',
+          border: `1px solid ${normalizerTheme.border}`,
+          background: normalizerTheme.panelGradient,
+          backdropFilter: 'blur(28px)',
+          boxShadow: normalizerTheme.pageTokens.cardShadow,
         } : {}),
         '& .MuiPaper-root, & .MuiCard-root': {
           background: `${normalizerTheme.panelGradient} !important`,
@@ -17240,7 +17242,7 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
       <GlobalStyles styles={normalizerGlobalFieldStyles} />
       <Box sx={factWiseTopShadeSx(isDarkMode)} />
       <Box sx={factWiseGlowSx(normalizerTheme.pageTokens)} />
-      <Box sx={factWiseGridOverlaySx(normalizerTheme.pageTokens)} />
+      {!inlineMode && <Box sx={factWiseGridOverlaySx(normalizerTheme.pageTokens)} />}
 
       <Box sx={{ position: 'relative', zIndex: 1, px: { xs: 2, lg: 4 }, pt: hasMappingFooter ? 1.5 : 2.25, pb: hasMappingFooter ? 0.5 : 1.75, flexShrink: 0 }}>
         <Stack direction={{ xs: 'column', md: 'row' }} alignItems={{ xs: 'flex-start', md: 'center' }} justifyContent="space-between" gap={2}>
@@ -18148,6 +18150,17 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
                           </Typography>
                         </Box>
                       )}
+                      {configureSubStep === 'review' && (
+                        <Button
+                          size="small"
+                          variant="outlined"
+                          startIcon={<TuneIcon sx={{ fontSize: 15 }} />}
+                          onClick={(e) => { e.stopPropagation(); setMappingDrawerOpen(true); }}
+                          sx={{ height: 30, px: 1.35, borderRadius: '999px', textTransform: 'none', fontSize: 12, fontWeight: 500, borderColor: normalizerTheme.borderStrong, color: normalizerTheme.text, bgcolor: normalizerTheme.paper }}
+                        >
+                          Detected setup
+                        </Button>
+                      )}
                       <Button
                         size="small"
                         variant="outlined"
@@ -18642,14 +18655,11 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
 
                       {/* Bottom Action Bar */}
                       <Portal disablePortal={!hasMappingFooter} container={() => mappingFooterRef.current}>
-                      <Stack direction={{ xs: 'column', sm: 'row' }} alignItems={{ xs: 'stretch', sm: 'center' }} justifyContent="space-between" gap={1.25} sx={{ px: 2.25, py: 1.5, borderTop: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paperSoft }}>
+                      <Stack direction={{ xs: 'column', sm: 'row' }} alignItems={{ xs: 'stretch', sm: 'center' }} justifyContent="space-between" gap={1.25} sx={{ px: hasMappingFooter ? { xs: 2, lg: 4 } : 2.25, py: 1.5, borderTop: `1px solid ${normalizerTheme.border}`, bgcolor: hasMappingFooter ? 'transparent' : normalizerTheme.paperSoft }}>
                         <ShadcnButton variant="outline" onClick={onBackToUpload || handleBackFromSourceSetup} disabled={busy} className="h-9 px-4 text-xs">
                           ← Back
                         </ShadcnButton>
                         <Stack direction="row" alignItems="center" gap={1.25}>
-                          <Button size="small" variant="outlined" startIcon={<TuneIcon sx={{ fontSize: 15 }} />} onClick={() => setMappingDrawerOpen(true)} sx={{ height: 34, px: 1.5, borderRadius: '999px', textTransform: 'none', fontSize: 12, fontWeight: 500, borderColor: normalizerTheme.borderStrong, color: normalizerTheme.text }}>
-                            Detected setup
-                          </Button>
                           <Button
                             variant="contained"
                             onClick={advanceToFactwiseInterpretation}
@@ -19805,7 +19815,7 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
           </Stack>
         )}
       </Box>
-      {hasMappingFooter && <Box component="footer" ref={mappingFooterRef} sx={{ flexShrink: 0, zIndex: 2, bgcolor: normalizerTheme.paperSoft }} />}
+      {hasMappingFooter && <Box component="footer" ref={mappingFooterRef} sx={{ flexShrink: 0, zIndex: 2, bgcolor: 'transparent' }} />}
       <Dialog
         open={sourceGridOpen}
         onClose={() => setSourceGridOpen(false)}
