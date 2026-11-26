@@ -22,6 +22,7 @@ const STORAGE_KEYS = {
   // enterprise — so it is captured separately rather than reused.
   enterpriseId: 'fw_enterprise_id',
   entityName: 'fw_entity_name',
+  verifiedPatternEntityId: 'fw_pattern_verified_entity_id',
   fwOrigin: 'fw_origin',
   embedded: 'fw_embedded',
 };
@@ -200,6 +201,11 @@ function readInitialContext() {
   if (entityChangedAtLaunch) {
     window.localStorage.removeItem(STORAGE_KEYS.entityName);
   }
+  if (hasFactwiseLaunchParams) {
+    // A launch value is not proof that it is an entity the new token can use.
+    // Pattern APIs wait for the membership list below to validate it.
+    window.localStorage.removeItem(STORAGE_KEYS.verifiedPatternEntityId);
+  }
 
   Object.entries(captured).forEach(([key, value]) => {
     if (value !== null && value !== '') {
@@ -354,9 +360,8 @@ export function FactwiseProvider({ children }) {
     }
   }, [contextValue.fwOrigin]);
 
-  // The entity list is NOT fetched on load. Only the Settings page needs it —
-  // it is the only screen that lets you see or change which entity you are
-  // filing under — so it asks for it once when it opens, via loadEntities().
+  // Pattern ownership also needs a member entity, so resolve the FactWise list
+  // once for an embedded launch before any pattern request uses the ID.
   const entityListLoadedRef = useRef(false);
   const loadEntities = useCallback(async () => {
     if (entityListLoadedRef.current) return;
@@ -383,13 +388,32 @@ export function FactwiseProvider({ children }) {
         ? list.find(entity => entity.id === cleanString(prev.entityId))
         : null;
       const chosen = byName || byId || (list.length === 1 ? list[0] : null);
-      if (!chosen) return next;
-      if (chosen.name === prev.entityName && (!chosen.id || chosen.id === prev.entityId)) return next;
+      if (!chosen) {
+        window.localStorage.removeItem(STORAGE_KEYS.verifiedPatternEntityId);
+        // FactWise 4.0 sends its enterprise ID as entity_id on launch. Do not
+        // let that unverified value reach the pattern ownership endpoints.
+        if (prev.enterpriseId && cleanString(prev.entityId) && !byId) {
+          window.localStorage.removeItem(STORAGE_KEYS.entityId);
+          window.localStorage.removeItem(STORAGE_KEYS.entityName);
+          return { ...next, entityId: null, entityName: null };
+        }
+        return next;
+      }
       window.localStorage.setItem(STORAGE_KEYS.entityName, chosen.name);
       if (chosen.id) window.localStorage.setItem(STORAGE_KEYS.entityId, chosen.id);
+      if (chosen.id) {
+        window.localStorage.setItem(STORAGE_KEYS.verifiedPatternEntityId, chosen.id);
+      } else {
+        window.localStorage.removeItem(STORAGE_KEYS.verifiedPatternEntityId);
+      }
       return { ...next, entityName: chosen.name, entityId: chosen.id || prev.entityId };
     });
   }, []);
+
+  useEffect(() => {
+    if (!contextValue.isEmbedded || !contextValue.token) return;
+    loadEntities();
+  }, [contextValue.isEmbedded, contextValue.token, loadEntities]);
 
   // On load, resolve the name from the entity the launch actually named — no
   // list call. The token is deliberately not consulted: its `name` claim is the
@@ -449,8 +473,13 @@ export function FactwiseProvider({ children }) {
     // resolve the entity they just moved away from and undo the choice.
     if (id) window.localStorage.setItem(STORAGE_KEYS.entityId, id);
     else window.localStorage.removeItem(STORAGE_KEYS.entityId);
+    if (id && contextValue.entities.some(entity => entity.id === id)) {
+      window.localStorage.setItem(STORAGE_KEYS.verifiedPatternEntityId, id);
+    } else {
+      window.localStorage.removeItem(STORAGE_KEYS.verifiedPatternEntityId);
+    }
     setContextValue(prev => ({ ...prev, entityName: name, entityId: id }));
-  }, []);
+  }, [contextValue.entities]);
 
   const value = useMemo(
     () => ({ ...contextValue, sessionExpired, reconnect, chooseEntity, loadEntities }),

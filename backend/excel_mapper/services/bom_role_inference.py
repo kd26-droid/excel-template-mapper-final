@@ -18,6 +18,7 @@ from .mpn_pattern_library import (
     score_manufacturer_value,
     score_mpn_value,
 )
+from .bom_alternate_columns import infer_alternate_column_groups
 from .bom_directory_store import directory_cache_version, normalize_mpn
 
 
@@ -35,6 +36,25 @@ ROLE_KEYS = (
 )
 
 VALUE_SIGNAL_SAMPLE_SIZE = 150
+#: Share of a column's values the manufacturer directory must recognise before
+#: that outweighs a header word like "Approved" or "Status".
+DIRECTORY_CONFIRMED_MANUFACTURER_RATE = 0.70
+#: Share of a column's values that must be small plain numbers before it can
+#: be taken as quantity when nothing in its header says so.
+QUANTITY_FALLBACK_NUMERIC_RATE = 0.90
+
+
+def manufacturer_confirmed_by_directory(manufacturer_signal, boolean_profile):
+    """True when the manufacturer directory recognises most of a column's values.
+
+    A header such as "Approved Make" trips the status/approval guards, but a
+    column of known manufacturer names is a manufacturer column whatever its
+    header says. This is the one signal strong enough to outvote a header word.
+    """
+    return (not (boolean_profile or {}).get("boolean_like")
+            and (manufacturer_signal or {}).get("sample_size", 0) >= 3
+            and (manufacturer_signal or {}).get("match_rate", 0.0) >= DIRECTORY_CONFIRMED_MANUFACTURER_RATE)
+
 FIELD_PATTERN_RULE_NAME_PREFIX = "BOM field pattern:"
 MPN_RECOGNITION_SIMILARITY_THRESHOLD = 90.0
 ALTERNATE_DELIMITER_NONE = "__no_alternates__"
@@ -1673,8 +1693,11 @@ def build_column_profiles(headers, rows, sample_size=250, timings=None):
         if is_specification_pair_header(header):
             for role in ("mpn", "manufacturer", "description", "parent"):
                 scores[role] = min(scores[role], 0.45)
+        manufacturer_confirmed = manufacturer_confirmed_by_directory(manufacturer_signal, boolean_profile)
         if is_non_bom_role_header(header):
             for role in ("mpn", "manufacturer", "cpn", "description", "quantity", "uom", "level", "parent", "notes", "internalNotes"):
+                if role == "manufacturer" and manufacturer_confirmed:
+                    continue
                 if role in scores:
                     scores[role] = min(scores[role], 0.45)
         if is_percent_or_cost_header(header) or header_support(header, "uom"):
@@ -1697,6 +1720,8 @@ def build_column_profiles(headers, rows, sample_size=250, timings=None):
             if not preserve_level:
                 blocked_roles.append("level")
             for role in blocked_roles:
+                if role == "manufacturer" and manufacturer_confirmed:
+                    continue
                 if role in scores:
                     scores[role] = min(scores[role], 0.10)
         profiles.append({
@@ -1781,7 +1806,12 @@ def build_column_profiles(headers, rows, sample_size=250, timings=None):
             blocked_roles = ["mpn", "manufacturer", "cpn", "description", "quantity", "uom", "parent"]
             if not preserve_level:
                 blocked_roles.append("level")
+            confirmed = manufacturer_confirmed_by_directory(
+                profile["signals"].get("manufacturer"), boolean_profile
+            )
             for role in blocked_roles:
+                if role == "manufacturer" and confirmed:
+                    continue
                 profile["scores"][role] = min(profile["scores"].get(role, 0.0), 0.10)
 
         if profile["signals"]["lineNumberScore"] >= 0.80:
@@ -1856,6 +1886,60 @@ def packed_role_score(profile):
     )
 
 
+def _manufacturer_beside_mpn(candidates, mpn_candidate, assigned, min_score=0.65, tolerance=0.10):
+    """The primary manufacturer: the near-best candidate closest to the MPN column.
+
+    A sheet with alternate makers in columns of their own has several columns
+    that all look like manufacturers, and which one scores highest is close to
+    luck. The primary maker is the one that sits with the primary part number;
+    the rest are its alternates' makers.
+    """
+    if not mpn_candidate or not candidates or candidates[0]["score"] < min_score:
+        return None
+    floor = max(min_score, candidates[0]["score"] - tolerance)
+    close = [c for c in candidates if c["header"] not in assigned and c["score"] >= floor]
+    if not close:
+        return None
+    return min(close, key=lambda c: (abs(c["index"] - mpn_candidate["index"]), -c["score"]))
+
+
+def _only_numeric_column_left_as_quantity(profiles, assigned):
+    """The one column no other field has claimed that holds quantity-shaped numbers.
+
+    A quantity column with an unfamiliar header ("QPS") scores too low to be
+    chosen on its own: small whole numbers also look like BOM levels, and that
+    penalty is right in general. But when every other field is spoken for and
+    exactly one numeric column remains, nothing else could have been meant.
+    Anything ambiguous, or that could be a line number, a level or an
+    identifier, is left alone.
+    """
+    candidates = []
+    for profile in profiles:
+        header = profile["header"]
+        if header in assigned or profile.get("sampleSize", 0) < 5:
+            continue
+        signals = profile.get("signals", {})
+        numbers = signals.get("quantity", {})
+        if signals.get("booleanFlag", {}).get("boolean_like"):
+            continue
+        if (
+            numbers.get("numeric_rate", 0.0) < QUANTITY_FALLBACK_NUMERIC_RATE
+            or numbers.get("small_number_rate", 0.0) < QUANTITY_FALLBACK_NUMERIC_RATE
+            or numbers.get("long_numeric_rate", 0.0) > 0.10
+            or numbers.get("monotonic_sequence_rate", 0.0) >= 0.50
+            or signals.get("lineNumberScore", 0.0) >= 0.80
+        ):
+            continue
+        if (
+            is_non_bom_role_header(header)
+            or is_percent_or_cost_header(header)
+            or header_support(header, "level")
+        ):
+            continue
+        candidates.append(profile)
+    return candidates[0] if len(candidates) == 1 else None
+
+
 def resolve_roles(profiles):
     roles = {role: "" for role in ROLE_KEYS}
     role_metadata = {}
@@ -1899,7 +1983,12 @@ def resolve_roles(profiles):
             })
 
     if not roles["manufacturer"]:
-        manufacturer_candidate = choose("manufacturer", 0.65)
+        manufacturer_candidate = _manufacturer_beside_mpn(candidates["manufacturer"], mpn_candidate, assigned)
+        if manufacturer_candidate:
+            roles["manufacturer"] = manufacturer_candidate["header"]
+            assigned.add(manufacturer_candidate["header"])
+        else:
+            manufacturer_candidate = choose("manufacturer", 0.65)
 
     if mpn_candidate and manufacturer_candidate and mpn_candidate["header"] != manufacturer_candidate["header"]:
         mpn_profile = profiles[mpn_candidate["index"]]
@@ -1956,6 +2045,12 @@ def resolve_roles(profiles):
     choose("notes", 0.65)
     choose("internalNotes", 0.65)
 
+    if not roles["quantity"]:
+        leftover = _only_numeric_column_left_as_quantity(profiles, assigned)
+        if leftover:
+            roles["quantity"] = leftover["header"]
+            assigned.add(leftover["header"])
+            role_metadata.setdefault("quantity", {})["inferredFromValues"] = True
     for role, role_candidates in candidates.items():
         if not roles.get(role) and role_candidates and role_candidates[0]["score"] >= 0.50:
             warnings.append({
@@ -2023,6 +2118,7 @@ def infer_bom_roles(headers, rows, options=None):
         if _backend_parent_path_value(row, safe_headers, resolved["roles"])
     ]
     block_structure["cleanupDetections"] = _cleanup_detection_counts(block_structure)
+    alternate_columns = infer_alternate_column_groups(profiles, resolved["roles"])
     diagnostics_ms = round((perf_counter() - diagnostics_started_at) * 1000, 2)
     return {
         "source": "inferred",
@@ -2034,6 +2130,7 @@ def infer_bom_roles(headers, rows, options=None):
         "warnings": resolved["warnings"],
         "blockStructure": block_structure,
         "cleanupDetections": block_structure.get("cleanupDetections") or {},
+        "alternateColumns": alternate_columns,
         "sampleSize": sample_size,
         "timings": {
             "total_ms": round((perf_counter() - started_at) * 1000, 2),

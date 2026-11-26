@@ -48,6 +48,7 @@ from .delimited_reader import (
     read_delimited_text_safely,
 )
 from .bom_header_mapper import BOMHeaderMapper
+from .bom_setup import ALTERNATE_INHERIT_FIELDS
 from .services.bom_directory_learning import learn_confirmed_bom_field_patterns, learn_normalized_bom_rows
 from .services.bom_pattern_identity import (
     BomPatternIdentityError,
@@ -3477,6 +3478,33 @@ def _finalize_bom_inference_with_structure(inferred_result, learned_matches, req
         **learned_config,
         **request_config,
     }
+
+    # Alternates in columns of their own, found from the cell values. What the
+    # person (or a structure they confirmed) already decided stays as decided;
+    # the page shows the layout and groups exactly as returned here.
+    detected_alternates = (inferred_result or {}).get('alternateColumns') or {}
+    alternates_decided = bool(request_config.get('alternateLayout')) or (
+        learned_is_authoritative and bool(learned_config.get('alternateLayout'))
+    )
+    if detected_alternates.get('groups') and not alternates_decided:
+        final_config = {
+            **final_config,
+            'structure': 'separate_cells',
+            'alternateLayout': detected_alternates['layout'],
+            'alternateColumnGroups': detected_alternates['groups'],
+        }
+
+    # Alternates copy every primary field but the manufacturer, unless there are
+    # none or somebody already chose what to copy (an empty choice counts).
+    if (
+        final_config.get('alternateLayout')
+        and final_config['alternateLayout'] != 'already_separate_rows'
+        and not isinstance(final_config.get('alternateInheritFields'), list)
+    ):
+        final_config = {
+            **final_config,
+            'alternateInheritFields': list(ALTERNATE_INHERIT_FIELDS),
+        }
 
     return final_roles, final_config, matched, role_sources
 

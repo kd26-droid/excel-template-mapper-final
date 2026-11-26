@@ -9,6 +9,7 @@ validated token.
 import base64
 import hashlib
 import json
+import os
 import time
 from dataclasses import dataclass
 from urllib.parse import urlparse
@@ -20,6 +21,8 @@ from django.core.cache import cache
 ACTOR_CACHE_PREFIX = "bom-pattern-actor:v1:"
 DEFAULT_ACTOR_CACHE_SECONDS = 300
 FACTWISE_IDENTITY_TIMEOUT_SECONDS = 12
+LOCAL_DEV_USER_ID = "local-dev-user"
+LOCAL_DEV_ENTITY_ID = "local-dev-entity"
 
 
 class BomPatternIdentityError(ValueError):
@@ -152,6 +155,14 @@ def resolve_bom_pattern_actor(request, *, required=False):
     entity_id = _clean(request.headers.get("X-FactWise-Entity-Id"))
     api_url_header = _clean(request.headers.get("X-FactWise-Api-Url"))
     enterprise_header = _clean(request.headers.get("X-FactWise-Enterprise-Id"))
+
+    if os.environ.get("BOM_PATTERN_SKIP_IDENTITY_CHECK") == "1":
+        # Local development only: off unless explicitly set.
+        return BomPatternActor(
+            user_id=LOCAL_DEV_USER_ID,
+            entity_id=entity_id or LOCAL_DEV_ENTITY_ID,
+            enterprise_id=enterprise_header,
+        )
 
     supplied = any((token, entity_id, api_url_header, enterprise_header))
     if not supplied and not required:

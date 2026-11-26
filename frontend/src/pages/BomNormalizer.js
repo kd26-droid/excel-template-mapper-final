@@ -162,7 +162,11 @@ const ALTERNATE_INHERIT_FIELD_OPTIONS = [
   { value: 'internalNotes', label: 'Internal notes' },
 ];
 
-const DEFAULT_ALTERNATE_INHERIT_FIELDS = [];
+// Alternates copy every primary field but the manufacturer unless the layout says
+// there are none (those layouts set []) or the person chose otherwise.
+const DEFAULT_ALTERNATE_INHERIT_FIELDS = ALTERNATE_INHERIT_FIELD_OPTIONS
+  .map((option) => option.value)
+  .filter((value) => value !== 'manufacturer');
 const ALTERNATE_INHERIT_SELECT_ALL_VALUE = '__select_all_alternate_inherit_fields__';
 const MAX_ALTERNATE_COLUMN_GROUPS = 20;
 
@@ -4042,77 +4046,6 @@ const normalizeSameCell = (rows, roles, config) => {
   return applyAlternatePrimaryInheritance(output, config);
 };
 
-const getAlternateColumnHeaderInfo = (header) => {
-  const normalized = normalizeKey(header);
-  const compact = normalized.replace(/\s+/g, '');
-  if (!normalized) return null;
-
-  const explicitAltSlot = normalized.match(/\b(?:alt|alternate)\s*(\d{1,2})\b/);
-  const trailingSlot = compact.match(/(\d{1,2})$/);
-  const slot = explicitAltSlot?.[1] || trailingSlot?.[1] || '';
-  const hasAltWord = /\b(?:alt|alternate)\b/.test(normalized);
-
-  let kind = '';
-  if (/\b(qty|quantity|qte|menge)\b/.test(normalized)) {
-    kind = 'qty';
-  } else if (/\b(uom|unit|unite|einheit|me)\b/.test(normalized)) {
-    kind = 'uom';
-  } else if (
-    /\b(cpn|customer\s*part|customer\s*pn|item\s*code|customer\s*code)\b/.test(normalized) ||
-    /(customerpart|customerpn|itemcode|customercode)/.test(compact)
-  ) {
-    kind = 'cpn';
-  } else {
-    const hasManufacturerWord = (
-      /\b(mfg|mfgr|mfr|manufacturer|fabricant|maker|vendor|supplier)\b/.test(normalized) ||
-      /(mfg|mfgr|mfr|manufacturer|fabricant|maker|vendor|supplier)/.test(compact)
-    );
-    const hasPartWord = (
-      /\b(part|pn|mpn|ref|reference|code)\b/.test(normalized) ||
-      /(part|mpn|pn|ref|reference|code)/.test(compact)
-    );
-    const hasNameWord = (
-      /\b(name|nom|maker|vendor|supplier|fabricant|manufacturer)\b/.test(normalized) ||
-      /(name|nom|maker|vendor|supplier|fabricant|manufacturer)/.test(compact)
-    );
-
-    if (hasManufacturerWord && hasPartWord) kind = 'mpn';
-    else if (hasManufacturerWord && hasNameWord) kind = 'mfr';
-    else if (hasManufacturerWord && slot) kind = 'mfr';
-    else if (/\bmpn\b/.test(normalized) || /mpn/.test(compact)) kind = 'mpn';
-    else if (hasAltWord && /\bmfr\b|\bmanufacturer\b/.test(normalized)) kind = 'mfr';
-  }
-
-  if (!kind) return null;
-  return { slot, kind };
-};
-
-const findAlternateColumnGroups = (headers, excludedColumns = []) => {
-  const excluded = new Set(Array.from(excludedColumns || []).filter(Boolean));
-  const groups = [];
-  headers.forEach((header) => {
-    if (excluded.has(header)) return;
-    const info = getAlternateColumnHeaderInfo(header);
-    if (!info) return;
-    const slot = info.slot || `${groups.length + 1}`;
-    const type = info.kind;
-    const existing = groups.find((group) => group.slot === slot);
-    if (existing) {
-      existing[type] = header;
-    } else {
-      groups.push({ slot, [type]: header });
-    }
-  });
-  return groups
-    .filter((group) => group.mpn)
-    .sort((left, right) => {
-      const leftSlot = Number.parseInt(left.slot, 10);
-      const rightSlot = Number.parseInt(right.slot, 10);
-      if (Number.isFinite(leftSlot) && Number.isFinite(rightSlot)) return leftSlot - rightSlot;
-      return String(left.slot).localeCompare(String(right.slot));
-    });
-};
-
 const cleanAlternateColumnGroups = (groups = [], headers = []) => groups
   .map((group, index) => ({
     slot: group.slot || `${index + 1}`,
@@ -4298,10 +4231,7 @@ const getConsumedSourceHeaders = (roles = {}, config = {}, headers = []) => {
   Object.values(roles || {}).forEach((header) => {
     if (header) consumed.add(normalizeKey(header));
   });
-  const alternateGroups = [
-    ...(config.alternateColumnGroups || []),
-    ...(config.alternateLayout === 'separate_columns' ? findAlternateColumnGroups(headers) : []),
-  ];
+  const alternateGroups = config.alternateColumnGroups || [];
   alternateGroups.forEach((group) => {
     ['cpn', 'mpn', 'mfr', 'qty', 'uom'].forEach((field) => {
       if (group?.[field]) consumed.add(normalizeKey(group[field]));
@@ -4871,7 +4801,7 @@ const normalizeFollowingItemRows = (rows, roles, config = {}) => {
 const normalizeAlternateColumns = (rows, headers, roles, config) => {
   const output = [];
   const manualGroups = cleanAlternateColumnGroups(config.alternateColumnGroups || [], headers);
-  const alternateGroups = manualGroups.length ? manualGroups : findAlternateColumnGroups(headers);
+  const alternateGroups = manualGroups;
   const useManufacturerColumns = (
     Boolean(roles.manufacturer) || manualGroups.some((group) => Boolean(group.mfr))
   ) && !String(config.structure || '').startsWith('mpn_only');
@@ -5804,7 +5734,7 @@ const analyzeMpnManufacturerPairing = (rows, headers, roles, config) => {
   let checkedRows = 0;
   let matchedRows = 0;
   const manualAltGroups = cleanAlternateColumnGroups(config.alternateColumnGroups || [], headers);
-  const alternateGroups = manualAltGroups.length ? manualAltGroups : findAlternateColumnGroups(headers);
+  const alternateGroups = manualAltGroups;
 
   const collectPairingParts = (mpnValue, manufacturerValue) => {
     const mpnParts = splitMpnCell(mpnValue, config);
@@ -6844,9 +6774,6 @@ const detectBestStructure = (headers, roles, sampleRows) => {
     return multiManufacturer ? 'mfr_only_same_cell' : 'mfr_only_rows';
   }
 
-  const altGroups = findAlternateColumnGroups(headers);
-  if (altGroups.length) return 'alternate_columns';
-
   const mpnSamples = sampleRows.map((row) => getCell(row, roles.mpn)).filter(Boolean);
   const mfrSamples = sampleRows.map((row) => getCell(row, roles.manufacturer)).filter(Boolean);
   const caretPairHeavy = [...mpnSamples, ...mfrSamples].filter((value) => parseCaretMpnManufacturerPairs(value).length > 0).length;
@@ -6875,15 +6802,6 @@ const nextConfigForDetectedStructure = (previousConfig, detectedStructure, detec
     detectionContext.rows || [],
     detectionContext.roles || {}
   );
-
-  if (detectedStructure === 'alternate_columns') {
-    return {
-      ...previousConfig,
-      structure: 'separate_cells',
-      alternateLayout: 'separate_columns',
-      alternateInheritFields: alternateInheritFieldsFromConfig(previousConfig),
-    };
-  }
 
   if (detectedStructure === 'grouped_rows') {
     return {
@@ -11052,6 +10970,8 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
   // guard that only watched what had been taught.
   const latestNormalizerInputsRef = useRef('');
   const normalizedInputsRef = useRef('');
+  const continueAfterApplyRef = useRef(false);
+  const [autoContinueGate, setAutoContinueGate] = useState(false);
   useEffect(() => {
     latestNormalizerInputsRef.current = JSON.stringify({
       roles: roles || {},
@@ -11277,14 +11197,6 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
             alternateInheritFieldsTouched
           );
         });
-      } else if (!parserTouched) {
-        setConfig((prev) => (
-          nextConfigForDetectedStructure(prev, detectBestStructure(headers, nextRoles, dataRows.slice(0, 40)), {
-            headers,
-            rows: dataRows.slice(0, 120),
-            roles: nextRoles,
-          })
-        ));
       }
     });
 
@@ -13065,51 +12977,16 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
     [config.alternateColumnGroups, headers]
   );
 
-  const suggestAlternateColumnGroup = useCallback(() => {
-    const shouldSuggestManufacturer = Boolean(roles.manufacturer) && !String(config.structure || '').startsWith('mpn_only');
-    const usedColumns = new Set([
-      roles.cpn,
-      roles.mpn,
-      roles.manufacturer,
-      roles.description,
-      roles.quantity,
-      roles.uom,
-      roles.level,
-      roles.parent,
-      ...(config.alternateColumnGroups || []).flatMap((group) => [group.cpn, group.mpn, group.mfr, group.qty, group.uom]),
-    ].filter(Boolean));
-    const detectedGroup = findAlternateColumnGroups(headers, usedColumns)[0];
-    if (detectedGroup) {
-      return {
-        slot: `${(config.alternateColumnGroups || []).length + 1}`,
-        cpn: detectedGroup.cpn || '',
-        mpn: detectedGroup.mpn || '',
-        mfr: shouldSuggestManufacturer ? (detectedGroup.mfr || detectedGroup.manufacturer || '') : '',
-        qty: detectedGroup.qty || '',
-        uom: detectedGroup.uom || '',
-      };
-    }
-
-    const candidates = headers.filter((header) => !usedColumns.has(header));
-    const findCandidate = (patterns) => candidates.find((header) => {
-      const normalized = normalizeKey(header);
-      return patterns.some((pattern) => pattern.test(normalized));
-    }) || '';
-    const mpn = findCandidate([/\bmpn\b/, /part/, /code/, /column/]) || candidates[0] || '';
-    const afterMpn = mpn ? candidates.slice(candidates.indexOf(mpn) + 1) : candidates;
-    const cpn = afterMpn.find((header) => /cpn|customer|item\s*code/i.test(header)) || '';
-    const mfr = shouldSuggestManufacturer
-      ? afterMpn.find((header) => /mfr|manufacturer|vendor|supplier|column/i.test(header)) || afterMpn[0] || ''
-      : '';
-    return {
-      slot: `${(config.alternateColumnGroups || []).length + 1}`,
-      cpn: cpn === mpn ? '' : cpn,
-      mpn,
-      mfr: mfr === mpn ? '' : mfr,
-      qty: '',
-      uom: '',
-    };
-  }, [config.alternateColumnGroups, config.structure, headers, roles]);
+  // A group the person adds starts empty: which columns are alternates is the
+  // backend's call (returned by infer) or theirs, never guessed from header words.
+  const suggestAlternateColumnGroup = useCallback(() => ({
+    slot: `${(config.alternateColumnGroups || []).length + 1}`,
+    cpn: '',
+    mpn: '',
+    mfr: '',
+    qty: '',
+    uom: '',
+  }), [config.alternateColumnGroups]);
 
   const addAlternateColumnGroup = useCallback(() => {
     setParserTouched(true);
@@ -13128,77 +13005,21 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
     const targetCount = Number.isFinite(parsed)
       ? Math.max(0, Math.min(MAX_ALTERNATE_COLUMN_GROUPS, parsed))
       : 0;
-    const primaryMappedColumns = new Set(Object.values(roles || {}).filter(Boolean));
 
     setParserTouched(true);
     setConfig((prev) => {
-      const currentGroups = Array.isArray(prev.alternateColumnGroups) ? prev.alternateColumnGroups : [];
-      const usedColumns = new Set(primaryMappedColumns);
-      const nextGroups = [];
-      const detectedGroups = findAlternateColumnGroups(headers, usedColumns);
-
-      const markUsed = (group) => {
-        [group.cpn, group.mpn, group.mfr, group.qty, group.uom].filter(Boolean).forEach((header) => usedColumns.add(header));
-      };
-
-      const nextDetectedGroup = () => (
-        detectedGroups.find((group) => (
-          [group.cpn, group.mpn, group.mfr, group.qty, group.uom]
-            .filter(Boolean)
-            .every((header) => !usedColumns.has(header))
-        )) || {}
-      );
-      const matchingDetectedGroup = (group) => (
-        detectedGroups.find((detected) => (
-          (group.slot && detected.slot === group.slot) ||
-          (group.mpn && detected.mpn === group.mpn) ||
-          (group.mfr && detected.mfr === group.mfr) ||
-          (group.cpn && detected.cpn === group.cpn)
-        )) || {}
-      );
-
-      currentGroups.slice(0, targetCount).forEach((group, index) => {
-        const suggestion = matchingDetectedGroup(group);
-        const fallbackSuggestion = (!group.mpn || primaryMappedColumns.has(group.mpn))
-          ? nextDetectedGroup()
-          : {};
-        const normalizedGroup = {
-          slot: group.slot || suggestion.slot || fallbackSuggestion.slot || `${index + 1}`,
-          cpn: primaryMappedColumns.has(group.cpn) ? '' : (group.cpn || suggestion.cpn || fallbackSuggestion.cpn || ''),
-          mpn: primaryMappedColumns.has(group.mpn) ? '' : (group.mpn || suggestion.mpn || fallbackSuggestion.mpn || ''),
-          mfr: primaryMappedColumns.has(group.mfr) ? '' : (group.mfr || suggestion.mfr || fallbackSuggestion.mfr || suggestion.manufacturer || fallbackSuggestion.manufacturer || ''),
-          qty: primaryMappedColumns.has(group.qty) ? '' : (group.qty || suggestion.qty || fallbackSuggestion.qty || ''),
-          uom: primaryMappedColumns.has(group.uom) ? '' : (group.uom || suggestion.uom || fallbackSuggestion.uom || ''),
-        };
-        nextGroups.push(normalizedGroup);
-        markUsed(normalizedGroup);
-    });
-
+      const nextGroups = (Array.isArray(prev.alternateColumnGroups) ? prev.alternateColumnGroups : [])
+        .slice(0, targetCount);
       while (nextGroups.length < targetCount) {
-        const detected = nextDetectedGroup();
-        const normalizedGroup = {
-          slot: `${nextGroups.length + 1}`,
-          cpn: detected.cpn || '',
-          mpn: detected.mpn || '',
-          mfr: detected.mfr || detected.manufacturer || '',
-          qty: detected.qty || '',
-          uom: detected.uom || '',
-        };
-        nextGroups.push(normalizedGroup);
-        markUsed(normalizedGroup);
+        nextGroups.push({ slot: `${nextGroups.length + 1}`, cpn: '', mpn: '', mfr: '', qty: '', uom: '' });
       }
-
       return {
         ...prev,
         alternateLayout: 'separate_columns',
         alternateColumnGroups: nextGroups,
       };
     });
-  }, [headers]);
-
-  const autofillAlternateColumnGroups = useCallback(() => {
-    setAlternateColumnGroupCount(Math.max(1, (config.alternateColumnGroups || []).length));
-  }, [config.alternateColumnGroups, setAlternateColumnGroupCount]);
+  }, []);
 
   const updateAlternateColumnGroup = useCallback((index, field, value) => {
     setParserTouched(true);
@@ -13272,6 +13093,14 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
       ? sanitizeNormalizerConfig(restoredConfigure.config || {})
       : {};
     const nextSourceEndRow = hasMatchingConfigureDraft ? (restoredConfigure.sourceEndRow || '') : '';
+    // The backend's answer for this sheet (returned by the infer call above) is
+    // applied here too, not only by the inference effect: this path marks the
+    // inference as done, so the effect never would. A draft the person actually
+    // edited keeps what they chose.
+    const draftEditedByPerson = hasMatchingConfigureDraft && Boolean(restoredConfigure.parserTouched);
+    const backendConfig = backendSuggestedConfigRef.current
+      ? sanitizeNormalizerConfig(backendSuggestedConfigRef.current)
+      : {};
     let nextConfig = {
       ...config,
       ...detectedConfig,
@@ -13279,6 +13108,7 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
       ...(hasMatchingConfigureDraft && restoredConfig.alternateColumnGroups ? {
         alternateColumnGroups: resolveSavedAlternateGroups(restoredConfig.alternateColumnGroups, nextHeaders),
       } : {}),
+      ...(draftEditedByPerson ? {} : backendConfig),
     };
     nextConfig = mergeInferredAlternateInheritFields(
       nextConfig,
@@ -14450,6 +14280,25 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
     else if (pending === 'normalized') handleContinueNormalizedToBomMapping(payload);
   }, [pendingBomAction, handleContinueMergePreviewToBomMapping, handleContinueNormalizedToBomMapping, workflowTemplateInUse]);
 
+  // After "Apply patterns" the committed rows are only visible on the next
+  // render, so continue from an effect rather than inside the apply handler.
+  // Results stay hidden from the moment Apply finishes until the popup (or the
+  // hand-off) takes over, and come back if it is cancelled or fails. This
+  // effect is declared before the continue effect so it sees the ref still set.
+  const hideResultsBehindGate = autoContinueGate;
+  useEffect(() => {
+    if (autoContinueGate && !continueAfterApplyRef.current && !bomStructureOpen && !busy) {
+      setAutoContinueGate(false);
+    }
+  }, [autoContinueGate, bomStructureOpen, busy]);
+
+  useEffect(() => {
+    if (!continueAfterApplyRef.current) return;
+    if (currentStep !== 4 || !normalizedRows.length) return;
+    continueAfterApplyRef.current = false;
+    handleContinueNormalizedToBomMapping();
+  }, [currentStep, normalizedRows, handleContinueNormalizedToBomMapping]);
+
   const handleSheetChange = useCallback(async (nextSheetName) => {
     if (!workbook) return;
     const prepared = prepareSingleSheet(workbook, nextSheetName);
@@ -14465,10 +14314,16 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
     setPatternParserOverrides([]);
     setSourceEndRow('');
     setRoles(nextRoles);
-    setConfig((prev) => nextConfigForDetectedStructure({ ...prev, bomLayout: 'none' }, detectBestStructure(nextHeaders, nextRoles, prepared.dataRows.slice(0, 40)), {
-      headers: nextHeaders,
-      rows: prepared.dataRows.slice(0, 120),
-      roles: nextRoles,
+    const backendConfigForSheet = backendSuggestedConfigRef.current
+      ? sanitizeNormalizerConfig(backendSuggestedConfigRef.current)
+      : {};
+    setConfig((prev) => ({
+      ...nextConfigForDetectedStructure({ ...prev, bomLayout: 'none' }, detectBestStructure(nextHeaders, nextRoles, prepared.dataRows.slice(0, 40)), {
+        headers: nextHeaders,
+        rows: prepared.dataRows.slice(0, 120),
+        roles: nextRoles,
+      }),
+      ...backendConfigForSheet,
     }));
     setNormalizedRows([]);
     setCurrentStep(2);
@@ -14507,10 +14362,16 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
     setPatternParserOverrides([]);
     setSourceEndRow('');
     setRoles(nextRoles);
-    setConfig((prev) => nextConfigForDetectedStructure({ ...prev, bomLayout: 'none' }, detectBestStructure(prepared.headers, nextRoles, prepared.dataRows.slice(0, 40)), {
-      headers: prepared.headers,
-      rows: prepared.dataRows.slice(0, 120),
-      roles: nextRoles,
+    const backendConfigForSelection = backendSuggestedConfigRef.current
+      ? sanitizeNormalizerConfig(backendSuggestedConfigRef.current)
+      : {};
+    setConfig((prev) => ({
+      ...nextConfigForDetectedStructure({ ...prev, bomLayout: 'none' }, detectBestStructure(prepared.headers, nextRoles, prepared.dataRows.slice(0, 40)), {
+        headers: prepared.headers,
+        rows: prepared.dataRows.slice(0, 120),
+        roles: nextRoles,
+      }),
+      ...backendConfigForSelection,
     }));
     setNormalizedRows([]);
     setCurrentStep(2);
@@ -16231,6 +16092,10 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
         setPendingNormalization(null);
         setPairingReviewRows([]);
       }
+      // Go straight to the BOM questions; pairing warnings stay available
+      // on the Results page via the popup's Cancel.
+      continueAfterApplyRef.current = normalized.length > 0;
+      setAutoContinueGate(normalized.length > 0);
       commitNormalizedResult(normalized, pairingCheck, { openResults: true });
     } catch (err) {
       setError(err.response?.data?.error || err.message || 'Backend could not apply the confirmed interpretations.');
@@ -16664,6 +16529,9 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
   useEffect(() => {
     if (currentStep === 4) return;
     if (parserTouched) return;
+    // Once the backend has answered, its layout is the layout. Re-detecting here
+    // overwrote it whenever the roles or the repaired rows changed afterwards.
+    if (backendSuggestedConfigRef.current) return;
     setConfig((prev) => {
       const nextStructure = detectBestStructure(headers, roles, dataRows.slice(0, 40));
       const followingMfgPartsLayout = detectFollowingRowMfgPartsLayout(headers, dataRows.slice(0, 120), roles);
@@ -19424,9 +19292,6 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
                             inputProps={{ min: 0, max: MAX_ALTERNATE_COLUMN_GROUPS, step: 1 }}
                             sx={{ width: 150 }}
                           />
-                          <ShadcnButton size="sm" variant="outline" onClick={autofillAlternateColumnGroups} className="h-8">
-                            Autofill groups
-                          </ShadcnButton>
                           <ShadcnButton size="sm" variant="outline" onClick={addAlternateColumnGroup} className="h-8">
                             Add alternate group
                           </ShadcnButton>
@@ -19609,7 +19474,7 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
             )}
 
             {currentStep === 4 && (
-              <Paper elevation={0} sx={{ p: 2.5, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}>
+              <Paper elevation={0} sx={{ p: 2.5, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper, visibility: hideResultsBehindGate ? 'hidden' : 'visible' }}>
                 <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={1.5}>
                   <Box>
                     <Stack direction="row" alignItems="center" gap={1} flexWrap="wrap">
