@@ -10200,6 +10200,40 @@ const DetectedSetupLivePreview = ({ title, option, normalizerTheme, isDarkMode }
   );
 };
 
+const WorkbookScanner = ({ isDarkMode }) => (
+  <Box aria-hidden="true" sx={{
+      '@keyframes fwInterpretPulse': {
+        '0%': { transform: 'scale(0.92)', opacity: 0.65 },
+        '70%': { transform: 'scale(1.24)', opacity: 0 },
+        '100%': { transform: 'scale(1.24)', opacity: 0 },
+      },
+      '@keyframes fwInterpretScan': {
+        '0%': { top: '10%', opacity: 0.25 },
+        '50%': { top: '80%', opacity: 1 },
+        '100%': { top: '10%', opacity: 0.25 },
+      },
+      '@media (prefers-reduced-motion: reduce)': { '& *': { animation: 'none !important' } },
+      position: 'relative', width: 88, height: 88, display: 'flex', alignItems: 'center', justifyContent: 'center', mb: 2.25 }}>
+    <Box sx={{ position: 'absolute', inset: 0, borderRadius: '50%', border: '2px solid rgba(0, 122, 255, 0.32)', animation: 'fwInterpretPulse 2s cubic-bezier(0.16, 1, 0.3, 1) infinite' }} />
+    <Box sx={{ position: 'absolute', inset: 8, borderRadius: '50%', bgcolor: isDarkMode ? 'rgba(0, 122, 255, 0.14)' : '#eff6ff', border: `1.5px solid ${isDarkMode ? 'rgba(96, 165, 250, 0.35)' : '#bfdbfe'}` }} />
+    <Box sx={{ position: 'relative', width: 46, height: 42, borderRadius: '8px', bgcolor: isDarkMode ? '#1e293b' : '#ffffff', border: '1.5px solid #007aff', boxShadow: '0 8px 22px -6px rgba(0, 122, 255, 0.4)', display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: '5px', px: 0.9, overflow: 'hidden' }}>
+      <Stack direction="row" gap={0.5}>
+        <Box sx={{ height: 4, width: '35%', borderRadius: 2, bgcolor: '#10b981' }} />
+        <Box sx={{ height: 4, width: '65%', borderRadius: 2, bgcolor: '#007aff', opacity: 0.75 }} />
+      </Stack>
+      <Stack direction="row" gap={0.5}>
+        <Box sx={{ height: 3.5, width: '45%', borderRadius: 2, bgcolor: isDarkMode ? '#475569' : '#cbd5e1' }} />
+        <Box sx={{ height: 3.5, width: '55%', borderRadius: 2, bgcolor: '#10b981', opacity: 0.65 }} />
+      </Stack>
+      <Stack direction="row" gap={0.5}>
+        <Box sx={{ height: 3.5, width: '30%', borderRadius: 2, bgcolor: isDarkMode ? '#475569' : '#cbd5e1' }} />
+        <Box sx={{ height: 3.5, width: '70%', borderRadius: 2, bgcolor: isDarkMode ? '#475569' : '#cbd5e1' }} />
+      </Stack>
+      <Box sx={{ position: 'absolute', left: 0, right: 0, height: 2.5, bgcolor: '#007aff', boxShadow: '0 0 8px 2px rgba(0, 122, 255, 0.65)', animation: 'fwInterpretScan 1.7s ease-in-out infinite' }} />
+    </Box>
+  </Box>
+);
+
 const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = null, onAdvanceToFactwisePage, onReturnToMapping, onBackToUpload }) => {
   const mappingFooterRef = useRef(null);
   const navigate = useNavigate();
@@ -10967,6 +11001,7 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
   const [, setReviewTablePageInfo] = useState({ page: 0, pageCount: 1, totalRows: 0, pageSize: 25 });
   const [fieldPatternReviewStage, setFieldPatternReviewStage] = useState('patterns');
   const [fieldPatternFieldFilter, setFieldPatternFieldFilter] = useState('all');
+  const [fieldPatternStatusFilter, setFieldPatternStatusFilter] = useState('all');
   const [fieldPatternExpandedPatternKey, setFieldPatternExpandedPatternKey] = useState('');
   const [fieldPatternLoading, setFieldPatternLoading] = useState(false);
   const [fieldPatternGroups, setFieldPatternGroups] = useState([]);
@@ -12013,9 +12048,10 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
   ), [fieldPatternGroups, selectedFieldPatternId]);
   const fieldPatternReviewPatterns = fieldPatternReviewContract.patterns || [];
   const fieldPatternFieldFilterOptions = fieldPatternReviewContract.fieldFilters || [];
-  const filteredFieldPatternReviewPatterns = (
-    fieldPatternReviewContract.patternsByField?.[fieldPatternFieldFilter] || []
-  );
+  const fieldFilteredPatternList = fieldPatternReviewContract.patternsByField?.[fieldPatternFieldFilter] || [];
+  const filteredFieldPatternReviewPatterns = fieldPatternStatusFilter === 'all'
+    ? fieldFilteredPatternList
+    : fieldFilteredPatternList.filter((pattern) => Boolean(pattern.recognized) === (fieldPatternStatusFilter === 'recognized'));
   const mappedFieldPatternRuleOptions = fieldPatternReviewContract.mappedFieldOptions || [];
   const bulkPatternParsingContract = fieldPatternReviewContract.bulkParsing || {};
   const visualTeachDelimiterOptions = bulkPatternParsingContract.alternateSeparatorOptions || [];
@@ -17068,12 +17104,12 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
         minHeight: 'calc(100vh - 66px)',
         ...(inlineMode ? {
           width: configureSubStep === 'review' ? 'calc(100vw - 48px)' : 'min(1240px, calc(100vw - 48px))',
-            maxHeight: 'calc(100dvh - 64px)',
+          maxHeight: 'calc(100dvh - 92px)',
           minHeight: 0,
           overflowY: 'auto',
           overflowX: 'hidden',
           ...(hasMappingFooter && {
-            height: 'calc(100dvh - 64px)',
+            height: 'calc(100dvh - 92px)',
             boxSizing: 'border-box',
             display: 'flex',
             flexDirection: 'column',
@@ -17192,11 +17228,12 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
           flexDirection: 'column',
           alignItems: 'center',
           justifyContent: 'center',
-          gap: 1.5,
+          gap: 0.5,
+          backgroundImage: 'radial-gradient(ellipse at center, rgba(0,122,255,0.09), transparent 60%)',
           bgcolor: normalizerTheme.page,
         }}>
-          <CircularProgress size={36} thickness={4} sx={{ color: normalizerTheme.pageTokens.primary }} />
-          <Typography sx={{ fontSize: 15, fontWeight: 600, color: normalizerTheme.text }}>Preparing your BOM…</Typography>
+          <WorkbookScanner isDarkMode={isDarkMode} />
+          <Typography role="status" sx={{ fontSize: 18, fontWeight: 600, color: normalizerTheme.text }}>Preparing your BOM…</Typography>
           <Typography sx={{ fontSize: 13, color: normalizerTheme.muted }}>Loading the workbook and its columns</Typography>
         </Box>
       )}
@@ -17205,10 +17242,10 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
       <Box sx={factWiseGlowSx(normalizerTheme.pageTokens)} />
       <Box sx={factWiseGridOverlaySx(normalizerTheme.pageTokens)} />
 
-      <Box sx={{ position: 'relative', zIndex: 1, px: { xs: 2, lg: 4 }, pt: 2.25, pb: 1.75, flexShrink: 0 }}>
+      <Box sx={{ position: 'relative', zIndex: 1, px: { xs: 2, lg: 4 }, pt: hasMappingFooter ? 1.5 : 2.25, pb: hasMappingFooter ? 0.5 : 1.75, flexShrink: 0 }}>
         <Stack direction={{ xs: 'column', md: 'row' }} alignItems={{ xs: 'flex-start', md: 'center' }} justifyContent="space-between" gap={2}>
-          <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 1.25, minWidth: 0 }}>
-            <IconButton
+          <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: hasMappingFooter ? 0 : 1.25, minWidth: 0 }}>
+            {!(inlineMode && configureSubStep === 'mapping') && <IconButton
               aria-label="Back"
             onClick={() => (inlineMode ? onBackToUpload?.() : navigate(-1))}
               size="small"
@@ -17229,7 +17266,7 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
               }}
             >
               <ChevronLeftIcon fontSize="small" />
-            </IconButton>
+            </IconButton>}
             <Box sx={{ minWidth: 0 }}>
               <Typography sx={{ fontSize: 20, fontWeight: 600, lineHeight: 1.35, color: normalizerTheme.text }}>BOM Normalizer</Typography>
             <Typography sx={{ mt: 0.35, fontSize: 13, fontWeight: 400, color: normalizerTheme.muted }}>
@@ -17240,7 +17277,7 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
         </Stack>
       </Box>
 
-      <Box sx={{ position: 'relative', zIndex: 1, px: { xs: 2, lg: 4 }, pt: 1.5, pb: 3, ...mappingSectionSx, ...(hasMappingFooter && { overflowY: 'auto' }) }}>
+      <Box sx={{ position: 'relative', zIndex: 1, px: { xs: 2, lg: 4 }, pt: 1.5, pb: hasMappingFooter ? 1.25 : 3, ...mappingSectionSx, ...(hasMappingFooter && { overflowY: 'auto' }) }}>
         {/* Animated 4-Step FactWise 4.0 Pipeline Stepper (on page background) */}
         {(() => {
           const animatedStepIndex = (!workbook || currentStep === -1)
@@ -18294,7 +18331,6 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
 
                 {/* 2. Column Mapping Table (FactWise 4.0 with green Matched / blue Alternate / yellow Unmapped pills & inline Rule editor) */}
                 {configureSubStep === 'mapping' && (() => {
-                  const sheetBadgeLabel = sheetScope === 'single' ? (sheetName || 'Sheet') : (selectedSheetNames[0] || 'BOM');
                   const headerToRoleKey = {};
                   Object.entries(roles || {}).forEach(([roleKey, mappedHeader]) => {
                     if (mappedHeader) headerToRoleKey[mappedHeader] = roleKey;
@@ -18423,24 +18459,17 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
                         <TextField size="small" value={columnMapSearch} onChange={(e) => setColumnMapSearch(e.target.value)} placeholder="Search columns..." InputProps={{ startAdornment: <InputAdornment position="start"><SearchIcon sx={{ fontSize: 15, color: normalizerTheme.muted }} /></InputAdornment> }} sx={{ width: { xs: '100%', sm: 240 }, '& .MuiOutlinedInput-root': { height: 34, fontSize: 12.5, borderRadius: '999px' }, '& .MuiInputBase-input': { py: 0.5 } }} />
                       </Stack>
 
-                      <Box role="region" aria-label="Column mapping list" tabIndex={0} sx={{ flex: '1 1 0px', minHeight: hasMappingFooter ? 96 : 0, maxHeight: hasMappingFooter ? undefined : 460, overflowY: 'auto', overscrollBehaviorY: 'contain', scrollbarGutter: 'stable', px: 1.5, py: 1.25 }}>
-                        <Box sx={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', alignItems: 'start', gap: 1.1 }}>
-                        {filteredColumnRows.map((row, rowIdx) => {
+                      <Box aria-hidden="true" sx={{ display: { xs: 'none', md: 'grid' }, gridTemplateColumns: 'minmax(220px, 0.8fr) 112px minmax(0, 1.2fr)', gap: 1, px: 2.75, py: 0.75, flexShrink: 0, bgcolor: normalizerTheme.paperSoft, borderBottom: `1px solid ${normalizerTheme.border}`, color: normalizerTheme.muted, fontSize: 11, fontWeight: 600 }}>
+                        <span>Source column</span>
+                        <Box component="span" sx={{ textAlign: 'center' }}>Status</Box>
+                        <span>Map to</span>
+                      </Box>
+                      <Box role="region" aria-label="Column mapping list" tabIndex={0} sx={{ flex: '1 1 0px', minHeight: hasMappingFooter ? 96 : 0, maxHeight: hasMappingFooter ? undefined : 460, overflowY: 'auto', overscrollBehaviorY: 'contain', scrollbarGutter: 'stable', px: 1.5, py: 0.5 }}>
+                        <Box sx={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', alignItems: 'start', gap: 0 }}>
+                        {filteredColumnRows.map((row) => {
                           const targetField = ROLE_FIELDS.find((f) => f.key === row.roleKey) || null;
                           const rowConditionalRule = targetField ? config.conditionalFieldMappings?.[targetField.key] : null;
                           const isRowRuleExpanded = Boolean(targetField && conditionalMappingField?.key === targetField.key);
-                          const rowAccentColor = row.isAlternate ? '#007aff' : row.isMatched ? '#10b981' : '#f59e0b';
-                          const rowHoverBorderColor = row.isAlternate ? '#0062cc' : row.isMatched ? '#059669' : '#d97706';
-                          const rowBg = row.isAlternate
-                            ? (isDarkMode ? 'rgba(0, 122, 255, 0.065)' : '#f2f8ff')
-                            : row.isMatched
-                              ? (isDarkMode ? 'rgba(16, 185, 129, 0.055)' : '#f2fdf7')
-                              : (isDarkMode ? 'rgba(245, 158, 11, 0.045)' : '#fffdf5');
-                          const rowHoverBg = row.isAlternate
-                            ? (isDarkMode ? 'rgba(0, 122, 255, 0.11)' : '#e6f2ff')
-                            : row.isMatched
-                              ? (isDarkMode ? 'rgba(16, 185, 129, 0.1)' : '#e8fbf1')
-                              : (isDarkMode ? 'rgba(245, 158, 11, 0.09)' : '#fef9e7');
                           return (
                             <Box
                               key={`col-map-${row.header}`}
@@ -18451,21 +18480,12 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
                                 gap: 1,
                                 px: 1.25,
                                 py: 0.65,
-                                border: `1px solid ${normalizerTheme.border}`,
-                                borderLeft: `3.5px solid ${rowAccentColor}`,
-                                borderRadius: '10px',
-                                bgcolor: rowBg,
-                                animation: `fwRowFadeIn 0.28s cubic-bezier(0.16, 1, 0.3, 1) ${Math.min(rowIdx * 25, 300)}ms both`,
-                                transition: 'background-color 0.16s ease, border-left-color 0.2s ease',
-                                '&:hover': {
-                                  bgcolor: rowHoverBg,
-                                  borderLeftColor: rowHoverBorderColor,
-                                  '& .fw-map-arrow': { transform: 'translateX(4px)', color: '#007aff' },
-                                },
+                                borderBottom: `1px solid ${normalizerTheme.border}`,
+                                '&:last-child': { borderBottom: 0 },
+                                '&:hover, &:focus-within': { bgcolor: normalizerTheme.paperSoft },
                               }}
                             >
                               <Stack direction="row" alignItems="center" gap={1.1} sx={{ minWidth: 0 }}>
-                                <Chip size="small" label={sheetBadgeLabel} sx={{ height: 22, maxWidth: 96, fontSize: 11, fontWeight: 500, borderRadius: '6px', bgcolor: isDarkMode ? 'rgba(148, 163, 184, 0.14)' : '#f1f5f9', color: isDarkMode ? '#cbd5e1' : '#475569', flexShrink: 0 }} />
                                 <Box sx={{ minWidth: 0 }}>
                                   <Typography noWrap sx={{ fontSize: 13.5, fontWeight: 600, color: normalizerTheme.text, lineHeight: 1.3 }}>{row.header}</Typography>
                                   <Typography noWrap sx={{ fontSize: 11.5, color: normalizerTheme.muted, mt: 0.2 }}>{row.samples.length ? `Sample: ${row.samples.join(' · ')}` : 'No sample values detected'}</Typography>
@@ -18488,7 +18508,6 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
                                     <Typography sx={{ fontSize: 11.5, fontWeight: 600, color: isDarkMode ? '#fcd34d' : '#b45309', lineHeight: 1 }}>Unmapped</Typography>
                                   </Box>
                                 )}
-                                <Typography className="fw-map-arrow" sx={{ color: normalizerTheme.muted, fontSize: 15, display: { xs: 'none', md: 'block' }, transition: 'transform 0.18s ease, color 0.18s ease' }}>→</Typography>
                               </Stack>
 
                               <Stack direction="row" alignItems="center" gap={1} sx={{ gridColumn: { xs: 'auto', md: '3' }, minWidth: 0 }}>
@@ -18666,42 +18685,13 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
                           alignItems: 'center',
                           justifyContent: 'center',
                           overflow: 'hidden',
-                          '@keyframes fwInterpretPulse': {
-                            '0%': { transform: 'scale(0.92)', opacity: 0.65 },
-                            '70%': { transform: 'scale(1.24)', opacity: 0 },
-                            '100%': { transform: 'scale(1.24)', opacity: 0 },
-                          },
-                          '@keyframes fwInterpretScan': {
-                            '0%': { top: '10%', opacity: 0.25 },
-                            '50%': { top: '80%', opacity: 1 },
-                            '100%': { top: '10%', opacity: 0.25 },
-                          },
                           '@keyframes fwShimmerRow': {
                             '0%, 100%': { opacity: 0.45 },
                             '50%': { opacity: 0.9 },
                           },
                         }}
                       >
-                        {/* Animated Pattern Scanner Visual */}
-                        <Box sx={{ position: 'relative', width: 88, height: 88, display: 'flex', alignItems: 'center', justifyContent: 'center', mb: 2.25 }}>
-                          <Box sx={{ position: 'absolute', inset: 0, borderRadius: '50%', border: '2px solid rgba(0, 122, 255, 0.32)', animation: 'fwInterpretPulse 2s cubic-bezier(0.16, 1, 0.3, 1) infinite' }} />
-                          <Box sx={{ position: 'absolute', inset: 8, borderRadius: '50%', bgcolor: isDarkMode ? 'rgba(0, 122, 255, 0.14)' : '#eff6ff', border: `1.5px solid ${isDarkMode ? 'rgba(96, 165, 250, 0.35)' : '#bfdbfe'}` }} />
-                          <Box sx={{ position: 'relative', width: 46, height: 42, borderRadius: '8px', bgcolor: isDarkMode ? '#1e293b' : '#ffffff', border: '1.5px solid #007aff', boxShadow: '0 8px 22px -6px rgba(0, 122, 255, 0.4)', display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: '5px', px: 0.9, overflow: 'hidden' }}>
-                            <Stack direction="row" gap={0.5}>
-                              <Box sx={{ height: 4, width: '35%', borderRadius: 2, bgcolor: '#10b981' }} />
-                              <Box sx={{ height: 4, width: '65%', borderRadius: 2, bgcolor: '#007aff', opacity: 0.75 }} />
-                            </Stack>
-                            <Stack direction="row" gap={0.5}>
-                              <Box sx={{ height: 3.5, width: '45%', borderRadius: 2, bgcolor: isDarkMode ? '#475569' : '#cbd5e1' }} />
-                              <Box sx={{ height: 3.5, width: '55%', borderRadius: 2, bgcolor: '#10b981', opacity: 0.65 }} />
-                            </Stack>
-                            <Stack direction="row" gap={0.5}>
-                              <Box sx={{ height: 3.5, width: '30%', borderRadius: 2, bgcolor: isDarkMode ? '#475569' : '#cbd5e1' }} />
-                              <Box sx={{ height: 3.5, width: '70%', borderRadius: 2, bgcolor: isDarkMode ? '#475569' : '#cbd5e1' }} />
-                            </Stack>
-                            <Box sx={{ position: 'absolute', left: 0, right: 0, height: 2.5, bgcolor: '#007aff', boxShadow: '0 0 8px 2px rgba(0, 122, 255, 0.65)', animation: 'fwInterpretScan 1.7s ease-in-out infinite' }} />
-                          </Box>
-                        </Box>
+                        <WorkbookScanner isDarkMode={isDarkMode} />
 
                         <Typography sx={{ fontSize: 16.5, fontWeight: 600, letterSpacing: '-0.015em', color: normalizerTheme.text }}>
                           Analyzing patterns & generating FactWise interpretations
@@ -20881,6 +20871,7 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
               >
                 {[
                   {
+                    key: 'items',
                     label: 'Items detected',
                     value: fieldPatternReviewSummary.itemCount,
                     helper: 'Rows found in the source',
@@ -20888,6 +20879,7 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
                     Icon: InsertDriveFileOutlinedIcon,
                   },
                   {
+                    key: 'all',
                     label: 'Patterns detected',
                     value: fieldPatternReviewSummary.patternCount,
                     helper: 'Unique structures identified',
@@ -20895,6 +20887,7 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
                     Icon: GridViewOutlinedIcon,
                   },
                   {
+                    key: 'recognized',
                     label: 'Recognized',
                     value: fieldPatternReviewSummary.recognizedPatternCount,
                     helper: 'Ready for confirmation',
@@ -20902,32 +20895,63 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
                     Icon: CheckCircleOutlineIcon,
                   },
                   {
+                    key: 'review',
                     label: 'Need review',
                     value: fieldPatternReviewSummary.unrecognizedPatternCount,
                     helper: 'Requires your attention',
                     accent: isDarkMode ? '#f8bd52' : '#d97706',
                     Icon: WarningAmberOutlinedIcon,
                   },
-                ].map(({ label, value, helper, accent, Icon }) => (
+                ].map(({ key, label, value, helper, accent, Icon }) => {
+                  const isActive = key === 'items'
+                    ? fieldPatternReviewStage === 'rows'
+                    : fieldPatternReviewStage === 'patterns' && fieldPatternStatusFilter === key;
+                  return (
                   <Box
                     key={label}
+                    component="button"
+                    type="button"
+                    aria-pressed={isActive}
+                    onClick={() => {
+                      if (key === 'items') {
+                        setFieldPatternReviewStage('rows');
+                      } else {
+                        setFieldPatternReviewStage('patterns');
+                        setFieldPatternStatusFilter(key);
+                        if (key === 'all') setFieldPatternFieldFilter('all');
+                      }
+                      setFieldPatternExpandedPatternKey('');
+                      fieldPatternReviewContentRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+                    }}
                     sx={{
                       position: 'relative',
+                      display: 'block',
+                      width: '100%',
                       minHeight: 108,
                       overflow: 'hidden',
                       px: 1.5,
                       py: 1.35,
-                      border: `1px solid ${isDarkMode ? normalizerTheme.border : '#d9e2ef'}`,
+                      border: `1px solid ${isActive ? `${accent}99` : (isDarkMode ? normalizerTheme.border : '#d9e2ef')}`,
                       borderRadius: '14px',
                       bgcolor: isDarkMode ? normalizerTheme.paper : '#ffffff',
-                      boxShadow: isDarkMode ? 'none' : '0 10px 24px -20px rgba(15,23,42,0.35)',
-                      transition: 'border-color 150ms ease, box-shadow 150ms ease, transform 150ms ease',
+                      color: 'inherit',
+                      font: 'inherit',
+                      textAlign: 'left',
+                      cursor: 'pointer',
+                      boxShadow: isActive
+                        ? `0 0 0 2px ${accent}24, ${isDarkMode ? 'none' : '0 10px 24px -20px rgba(15,23,42,0.35)'}`
+                        : (isDarkMode ? 'none' : '0 10px 24px -20px rgba(15,23,42,0.35)'),
+                      transition: 'border-color 150ms ease, box-shadow 150ms ease, transform 150ms ease, background-color 150ms ease',
                       '&:hover': {
                         transform: 'translateY(-1px)',
                         borderColor: `${accent}66`,
                         boxShadow: isDarkMode
                           ? `0 14px 30px -26px ${accent}80`
                           : `0 16px 32px -24px ${accent}99`,
+                      },
+                      '&:focus-visible': {
+                        outline: `2px solid ${accent}`,
+                        outlineOffset: 2,
                       },
                     }}
                   >
@@ -20971,7 +20995,8 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
                       {helper}
                     </Typography>
                   </Box>
-                ))}
+                  );
+                })}
               </Box>
               <Paper
                 elevation={0}
@@ -21540,7 +21565,11 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
                     );
                   })}
                   {!filteredFieldPatternReviewPatterns.length && (
-                    <Alert severity="info">No detected patterns use the selected mapped field.</Alert>
+                    <Alert severity="info">
+                      {fieldPatternStatusFilter === 'all'
+                        ? 'No detected patterns use the selected mapped field.'
+                        : `No ${fieldPatternStatusFilter === 'recognized' ? 'recognized' : 'unreviewed'} patterns match the selected field.`}
+                    </Alert>
                   )}
                 </Stack>
               ) : (
