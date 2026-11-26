@@ -813,6 +813,9 @@ const BomStructureDialog = ({
   // its own BOM, and a file whose code is a line in another is its sub-BOM.
   groupColumn = '',
   onConfirm,
+  // When given, the step can be put off: "Set up later" continues without
+  // answers, and the BOM is set up from the editor's Tools instead.
+  onSkip = null,
   // The lists the revision branch needs, each narrowing the one before it:
   // every BOM → the projects holding that BOM → the slots it occupies in one
   // project. Injected rather than hardcoded so swapping an endpoint is a prop
@@ -2967,6 +2970,11 @@ const BomStructureDialog = ({
         >
           {step === 0 ? 'Cancel' : 'Back'}
         </Button>
+        {onSkip && (
+          <Button onClick={onSkip} sx={{ ...softButtonSx, ml: 'auto' }}>
+            Set up later
+          </Button>
+        )}
         <Button
           variant="contained"
           onClick={handleNext}

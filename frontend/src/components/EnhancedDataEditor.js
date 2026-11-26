@@ -98,6 +98,7 @@ import { useFactwise, postToFactwiseParent, openInFactwise } from '../contexts/F
 import FactwiseProjectExportDialog from './FactwiseProjectExportDialog';
 import FactwiseBomDirectoryExportDialog from './FactwiseBomDirectoryExportDialog';
 import BomDuplicatePolicyBanner from './BomDuplicatePolicyBanner';
+import BomStructureDialog from './BomStructureDialog';
 import NonEnglishLanguageBanner from './NonEnglishLanguageBanner';
 import * as XLSX from 'xlsx';
 import BomTreePreview from './BomTreePreview';
@@ -756,6 +757,12 @@ const EnhancedDataEditor = () => {
 
   // Toolbar dropdown menu anchors
   const [toolsMenuAnchor, setToolsMenuAnchor] = useState(null);
+  // Tools > Configure BOM: the BOM structure step, asked from the editor. Holds
+  // what the step reads (rows, headers, answers so far) while it is open.
+  const [configureBom, setConfigureBom] = useState(null);
+  // The step was put off on the way here ("Set up later"); a BOM export waits
+  // for it.
+  const [bomSetupRequired, setBomSetupRequired] = useState(false);
   const [mpnMenuAnchor, setMpnMenuAnchor] = useState(null);
   const [rowFilterMenuAnchor, setRowFilterMenuAnchor] = useState(null);
   const [rowFilterMode, setRowFilterMode] = useState('all');
@@ -1998,6 +2005,7 @@ const EnhancedDataEditor = () => {
       }
       
       const data = syncResult.data;
+      setBomSetupRequired(Boolean(data?.bom_setup_required));
       if (typeof data?.template_version === 'number') {
         setSessionVersion(data.template_version);
       }
@@ -4688,7 +4696,53 @@ const EnhancedDataEditor = () => {
   // (project / item directory / BOM sheet). 4.0 has one delivery - the combined
   // sheet - so there is nothing to choose: go straight to its preview, and ask
   // about the project afterwards instead.
+  const openConfigureBom = useCallback(async () => {
+    setToolsMenuAnchor(null);
+    try {
+      const resp = await api.getBomSourceRows(sessionId);
+      const rows = Array.isArray(resp?.data?.rows) ? resp.data.rows : [];
+      const structure = resp?.data?.bom_structure || {};
+      const answered = structure.sheets && Object.keys(structure.sheets).length > 0;
+      // Several source files are several BOMs - the same default the normalizer
+      // page uses - unless the answers already saved say otherwise.
+      const fileNames = [...new Set(rows.map(row => String(row?.['Source file'] ?? '').trim()).filter(Boolean))];
+      const groupColumn = structure.groupColumn
+        || (!answered && fileNames.length > 1 ? 'Source file' : '');
+      const sheetNames = groupColumn
+        ? [...new Set(rows.map(row => String(row?.[groupColumn] ?? '').trim()).filter(Boolean))]
+        : [Object.keys(structure.sheets || {})[0] || 'BOM'];
+      setConfigureBom({
+        rows,
+        headers: resp?.data?.headers || [],
+        groupColumn,
+        sheetNames,
+        answers: answered ? structure.sheets : null,
+      });
+    } catch (e) {
+      showSnackbar(getFriendlyErrorMessage(e, 'Could not load the BOM rows.'), 'error');
+    }
+  }, [sessionId, showSnackbar, getFriendlyErrorMessage]);
+
+  const saveConfigureBom = useCallback(async (payload) => {
+    try {
+      await api.saveBomStructureAnswers(sessionId, payload);
+      setConfigureBom(null);
+      setBomSetupRequired(false);
+      showSnackbar('BOM saved.', 'success');
+      // The finished-good row, sub-assembly types and linked levels all come
+      // from these answers, so the grid is read again to show them.
+      await fetchDataSynchronized();
+    } catch (e) {
+      showSnackbar(getFriendlyErrorMessage(e, 'Could not save the BOM.'), 'error');
+    }
+  }, [sessionId, showSnackbar, getFriendlyErrorMessage, fetchDataSynchronized]);
+
   const openFactwiseExport = useCallback(() => {
+    if (bomSetupRequired) {
+      showSnackbar('Set up the BOM before exporting - it was left for later.', 'info');
+      openConfigureBom();
+      return;
+    }
     // Launched by FactWise 4.0, the delivery is 4.0 - whatever the saved
     // default says.
     //
@@ -4710,7 +4764,7 @@ const EnhancedDataEditor = () => {
     // thing that decides whether a sheet can be imported, so running our item
     // and BOM rules here would only show a second, different opinion before it.
     openFactwisePreview('combined');
-  }, [runGuardedExport, openFactwisePreview, isFactwise40Host]);
+  }, [runGuardedExport, openFactwisePreview, isFactwise40Host, bomSetupRequired, openConfigureBom, showSnackbar]);
 
   const handleExportSheetForEditing = useCallback(async () => {
     setExportingSheet(true);
@@ -6264,6 +6318,27 @@ const EnhancedDataEditor = () => {
   }, [sessionId, showSnackbar]);
 
   const handleCellEdit = useCallback((rowIndex, columnRef, newValue) => {
+    const editedField = typeof columnRef === 'string' ? columnRef : columnDefs[columnRef]?.field;
+    // These two are worked out by the server, so an edit is a request to
+    // re-assign the row: saved through its own endpoint, then the grid is read
+    // again to show the result. Alternate for = the main part's item code;
+    // Is alternate? = No (or an empty Alternate for) makes it a part of its own.
+    if (editedField === 'Is alternate?' || editedField === 'Alternate for?') {
+      const row = rowData[rowIndex] || {};
+      const text = String(newValue ?? '').trim();
+      if (editedField === 'Is alternate?' && /^(yes|y|true)$/i.test(text)) {
+        showSnackbar('Type the main part\'s item code in Alternate for? to make this row its alternate.', 'info');
+        return;
+      }
+      const alternateFor = editedField === 'Alternate for?' ? text : '';
+      api.setAlternateFor(sessionId, row.__source_row__, alternateFor)
+        .then(() => {
+          showSnackbar(alternateFor ? `Now an alternate for ${alternateFor}.` : 'Now a part of its own.', 'success');
+          return fetchDataSynchronized();
+        })
+        .catch((e) => showSnackbar(getFriendlyErrorMessage(e, 'Could not change the alternate.'), 'error'));
+      return;
+    }
     if (partialLoadRef.current) {
       showSnackbar('The rest of the sheet is still loading - editing unlocks when every row is in.', 'info');
       return;
@@ -6284,7 +6359,7 @@ const EnhancedDataEditor = () => {
       // Auto-save
       scheduleAutoSave(newRowData);
     }
-  }, [rowData, columnDefs, scheduleAutoSave]);
+  }, [rowData, columnDefs, scheduleAutoSave, sessionId, showSnackbar, fetchDataSynchronized, getFriendlyErrorMessage]);
 
   // ─── NAVIGATION HANDLERS ────────────────────────────────────────────────────
   const handleBackToMapping = useCallback(async () => {
@@ -6446,8 +6521,11 @@ const EnhancedDataEditor = () => {
     })
     .filter(({ row }) => {
       if (!rowSearchQuery) return true;
-      return Object.values(row || {}).some(value =>
-        String(value ?? '').toLowerCase().includes(rowSearchQuery)
+      // __source_row__ is the row's hidden place in the uploaded sheet, not a
+      // value anyone typed, so a search for "12" must not match it.
+      return Object.entries(row || {}).some(([key, value]) =>
+        key !== '__source_row__'
+        && String(value ?? '').toLowerCase().includes(rowSearchQuery)
       );
     })
     .filter(({ row }) => {
@@ -8083,6 +8161,10 @@ const EnhancedDataEditor = () => {
                   <ListItemIcon><EditNoteIcon sx={{ color: '#2563eb' }} /></ListItemIcon>
                   <ListItemText>Modify Mappings</ListItemText>
                 </MenuItem>
+                <MenuItem onClick={openConfigureBom} disabled={syncStatus.inProgress}>
+                  <ListItemIcon><AccountTreeIcon sx={{ color: bomSetupRequired ? '#e65100' : '#7c3aed' }} /></ListItemIcon>
+                  <ListItemText>{bomSetupRequired ? 'Configure BOM (needed)' : 'Configure BOM'}</ListItemText>
+                </MenuItem>
                 <MenuItem onClick={handleOpenSplitColsDialog} disabled={syncStatus.inProgress || splitColsRunning}>
                   <ListItemIcon>
                     {splitColsRunning ? <CircularProgress size={18} /> : <ContentCutIcon sx={{ color: '#0277bd' }} />}
@@ -8664,6 +8746,22 @@ const EnhancedDataEditor = () => {
             Show Column Quality
           </Button>
         </Box>
+      )}
+
+      {configureBom && (
+        <BomStructureDialog
+          open
+          onClose={() => setConfigureBom(null)}
+          sheetNames={configureBom.sheetNames}
+          getSheetHeaders={() => configureBom.headers}
+          getSheetRecords={(name) => (configureBom.groupColumn
+            ? configureBom.rows.filter(row => String(row?.[configureBom.groupColumn] ?? '').trim() === name)
+            : configureBom.rows)}
+          getSheetPreambleRows={() => []}
+          initialAnswers={configureBom.answers}
+          groupColumn={configureBom.groupColumn}
+          onConfirm={saveConfigureBom}
+        />
       )}
 
       {/* Main Grid Container */}

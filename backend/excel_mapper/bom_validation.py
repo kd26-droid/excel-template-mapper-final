@@ -514,7 +514,13 @@ def is_validation_column(column):
     item codes look like different parts on columns nobody can or should edit.
     """
     name = str(column or '').strip()
-    return bool(_PROVIDER_COLUMN.match(name)) or name in ('MPN Validity', 'Alternate available')
+    # Also the grid's own bookkeeping: __source_row__ is each row's place in the
+    # uploaded sheet, different on every row by design, and the alternate
+    # columns are worked out per row. Compared, every repeat of a part became
+    # "two different parts" differing on __source_row__.
+    return (bool(_PROVIDER_COLUMN.match(name))
+            or name in ('MPN Validity', 'Alternate available', '__source_row__',
+                        'Is alternate?', 'Alternate for?'))
 
 
 def _describe_code_conflicts(codes, rows_by_code, limit=25):

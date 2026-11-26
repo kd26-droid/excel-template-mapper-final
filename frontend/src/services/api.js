@@ -2062,6 +2062,25 @@ const api = {
    * Fill blank cells in the named columns with a default value, preserving all
    * existing columns (unlike update-session-data which rebuilds to template cols).
    */
+  // The normalized rows the BOM structure step reads, with the editor's edits
+  // laid over them, plus the answers already given - for asking it from the
+  // editor instead of before it.
+  getBomSourceRows: (sessionId) =>
+    axios.get(`${API_URL}/normaliser/${sessionId}/bom-source-rows/`, { timeout: 0 }),
+
+  // Save the BOM structure step's answers for a session.
+  saveBomStructureAnswers: (sessionId, bomStructure) =>
+    axios.post(`${API_URL}/normaliser/${sessionId}/answers/`, { bomStructure }),
+
+  // Make a row an alternate of the part with this item code, or ('') a part
+  // of its own again. Saved against the row's permanent ID.
+  setAlternateFor: (sessionId, sourceRow, alternateFor) =>
+    axios.post(`${API_URL}/bom/alternate-for/`, {
+      session_id: sessionId,
+      source_row: sourceRow,
+      alternate_for: alternateFor,
+    }),
+
   fillRequiredDefaults: (sessionId, defaults) => {
     return axios.post(`${API_URL}/transforms/fill-required-defaults/`, {
       session_id: sessionId,

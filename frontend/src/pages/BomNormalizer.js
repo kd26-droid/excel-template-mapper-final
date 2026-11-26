@@ -8105,6 +8105,9 @@ const hydrateNormalizerNoteColumns = (rows = [], roles = {}, sourceRows = []) =>
 // separately when building relationships, without deleting them from this grid.
 const withoutDocumentRows = (rows = []) => rows;
 
+// Passed to the Continue handlers by the BOM step's "Set up later".
+const BOM_SETUP_LATER = 'bom-setup-later';
+
 const buildBomMappingRowsFromNormalizedRows = (rows = [], baseColumns = getNormalizedExportColumns(rows)) => {
   // A column carried through from the customer's sheet can differ from a
   // normalised one only by case - Honeywell's own "Description" beside the
@@ -13488,6 +13491,9 @@ const BomNormalizer = () => {
     // onClick passes a MouseEvent, so accept the argument only when it
     // carries the gate's payload shape.
     const passed = (maybeAnswers && maybeAnswers.sheets) ? maybeAnswers : null;
+    // "Set up later" on the BOM step: continue without its answers; the editor
+    // asks for them from its Tools before a BOM export.
+    const setupLater = maybeAnswers === BOM_SETUP_LATER;
     // Answers may already have been captured on the upload page; asking a
     // second time for the same workbook would just be noise.
     let answers = passed || bomStructureAnswers || location.state?.bomStructure || null;
@@ -13526,7 +13532,7 @@ const BomNormalizer = () => {
       }
     }
 
-    if (!answers) {
+    if (!answers && !setupLater) {
       setPendingBomAction('normalized');
       setBomStructureOpen(true);
       return;
@@ -13557,6 +13563,8 @@ const BomNormalizer = () => {
     // session created here keeps them.
     if (answers || location.state?.bomStructure) {
       formData.append('bomStructure', JSON.stringify(answers || location.state.bomStructure));
+    } else if (setupLater) {
+      formData.append('bomSetupLater', '1');
     }
     const returnSnapshotKey = saveReturnSnapshot('normalized-results');
     const returnSnapshot = buildNormalizedResultsSnapshot(handoffRows);
@@ -13693,6 +13701,9 @@ const BomNormalizer = () => {
     // onClick passes a MouseEvent, so accept the argument only when it
     // carries the gate's payload shape.
     const passed = (maybeAnswers && maybeAnswers.sheets) ? maybeAnswers : null;
+    // "Set up later" on the BOM step: continue without its answers; the editor
+    // asks for them from its Tools before a BOM export.
+    const setupLater = maybeAnswers === BOM_SETUP_LATER;
     // Answers may already have been captured on the upload page; asking a
     // second time for the same workbook would just be noise.
     let answers = passed || bomStructureAnswers || location.state?.bomStructure || null;
@@ -13731,7 +13742,7 @@ const BomNormalizer = () => {
       }
     }
 
-    if (!answers) {
+    if (!answers && !setupLater) {
       setPendingBomAction('merge');
       setBomStructureOpen(true);
       return;
@@ -13757,6 +13768,8 @@ const BomNormalizer = () => {
     // session created here keeps them.
     if (answers || location.state?.bomStructure) {
       formData.append('bomStructure', JSON.stringify(answers || location.state.bomStructure));
+    } else if (setupLater) {
+      formData.append('bomSetupLater', '1');
     }
     const returnSnapshotKey = saveReturnSnapshot('merge-preview');
 
@@ -13892,6 +13905,14 @@ const BomNormalizer = () => {
     if (pending === 'merge') handleContinueMergePreviewToBomMapping(payload);
     else if (pending === 'normalized') handleContinueNormalizedToBomMapping(payload);
   }, [pendingBomAction, handleContinueMergePreviewToBomMapping, handleContinueNormalizedToBomMapping, workflowTemplateInUse]);
+
+  const handleBomStructureSetupLater = useCallback(() => {
+    setBomStructureOpen(false);
+    const pending = pendingBomAction;
+    setPendingBomAction(null);
+    if (pending === 'merge') handleContinueMergePreviewToBomMapping(BOM_SETUP_LATER);
+    else if (pending === 'normalized') handleContinueNormalizedToBomMapping(BOM_SETUP_LATER);
+  }, [pendingBomAction, handleContinueMergePreviewToBomMapping, handleContinueNormalizedToBomMapping]);
 
   const handleSheetChange = useCallback(async (nextSheetName) => {
     if (!workbook) return;
@@ -21509,6 +21530,7 @@ const BomNormalizer = () => {
         initialAnswers={bomGroupColumn ? null : bomStructureSeed}
         groupColumn={bomGroupColumn}
         onConfirm={handleBomStructureConfirm}
+        onSkip={handleBomStructureSetupLater}
       />
     </Box>
   );

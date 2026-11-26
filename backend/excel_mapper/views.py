@@ -1605,6 +1605,135 @@ def normaliser_answers(request, session_id):
                      'bom_structure': info.get('bom_structure') or {}})
 
 
+@api_view(['POST'])
+def set_alternate_for(request):
+    """Make a row an alternate of another part, or its own part again.
+
+    { session_id, source_row, alternate_for }: `alternate_for` is the item code
+    of the part this row stands in for, or empty to make it a part of its own.
+    Saved against the row's permanent ID, so deleting rows or editing CPNs does
+    not move it, and read by the grid, the BOM build and the export alike.
+    """
+    session_id = str(request.data.get('session_id') or '').strip()
+    info = get_session_consistent(session_id) if session_id else None
+    if not info:
+        return Response({'success': False, 'error': 'Invalid session'}, status=status.HTTP_404_NOT_FOUND)
+    row_cell = str(request.data.get('source_row') if request.data.get('source_row') is not None else '').strip()
+    if not row_cell.isdigit():
+        return Response({'success': False, 'error': ('This row did not come from the uploaded sheet, '
+                                                      'so it cannot be made an alternate.')},
+                        status=status.HTTP_400_BAD_REQUEST)
+    row = int(row_cell)
+    target_code = str(request.data.get('alternate_for') or '').strip()
+
+    base = _alternate_source_map(session_id, info)
+    effective = _effective_alternate_map(session_id, info)
+    grid_headers, grid_rows = read_session_grid(session_id, info)
+    source_at = _grid_column_index(grid_headers or [], SOURCE_ROW_COLUMN)
+    code_at = _grid_column_index(grid_headers or [], 'Item code')
+    rows_of_code = {}
+    if source_at >= 0 and code_at >= 0:
+        for grid_row in grid_rows or []:
+            if isinstance(grid_row, list) and max(source_at, code_at) < len(grid_row):
+                cell = str(grid_row[source_at] or '').strip()
+                if cell.isdigit():
+                    rows_of_code.setdefault(str(grid_row[code_at] or '').strip().upper(), []).append(int(cell))
+
+    if not target_code:
+        new_value = OWN_PART
+    else:
+        candidates = [r for r in rows_of_code.get(target_code.upper(), []) if r not in effective]
+        if not candidates:
+            exists = target_code.upper() in rows_of_code
+            return Response({'success': False, 'error': (
+                '"%s" is itself an alternate - point at the part it stands in for instead.' % target_code
+                if exists else '"%s" is not an item code in this sheet.' % target_code)},
+                status=status.HTTP_400_BAD_REQUEST)
+        new_value = candidates[0]
+        if new_value == row:
+            return Response({'success': False, 'error': 'A part cannot be an alternate of itself.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if any(primary == row for alternate, primary in effective.items() if alternate != row):
+            return Response({'success': False, 'error': (
+                'This part has alternates of its own. Move or remove those first - an '
+                'alternate cannot have alternates.')}, status=status.HTTP_400_BAD_REQUEST)
+        # An assembly is built from its own BOM; it cannot also be a backup for
+        # another part. Read off the BOM as it is now built.
+        try:
+            result, _header, error_response = _generate_bom_for_session(session_id, apply_dup_policy=False)
+        except Exception:
+            result, error_response = None, None
+        if error_response is None and result is not None:
+            assemblies = {str(r.get('Finished good code') or '').strip().upper() for r in result.bom_rows or []}
+            own_code = next((code for code, sheet_rows in rows_of_code.items() if row in sheet_rows), '')
+            if own_code and own_code in assemblies:
+                return Response({'success': False, 'error': (
+                    '"%s" is an assembly with its own BOM, so it cannot be an alternate.' % own_code)},
+                    status=status.HTTP_400_BAD_REQUEST)
+
+    overrides = dict(info.get('alternate_overrides') or {})
+    sheet_says = base.get(row, OWN_PART)
+    if new_value == sheet_says:
+        overrides.pop(str(row), None)       # back to what the sheet said
+    else:
+        overrides[str(row)] = new_value
+    info['alternate_overrides'] = overrides
+    save_session(session_id, info)
+    return Response({'success': True, 'alternate_for': target_code if new_value != OWN_PART else ''})
+
+
+@api_view(['GET'])
+def bom_source_rows(request, session_id):
+    """The normalized rows the BOM structure step reads, for asking it in the editor.
+
+    On the normalizer page the step reads its rows off the page. Asked later -
+    from the editor's Tools - those rows are only on the server: the normalized
+    sheet the editor session was created from, with the editor's own edits laid
+    over it the way the BOM build lays them, so the codes it offers to link are
+    the ones in the grid. Also returns the answers already given, to edit them.
+    """
+    info = get_session_consistent(session_id)
+    if not info:
+        return Response({'success': False, 'error': 'Invalid session'},
+                        status=status.HTTP_404_NOT_FOUND)
+    source_headers, source_rows = _read_normalized_source_table(info)
+    records = _normalized_records_from_grid(source_headers, source_rows)
+    if records and _has_normalizer_columns(records):
+        grid_headers, grid_rows = read_session_grid(session_id, info)
+        # The finished good the step itself added is not a sheet row; left in,
+        # the grid is one row longer than the sheet and nothing is laid over.
+        authored = {str(good['code']).strip() for good in _authored_finished_goods(info)}
+        code_at = _grid_column_index(grid_headers or [], 'Item code')
+        cpn_at = _grid_column_index(grid_headers or [], 'CPN Code')
+        if authored and code_at >= 0:
+            grid_rows = [
+                row for row in (grid_rows or [])
+                if not (isinstance(row, list) and code_at < len(row)
+                        and str(row[code_at] or '').strip() in authored
+                        and not (0 <= cpn_at < len(row) and str(row[cpn_at] or '').strip()))
+            ]
+        merged, note = _merge_grid_values_into_records(
+            [dict(record) for record in records], grid_headers or [], grid_rows or [])
+        if note.get('status') == 'merged':
+            records = merged
+
+    def clean(value):
+        if value is None:
+            return ''
+        if isinstance(value, float) and value.is_integer():
+            return str(int(value))
+        return value if isinstance(value, (str, int, float, bool)) else str(value)
+
+    rows = [{key: clean(value) for key, value in record.items() if key != GRID_ROW_KEY}
+            for record in records]
+    return Response({
+        'success': True,
+        'headers': [header for header in source_headers if header],
+        'rows': rows,
+        'bom_structure': info.get('bom_structure') or {},
+    })
+
+
 #: The column an outline-grouped workbook's levels are read into.
 #:
 #: Excel can express a BOM's depth two ways: a number in a cell, or the row
@@ -2427,6 +2556,163 @@ def get_sfo_slot_keys(headers: list) -> list:
     return slot_keys
 
 
+#: Each grid row's position in the uploaded sheet, stamped when the grid is
+#: first built from it and carried with the row from then on. The export joins
+#: the grid back to the sheet's structure (alternates, groups, levels) through
+#: it. Before it, the join went by position and, once rows were deleted, by CPN
+#: - so deleting rows and editing a CPN on the same sheet left rows that could
+#: not be matched, and the whole BOM refused to build.
+#:
+#: Never shown and never exported: it is removed from the headers the editor
+#: receives and from every file written.
+SOURCE_ROW_COLUMN = '__source_row__'
+
+
+#: Shown in the editor beside Item code, worked out on every load and never
+#: stored in the grid: which rows are alternates, and of which part. The 4.0
+#: export writes the same answer into its own columns, so the grid says what
+#: the file will say instead of it only being visible after export.
+ALTERNATE_DISPLAY_COLUMNS = ('Is alternate?', 'Alternate for?')
+
+
+def _alternate_source_map(session_id, info):
+    """{sheet row: sheet row of its primary} for every alternate on the sheet.
+
+    Read from the normalized sheet the session was built from, grouped the way
+    the BOM build groups it: one line per parentKey, the row marked Primary is
+    the part and every other row in the group stands in for it. The sheet never
+    changes once uploaded, so the answer is kept on the session.
+    """
+    from .bom_generator import group_normalized_rows, relation_rank
+    path = str(info.get('client_path') or '')
+    cached = info.get('alternate_source_map')
+    if isinstance(cached, dict) and cached.get('path') == path:
+        return {int(k): int(v) for k, v in (cached.get('map') or {}).items()}
+    source_headers, source_rows = _read_normalized_source_table(info)
+    records = _normalized_records_from_grid(source_headers, source_rows)
+    mapping = {}
+    if records and _has_normalizer_columns(records):
+        for index, record in enumerate(records):
+            record['__sheet_row__'] = index
+        groups, _ungrouped = group_normalized_rows(records)
+        for members in groups.values():
+            primary = next((m for m in members if relation_rank(m.get('relation')) == 0), members[0])
+            for member in members:
+                if member is not primary:
+                    mapping[member['__sheet_row__']] = primary['__sheet_row__']
+    info['alternate_source_map'] = {'path': path, 'map': {str(k): v for k, v in mapping.items()}}
+    try:
+        save_session(session_id, info)
+    except Exception:
+        pass
+    return mapping
+
+
+#: A user's change to the sheet's alternates, per sheet row: the sheet row of
+#: the part it now stands in for, or OWN_PART when it is no longer an
+#: alternate. Rows not listed keep what the sheet said.
+OWN_PART = -1
+
+
+def _effective_alternate_map(session_id, info):
+    """{sheet row: sheet row of its primary}, the sheet's answer with the user's changes."""
+    mapping = dict(_alternate_source_map(session_id, info))
+    for key, value in (info.get('alternate_overrides') or {}).items():
+        row = int(key)
+        if int(value) == OWN_PART:
+            mapping.pop(row, None)
+        else:
+            mapping[row] = int(value)
+    return mapping
+
+
+def _apply_alternate_overrides(info, records):
+    """Re-group records the way the user re-assigned them, before the BOM is built.
+
+    A row made its own part gets a group of its own and becomes that group's
+    primary. A row made an alternate joins its primary's group as an alternate,
+    so the BOM writes it where the export and the grid say it is.
+    """
+    overrides = info.get('alternate_overrides') or {}
+    if not overrides:
+        return records
+    by_sheet_row = {r.get('__sheet_row__'): r for r in records if isinstance(r, dict) and '__sheet_row__' in r}
+    for key, value in overrides.items():
+        record = by_sheet_row.get(int(key))
+        if record is None:
+            continue
+        if int(value) == OWN_PART:
+            record['parentKey'] = 'own-part-%s' % key
+            record['relation'] = 'Primary'
+        else:
+            primary = by_sheet_row.get(int(value))
+            if primary is None:
+                continue
+            record['parentKey'] = primary.get('parentKey') or 'line-%s' % value
+            primary['parentKey'] = record['parentKey']
+            record['relation'] = 'Alternate'
+    return records
+
+
+def _add_alternate_display_columns(session_id, info, field_headers, display_headers, rows):
+    """Fill Is alternate? / Alternate for? on the rows sent to the editor.
+
+    Rows are matched to the sheet through their source-row ID, so a row the
+    editor deleted or a CPN it changed does not move the answer to another row.
+    "Alternate for" names the primary by its item code as it stands in the grid
+    now. Returns the headers to send; unchanged when the sheet has no
+    alternates or its rows carry no IDs (sessions from before them).
+    """
+    if any(column in field_headers for column in ALTERNATE_DISPLAY_COLUMNS):
+        return field_headers, display_headers
+    if not any(isinstance(row, dict) and str(row.get(SOURCE_ROW_COLUMN, '')).strip() for row in rows or []):
+        return field_headers, display_headers
+    if not _alternate_source_map(session_id, info):
+        return field_headers, display_headers
+    mapping = _effective_alternate_map(session_id, info)
+    grid_headers, grid_rows = read_session_grid(session_id, info)
+    source_at = _grid_column_index(grid_headers or [], SOURCE_ROW_COLUMN)
+    code_at = _grid_column_index(grid_headers or [], 'Item code')
+    code_of_sheet_row = {}
+    if source_at >= 0 and code_at >= 0:
+        for row in grid_rows or []:
+            if isinstance(row, list) and max(source_at, code_at) < len(row):
+                cell = str(row[source_at] or '').strip()
+                if cell.isdigit():
+                    code_of_sheet_row[int(cell)] = str(row[code_at] or '').strip()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        cell = str(row.get(SOURCE_ROW_COLUMN, '')).strip()
+        primary = mapping.get(int(cell)) if cell.isdigit() else None
+        row[ALTERNATE_DISPLAY_COLUMNS[0]] = 'Yes' if primary is not None else ('No' if cell.isdigit() else '')
+        row[ALTERNATE_DISPLAY_COLUMNS[1]] = code_of_sheet_row.get(primary, '') if primary is not None else ''
+    at = field_headers.index('Item code') + 1 if 'Item code' in field_headers else len(field_headers)
+    field_headers = field_headers[:at] + list(ALTERNATE_DISPLAY_COLUMNS) + field_headers[at:]
+    display_headers = display_headers[:at] + list(ALTERNATE_DISPLAY_COLUMNS) + display_headers[at:]
+    return field_headers, display_headers
+
+
+def strip_source_row_column(headers, rows=None):
+    """Headers (and list rows) without the source-row column."""
+    headers = list(headers or [])
+    if SOURCE_ROW_COLUMN not in headers:
+        return headers, rows
+    at = headers.index(SOURCE_ROW_COLUMN)
+    kept_headers = headers[:at] + headers[at + 1:]
+    if rows is None:
+        return kept_headers, None
+    kept_rows = []
+    for row in rows:
+        if isinstance(row, list):
+            kept_rows.append(row[:at] + row[at + 1:])
+        elif isinstance(row, dict):
+            kept_rows.append({k: v for k, v in row.items() if k != SOURCE_ROW_COLUMN})
+        else:
+            kept_rows.append(row)
+    return kept_headers, kept_rows
+
+
 def make_unique_field_headers(headers: list) -> list:
     """Create JSON-safe field keys while keeping SFO slots stable."""
     slot_keys = get_sfo_slot_keys(headers or [])
@@ -3134,6 +3420,16 @@ def apply_column_mappings(client_file, mappings, sheet_name=None, header_row=0, 
         logger.info(f"🔧 DEBUG apply_column_mappings: final_headers = {final_headers}")
         final_standard_check = [h for h in standard_headers_check if h in final_headers]
         logger.info(f"🔧 DEBUG apply_column_mappings: final_headers contains {len(final_standard_check)}/{len(standard_headers_check)} standard headers: {final_standard_check}")
+
+        # Every row's place in the sheet, stamped here because mapping reads
+        # the sheet row for row and nothing later can know it any more.
+        final_headers, transformed_rows = strip_source_row_column(final_headers, transformed_rows)
+        width = len(final_headers)
+        for position, row in enumerate(transformed_rows):
+            row.extend([''] * (width - len(row)))
+            del row[width:]
+            row.append(str(position))
+        final_headers = list(final_headers) + [SOURCE_ROW_COLUMN]
 
         return {
             'headers': final_headers,
@@ -4775,6 +5071,9 @@ def upload_files(request):
             # authored for flat sheets. BOM generation reads this instead of
             # re-asking, so it has to survive a page reload.
             "bom_structure": bom_structure,
+            # The BOM step was put off ("Set up later"). The sheet is a BOM, so
+            # it is asked again from the editor before a BOM export.
+            "bom_setup_pending": str(request.data.get('bomSetupLater') or '').lower() in ('1', 'true', 'yes'),
             "source_selections": source_selections,
             "use_source_file_as_bom_groups": use_source_file_as_bom_groups,
         }
@@ -6930,7 +7229,7 @@ def data_view(request):
 
             return no_store(Response({
                 'success': True,
-                'headers': final_headers,
+                'headers': strip_source_row_column(final_headers)[0],
                 'data': final_data,
                 'total_rows': total_rows,
                 'formula_rules': info.get('formula_rules', []),
@@ -8215,10 +8514,24 @@ def data_view(request):
         else:
             response_data = final_data
 
+        # The source-row value stays on each row - the editor saves rows whole,
+        # so that is how it survives - but it is not a column anyone sees.
+        if SOURCE_ROW_COLUMN in field_headers:
+            hidden_at = field_headers.index(SOURCE_ROW_COLUMN)
+            field_headers = field_headers[:hidden_at] + field_headers[hidden_at + 1:]
+            display_headers = display_headers[:hidden_at] + display_headers[hidden_at + 1:]
+        try:
+            field_headers, display_headers = _add_alternate_display_columns(
+                session_id, info, field_headers, display_headers, response_data)
+        except Exception as alt_error:
+            # A display aid; the grid must load without it.
+            logger.warning('Alternate columns skipped for %s: %s', session_id, alt_error)
         return no_store(Response({
             'success': True,
             'headers': field_headers,
             'display_headers': display_headers,
+            'bom_setup_required': bool(info.get('bom_setup_pending')) and not (
+                (info.get('bom_structure') or {}).get('sheets')),
             'data': response_data,
             'total_rows': total_rows,
             'formula_rules': formula_rules,
@@ -8286,6 +8599,14 @@ def save_data(request):
 
         if not isinstance(rows_payload, list):
             rows_payload = []
+
+        # Is alternate? / Alternate for? are worked out on every load and never
+        # stored, so the copies the editor sends back are dropped here.
+        rows_payload = [
+            {k: v for k, v in row.items() if k not in ALTERNATE_DISPLAY_COLUMNS}
+            if isinstance(row, dict) else row
+            for row in rows_payload
+        ]
 
         # Ensure headers are preserved; prefer existing enhanced headers, else derive canonical/keys
         enhanced_headers = list(
@@ -10505,6 +10826,9 @@ def download_file(request, session_id=None):
                     "DOWNLOAD: combined export has no BOM identity — FactWise will "
                     "reject every row that carries a BOM field"
                 )
+
+        # The source-row column joins the grid to the sheet; it is not data.
+        all_headers, transformed_rows = strip_source_row_column(all_headers, transformed_rows)
 
         # Create DataFrame with duplicate column names support
         if transformed_rows and all_headers:
@@ -14790,6 +15114,10 @@ def _reshape_grid_snapshot(snapshot, new_headers):
     rows = snapshot.get('data')
     if not old_headers or rows is None:
         return None
+    # The template's columns never include the source-row column, so a
+    # reshape onto them would drop every row's link back to the sheet.
+    if SOURCE_ROW_COLUMN in old_headers and SOURCE_ROW_COLUMN not in new_headers:
+        new_headers = list(new_headers) + [SOURCE_ROW_COLUMN]
 
     old_fields = make_unique_field_headers(old_headers)
     new_fields = make_unique_field_headers(new_headers)
@@ -18707,7 +19035,24 @@ def _merge_grid_values_into_records(records, grid_headers, grid_rows):
     # Equal counts are matched by position. That stays tolerant of edits to the
     # alignment columns themselves — correcting an MPN in the editor must not
     # break export. It does assume the editor never re-orders rows.
-    if len(grid_rows) == len(records):
+    source_at = index_of.get(_template_label_key(SOURCE_ROW_COLUMN))
+    by_source_row = None
+    if source_at is not None:
+        stamped = []
+        for row in grid_rows:
+            cell = str(row[source_at] if isinstance(row, list) and source_at < len(row) else '').strip()
+            stamped.append(int(cell) if cell.isdigit() else None)
+        # Usable only when every row has one, each is a real sheet row and no
+        # two rows claim the same one. Anything else falls back to the old join
+        # rather than pairing a row with the wrong structure.
+        if (stamped and None not in stamped and len(set(stamped)) == len(stamped)
+                and max(stamped) < len(records)):
+            by_source_row = stamped
+    if by_source_row is not None:
+        alignment = by_source_row
+        matched = set(alignment)
+        deleted = [position for position in range(len(records)) if position not in matched]
+    elif len(grid_rows) == len(records):
         alignment = list(range(len(records)))
         deleted = []
     elif len(grid_rows) < len(records):
@@ -19402,6 +19747,8 @@ def _generate_bom_for_session(session_id, apply_dup_policy=True):
     if not _has_normalizer_columns(records):
         source_headers, source_rows = _read_normalized_source_table(info)
         source_records = _normalized_records_from_grid(source_headers, source_rows)
+        for sheet_row, record in enumerate(source_records):
+            record['__sheet_row__'] = sheet_row
         if _has_normalizer_columns(source_records):
             source_records, join_note = _merge_grid_values_into_records(
                 source_records, headers or [], rows or []
@@ -19441,7 +19788,7 @@ def _generate_bom_for_session(session_id, apply_dup_policy=True):
                     'grid_rows': join_note.get('grid_rows', 0),
                     'source_rows': join_note.get('source_rows', 0),
                 }, status=status.HTTP_400_BAD_REQUEST)
-            records = source_records
+            records = _apply_alternate_overrides(info, source_records)
 
     # Grouped files become one tree here, and it has to happen BEFORE the
     # duplicate policy below. Until linking, every file's rows sit at level 1
@@ -19661,11 +20008,13 @@ def bom_duplicate_policy(request, session_id):
     if not _has_normalizer_columns(records):
         source_headers, source_rows = _read_normalized_source_table(info)
         source_records = _normalized_records_from_grid(source_headers, source_rows)
+        for sheet_row, record in enumerate(source_records):
+            record['__sheet_row__'] = sheet_row
         if _has_normalizer_columns(source_records):
             source_records, _join = _merge_grid_values_into_records(
                 source_records, headers or [], rows or []
             )
-            records = source_records
+            records = _apply_alternate_overrides(info, source_records)
     groups = find_records_duplicate_groups(records or [])
     return Response({
         'success': True,

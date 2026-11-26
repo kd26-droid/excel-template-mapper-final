@@ -65,6 +65,8 @@ from .views import (
     bom_normalize,
     normaliser_state,
     normaliser_answers,
+    bom_source_rows,
+    set_alternate_for,
     normaliser_continue,
     apply_editor_defaults,
     normaliser_run,
@@ -282,6 +284,8 @@ urlpatterns = [
     # answered. Without these the decisions live only in a browser tab.
     path('normaliser/<str:session_id>/state/', normaliser_state, name='normaliser-state'),
     path('normaliser/<str:session_id>/answers/', normaliser_answers, name='normaliser-answers'),
+    path('normaliser/<str:session_id>/bom-source-rows/', bom_source_rows, name='bom-source-rows'),
+    path('bom/alternate-for/', set_alternate_for, name='set-alternate-for'),
     path('normaliser/<str:session_id>/continue/', normaliser_continue, name='normaliser-continue'),
     # The Settings panel's Item Directory Defaults, applied in one call.
     path('editor-defaults/apply/', apply_editor_defaults, name='apply-editor-defaults'),
