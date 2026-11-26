@@ -3356,7 +3356,7 @@ const EnhancedDataEditor = () => {
     const next = {};
     columnDefs.forEach(col => {
       if (!col.field || col.field === '__row_number__') return;
-      next[col.field] = computeColumnWidthPx(col);
+      next[col.field] = Math.min(320, Math.max(144, computeColumnWidthPx(col)));
     });
     if (Object.keys(next).length > 0) {
       setColumnWidths(prev => ({ ...prev, ...next }));
@@ -7052,7 +7052,7 @@ const EnhancedDataEditor = () => {
     scroll: baseTableTone.bg,
     headerText: baseTableTone.text,
     rowEven: baseTableTone.row,
-    rowOdd: baseTableTone.row,
+    rowOdd: isDarkMode ? '#1b2029' : '#f8fafd',
     line: baseTableTone.verticalDivider,
     rowLine: baseTableTone.border,
     outerLine: baseTableTone.headerBorder,
@@ -7062,7 +7062,7 @@ const EnhancedDataEditor = () => {
   const gridPanelSx = {
     height: '100%',
     overflow: 'hidden',
-    borderRadius: '18px',
+    borderRadius: '14px',
     border: `1px solid ${tableTone.outerLine}`,
     background: tableTone.panel,
     boxShadow: tableTone.shadow,
@@ -7074,9 +7074,9 @@ const EnhancedDataEditor = () => {
     gap: 1.5,
     flexWrap: 'wrap',
     px: 2,
-    py: 1.1,
-    minHeight: 64,
-    backgroundColor: tableTone.panel,
+    py: 0.75,
+    minHeight: 48,
+    backgroundColor: tableTone.footer,
     borderTop: `1px solid ${tableTone.outerLine}`,
     color: t.text.secondary,
     boxShadow: 'none',
@@ -7102,8 +7102,8 @@ const EnhancedDataEditor = () => {
     overflowY: 'auto',
     maxHeight: 'calc(100vh - 312px)',
     minHeight: 0,
-    border: `1px solid ${tableTone.outerLine}`,
-    borderRadius: '12px',
+    borderTop: `1px solid ${tableTone.outerLine}`,
+    borderRadius: 0,
     backgroundColor: 'transparent',
     flex: '1 1 auto',
     scrollbarColor: `${isDarkMode ? 'rgba(148, 163, 184, 0.38)' : 'rgba(86, 96, 112, 0.34)'} transparent`,
@@ -7112,6 +7112,7 @@ const EnhancedDataEditor = () => {
   // is the part worth showing.
   const editorToolbarButtonSx = {
     ...outlinedActionSx,
+    borderRadius: '8px',
     minHeight: 36,
     height: 36,
     px: 1.6,
@@ -8595,7 +8596,7 @@ const EnhancedDataEditor = () => {
           sx={gridPanelSx}
           ref={scrollContainerRef}
         >
-          <Box sx={{ p: 1.5, height: '100%', display: 'flex', flexDirection: 'column', gap: 1.25 }}>
+          <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
             <NonEnglishLanguageBanner
               headers={(columnDefs || []).map(c => c.headerName || c.field)}
               rows={(rowData || []).map(r => (columnDefs || []).map(c => r?.[c.field]))}
@@ -8643,7 +8644,7 @@ const EnhancedDataEditor = () => {
               </Alert>
             )}
             {pageLoading && !partialLoad && <LinearProgress sx={{ mb: 1 }} />}
-            <Box role="group" aria-label="Table controls" sx={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 1, flexShrink: 0 }}>
+            <Box role="group" aria-label="Table controls" sx={{ px: 1.5, py: 1, bgcolor: tableTone.panel, display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 1, flexShrink: 0 }}>
               <TextField
                 value={rowSearchTerm}
                 disabled={Boolean(partialLoad)}
@@ -8651,11 +8652,11 @@ const EnhancedDataEditor = () => {
                 placeholder="Search rows..."
                 size="small"
                 sx={{
-                  width: { xs: '100%', sm: 375, lg: 375 },
+                  width: { xs: '100%', sm: 250, lg: 310 },
                   '& .MuiOutlinedInput-root': {
                     minHeight: 36,
                     height: 36,
-                    borderRadius: '999px',
+                    borderRadius: '8px',
                     color: t.text.primary,
                     backgroundColor: t.surface.controlSoft,
                     '& fieldset': { borderColor: t.border.default },
@@ -9151,11 +9152,11 @@ const EnhancedDataEditor = () => {
                 </thead>
                 <tbody>
                   {displayedRows
-                    .map(({ row, rowIndex }) => {
+                    .map(({ row, rowIndex }, visibleIndex) => {
                     const isSelected = selectedRows.has(rowIndex);
                     const rowBackgroundColor = isSelected
                       ? (isDarkMode ? 'rgba(30, 58, 138, 0.35)' : '#eff6ff')
-                      : tableTone.rowEven;
+                      : (visibleIndex % 2 ? tableTone.rowOdd : tableTone.rowEven);
 
                     return (
                       <tr
@@ -9220,7 +9221,7 @@ const EnhancedDataEditor = () => {
                               style={{
                                 padding: isRowNumber ? '8px 10px' : '11px 14px',
                                 borderRight: isDupHighlighted ? '2px solid #f59e0b' : (isFrozen ? `1px solid ${tableTone.line}` : 0),
-                                borderBottom: isDupHighlighted ? '2px solid #f59e0b' : `1px dashed ${tableTone.rowLine}`,
+                                borderBottom: isDupHighlighted ? '2px solid #f59e0b' : `1px solid ${tableTone.rowLine}`,
                                 backgroundColor: cellBg,
                                 color: isFactwiseErrorCell ? (isDarkMode ? '#fecaca' : '#991b1b') : (isDupHighlighted ? t.color.warningText : (isInvalidMpn ? t.color.danger : (isUnknown ? t.color.danger : tableTone.text))),
                                 fontWeight: (isFactwiseErrorCell || isDupHighlighted || isInvalidMpn) ? 500 : 400,
@@ -9317,7 +9318,8 @@ const EnhancedDataEditor = () => {
                     );
                   })}
                 </tbody>
-              </table>            </div>
+              </table>
+            </div>
             {/* Bottom pagination controls. Paging is a slice of the in-memory
                 dataset now, so none of these refetch. */}
             <Box sx={paginationBarSx}>
@@ -9381,7 +9383,7 @@ const EnhancedDataEditor = () => {
       </Box>
 
 
-      />
+
 
       {/* Smart Expand — one entry point. Genuinely inspects the columns, shows a
           short assistant-style analysis, then applies the right transform in one
