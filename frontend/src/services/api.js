@@ -700,6 +700,17 @@ const api = {
       highlight_duplicate_columns: highlightDuplicateColumns
     }, {
       responseType: 'blob'
+    }).catch(async (error) => {
+      // A refused export answers with JSON, but this request asked for a file,
+      // so the reason arrives wrapped in a Blob and every caller showed only
+      // "Request failed with status code 400". Unwrap it once, here.
+      const body = error?.response?.data;
+      if (body instanceof Blob) {
+        try {
+          error.response.data = JSON.parse(await body.text());
+        } catch (_) { /* not JSON - leave it as it came */ }
+      }
+      throw error;
     }),
 
   /**

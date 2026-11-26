@@ -8650,6 +8650,14 @@ def _apply_export_editor_defaults(rows, headers, info):
     return output_rows, headers
 
 
+class BomBuildFailed(Exception):
+    """A combined export of a sheet answered as a BOM whose BOM cannot be built."""
+
+    def __init__(self, message, needs=None):
+        super().__init__(message)
+        self.needs = needs
+
+
 def _add_combined_bom_identity_columns(session_id, rows, headers):
     """Fill in which BOM each line belongs to, for a combined (4.0) export.
 
@@ -8677,6 +8685,18 @@ def _add_combined_bom_identity_columns(session_id, rows, headers):
         logger.warning('Combined export: BOM generation failed (%s)', exc)
         return rows, headers, 0
     if error_response is not None or result is None:
+        # A sheet answered as a BOM must not go out without its BOM codes: every
+        # row then carries Level and Quantity with no BOM code, and FactWise
+        # reports that once per row - 188 times on one sheet - while the real
+        # reason (here, rows the export could no longer match to the sheet) is
+        # never shown. A sheet with no BOM answered is an item list and goes out.
+        sheets = ((get_session_consistent(session_id) or {}).get('bom_structure') or {}).get('sheets') or {}
+        if any(isinstance(a, dict) and a.get('hasBom') for a in sheets.values()):
+            data = getattr(error_response, 'data', None) or {}
+            message = data.get('error') or '; '.join(
+                str(e.get('message') or e) for e in (data.get('errors') or [])[:3]
+            ) or 'The BOM could not be built from this sheet.'
+            raise BomBuildFailed(message, data.get('needs'))
         return rows, headers, 0
 
     # First generated line wins per grid row. One editor row can produce several
@@ -8692,6 +8712,7 @@ def _add_combined_bom_identity_columns(session_id, rows, headers):
             str(bom_row.get('Finished good code') or '').strip(),
             str(bom_row.get('BOM ID') or '').strip(),
             str(bom_row.get('Sub BOM ID') or '').strip(),
+            str(bom_row.get('Quantity') or '').strip(),
         ))
     if not identity:
         return rows, headers, 0
@@ -8761,6 +8782,15 @@ def _add_combined_bom_identity_columns(session_id, rows, headers):
     # generator reads it: the nearest row above at a shallower level. Keyed on
     # the CPN, falling back to the item code, because that is what a BOM ID is.
     # Alternates sit beside their primary, not under it, so they open nothing.
+    # A flat sheet is one BOM with no sub-assemblies, and every row is a line
+    # in it. Its rows are all at one level, so the walk below finds no row
+    # above any of them and they had no parent at all: a part listed twice and
+    # merged into one line left its second row with Level and Quantity but no
+    # BOM code, and FactWise rejected it. The BOM is that parent.
+    bom_ids = {str(r.get('BOM ID') or '').strip() for r in result.bom_rows or []}
+    has_sub_boms = any(str(r.get('Sub BOM ID') or '').strip() for r in result.bom_rows or [])
+    flat_bom = next(iter(bom_ids)) if len(bom_ids) == 1 and not has_sub_boms else ''
+
     parent_of = {}
     open_rows = []
     for position, row in enumerate(rows, start=1):
@@ -8772,7 +8802,7 @@ def _add_combined_bom_identity_columns(session_id, rows, headers):
             continue
         while open_rows and open_rows[-1][0] >= level:
             open_rows.pop()
-        parent_of[position] = open_rows[-1][1] if open_rows else ''
+        parent_of[position] = open_rows[-1][1] if open_rows else flat_bom
         if position in alternate_of:
             continue
         code = str(row[cpn_index] or '').strip() if 0 <= cpn_index < len(row) else ''
@@ -8819,6 +8849,16 @@ def _add_combined_bom_identity_columns(session_id, rows, headers):
             values[position_of[COMBINED_BOM_CODE_HEADER]] = pair[1]
             if len(pair) > 2 and pair[2]:
                 values[position_of[COMBINED_SUB_BOM_HEADER]] = pair[2]
+            # On a flat sheet the line may hold several rows merged together
+            # (1 + 2 of the same part). The rows merged into it go out as items
+            # only, so this row carries the line's total, not its own share.
+            if flat_bom and quantity_index >= 0 and len(pair) > 3 and pair[3]:
+                try:
+                    differs = float(pair[3]) != float(str(values[quantity_index]).strip())
+                except (TypeError, ValueError):
+                    differs = False
+                if differs:
+                    values[quantity_index] = pair[3]
         elif code_index >= 0:
             item_code = str(values[code_index] or '').strip()
             bom_code = heads_bom.get(item_code)
@@ -10690,6 +10730,12 @@ def download_file(request, session_id=None):
         
         return response
         
+    except BomBuildFailed as e:
+        return Response({
+            'success': False,
+            'error': 'The BOM could not be built, so this sheet cannot be exported yet. %s' % e,
+            'needs': e.needs or 'bom_build',
+        }, status=status.HTTP_400_BAD_REQUEST)
     except Exception as e:
         # With the traceback. "Download failed: 'list' object has no attribute
         # 'get'" names a Python type and nothing else — not the column, not the

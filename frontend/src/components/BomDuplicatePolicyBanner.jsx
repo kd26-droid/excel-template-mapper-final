@@ -66,7 +66,7 @@ const shortLabel = (value) => (
  *   sessionId  string
  *   refreshKey (optional) — bump to force re-detect (e.g., after grid edits).
  */
-const BomDuplicatePolicyBanner = ({ sessionId, refreshKey }) => {
+const BomDuplicatePolicyBanner = ({ sessionId, refreshKey, onGridChanged }) => {
   const { isDarkMode, tokens: themeTokens } = useThemeContext();
   const fwTokens = buildFactWisePageTokens(isDarkMode, themeTokens);
   const cancelButtonSx = factWiseCancelButtonSx(fwTokens);
@@ -225,6 +225,12 @@ const BomDuplicatePolicyBanner = ({ sessionId, refreshKey }) => {
       }
     }
     setApplying('');
+    // The writes changed the sheet on the server. The editor still holds the
+    // old grid and saves it whole on the next edit, which put every value
+    // picked here back the way it was - so it reloads before anything else.
+    if (failed.length < writes.length && onGridChanged) {
+      try { await onGridChanged(); } catch (_) { /* the banner refresh below still runs */ }
+    }
     if (failed.length > 0) {
       // Selections are kept so the user can press Apply again rather than
       // rebuilding every choice.
@@ -235,7 +241,7 @@ const BomDuplicatePolicyBanner = ({ sessionId, refreshKey }) => {
     setPicks({});
     setReviewOpen(false);
     await refresh();
-  }, [pendingWrites, writeOne, refresh]);
+  }, [pendingWrites, writeOne, refresh, onGridChanged]);
 
   useEffect(() => { refresh(); }, [refresh, refreshKey]);
 
