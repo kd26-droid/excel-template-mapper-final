@@ -6762,7 +6762,9 @@ const EnhancedDataEditor = () => {
   const t = themeTokens;
   const editorPageSx = {
     ...factWisePageShellSx(fwPageTokens),
-    height: '100vh',
+    height: 'calc(100dvh - 66px)',
+    minHeight: 0,
+    overflow: 'hidden',
     display: 'flex',
     flexDirection: 'column',
     color: t.text.primary,
@@ -6782,16 +6784,27 @@ const EnhancedDataEditor = () => {
     boxShadow: 'none'
   };
   const iconButtonSx = {
-    color: t.text.primary,
-    backgroundColor: t.surface.controlSoft,
-    border: `1px solid ${t.border.default}`,
+    color: t.text.secondary,
+    backgroundColor: isDarkMode ? 'rgba(30, 41, 59, 0.72)' : '#ffffff',
+    border: `1px solid ${isDarkMode ? 'rgba(148, 163, 184, 0.24)' : '#dce3ee'}`,
+    boxShadow: isDarkMode
+      ? '0 4px 12px -6px rgba(0, 0, 0, 0.6)'
+      : '0 4px 12px -8px rgba(15, 23, 42, 0.22)',
+    transition: 'background-color 150ms ease, border-color 150ms ease, color 150ms ease, transform 150ms ease, box-shadow 150ms ease',
     '&:hover': {
-      backgroundColor: t.action.hover,
-      borderColor: t.border.hover
+      color: t.color.primary,
+      backgroundColor: isDarkMode ? 'rgba(0, 122, 255, 0.14)' : '#f0f7ff',
+      borderColor: isDarkMode ? 'rgba(0, 122, 255, 0.45)' : 'rgba(0, 122, 255, 0.35)',
+      transform: 'translateY(-1px)',
+      boxShadow: isDarkMode
+        ? '0 8px 18px -10px rgba(0, 0, 0, 0.7)'
+        : '0 8px 18px -10px rgba(0, 122, 255, 0.28)',
     },
     '&:disabled': {
       color: t.text.disabled,
-      backgroundColor: t.surface.controlSoft
+      backgroundColor: t.surface.controlSoft,
+      boxShadow: 'none',
+      transform: 'none',
     }
   };
   const toolbarButtonSx = {
@@ -6830,7 +6843,14 @@ const EnhancedDataEditor = () => {
       color: 'rgba(226, 232, 240, 0.58) !important'
     }
   };
-  const exportFactwiseActionSx = { ...factWisePrimaryButtonSx, minHeight: 36, height: 36, px: 1.8 };
+  const exportFactwiseActionSx = {
+    ...factWisePrimaryButtonSx,
+    minHeight: 36,
+    height: 36,
+    px: 2,
+    boxShadow: '0 10px 22px -10px rgba(0, 122, 255, 0.65)',
+    '&:hover': { ...(factWisePrimaryButtonSx['&:hover'] || {}), boxShadow: '0 14px 26px -10px rgba(0, 122, 255, 0.75)', transform: 'translateY(-1px)' },
+  };
   const exportDialogTone = isDarkMode
     ? {
         paper: '#0f172a',
@@ -7115,12 +7135,29 @@ const EnhancedDataEditor = () => {
     footerBorder: baseTableTone.headerBorder,
   };
   const gridPanelSx = {
-    height: '100%',
+    flex: '1 1 0',
+    minHeight: 0,
     overflow: 'hidden',
-    borderRadius: '14px',
-    border: `1px solid ${tableTone.outerLine}`,
+    borderRadius: '16px',
+    border: `1px solid ${isDarkMode ? 'rgba(148, 163, 184, 0.22)' : 'rgba(195, 211, 228, 0.85)'}`,
     background: tableTone.panel,
-    boxShadow: tableTone.shadow,
+    boxShadow: isDarkMode
+      ? '0 20px 44px -26px rgba(0, 0, 0, 0.78), 0 1px 0 rgba(255, 255, 255, 0.04) inset'
+      : '0 16px 40px -24px rgba(15, 23, 42, 0.16), 0 2px 6px -2px rgba(15, 23, 42, 0.05)',
+    '& .fw-grid-scroll': { scrollbarWidth: 'thin' },
+    '& .fw-grid-scroll::-webkit-scrollbar': { width: 10, height: 10 },
+    '& .fw-grid-scroll::-webkit-scrollbar-track': { background: 'transparent' },
+    '& .fw-grid-scroll::-webkit-scrollbar-thumb': {
+      borderRadius: 999,
+      backgroundColor: isDarkMode ? 'rgba(148, 163, 184, 0.34)' : 'rgba(100, 116, 139, 0.32)',
+      border: '2px solid transparent',
+      backgroundClip: 'content-box',
+    },
+    '& .fw-grid-scroll::-webkit-scrollbar-thumb:hover': {
+      backgroundColor: isDarkMode ? 'rgba(148, 163, 184, 0.55)' : 'rgba(0, 122, 255, 0.55)',
+      backgroundClip: 'content-box',
+    },
+    '& .fw-grid-scroll::-webkit-scrollbar-corner': { background: 'transparent' },
   };
   const paginationBarSx = {
     display: 'flex',
@@ -7130,9 +7167,10 @@ const EnhancedDataEditor = () => {
     flexWrap: 'wrap',
     px: 2,
     py: 0.75,
-    minHeight: 48,
-    backgroundColor: tableTone.footer,
-    borderTop: `1px solid ${tableTone.outerLine}`,
+    minHeight: 46,
+    flexShrink: 0,
+    backgroundColor: isDarkMode ? 'rgba(20, 24, 33, 0.96)' : '#fbfcfe',
+    borderTop: `1px solid ${isDarkMode ? 'rgba(148, 163, 184, 0.18)' : '#e2e9f3'}`,
     color: t.text.secondary,
     boxShadow: 'none',
   };
@@ -7155,28 +7193,29 @@ const EnhancedDataEditor = () => {
   const tableScrollStyle = {
     overflowX: 'auto',
     overflowY: 'auto',
-    maxHeight: 'calc(100vh - 312px)',
     minHeight: 0,
     borderTop: `1px solid ${tableTone.outerLine}`,
     borderRadius: 0,
     backgroundColor: 'transparent',
     flex: '1 1 auto',
+    scrollbarWidth: 'thin',
     scrollbarColor: `${isDarkMode ? 'rgba(148, 163, 184, 0.38)' : 'rgba(86, 96, 112, 0.34)'} transparent`,
   };
   // The session id is a UUID that means nothing to the user; the row count
   // is the part worth showing.
   const editorToolbarButtonSx = {
     ...outlinedActionSx,
-    borderRadius: '8px',
-    minHeight: 36,
-    height: 36,
-    px: 1.6,
-    fontSize: '13px',
-    color: isDarkMode ? '#cbd5e1' : '#475569',
-    borderColor: isDarkMode ? '#475569' : '#d8dee7',
-    backgroundColor: isDarkMode ? t.surface.controlSoft : '#fff',
-    boxShadow: 'none',
-    '&:hover': { bgcolor: t.action.hover, borderColor: t.border.hover },
+    borderRadius: '999px',
+    minHeight: 34,
+    height: 34,
+    px: 1.55,
+    fontSize: '12.5px',
+    color: isDarkMode ? '#e2e8f0' : '#334155',
+    borderColor: isDarkMode ? 'rgba(148, 163, 184, 0.28)' : '#d9e2ee',
+    backgroundColor: isDarkMode ? 'rgba(30, 41, 59, 0.65)' : '#ffffff',
+    boxShadow: isDarkMode ? '0 2px 6px -4px rgba(0, 0, 0, 0.5)' : '0 1px 2px rgba(15, 23, 42, 0.04)',
+    transition: 'background-color 150ms ease, border-color 150ms ease, box-shadow 150ms ease',
+    '&:hover': { bgcolor: isDarkMode ? 'rgba(51, 65, 85, 0.72)' : '#f8fafc', borderColor: isDarkMode ? 'rgba(148, 163, 184, 0.45)' : '#b8c7dc', boxShadow: isDarkMode ? '0 6px 14px -8px rgba(0, 0, 0, 0.6)' : '0 4px 10px -6px rgba(15, 23, 42, 0.14)' },
   };
   const rangeStart = filteredRowCount === 0 ? 0 : ((safePage - 1) * pageSize) + 1;
   const rangeEnd = Math.min(safePage * pageSize, filteredRowCount);
@@ -8035,13 +8074,13 @@ const EnhancedDataEditor = () => {
         elevation={0}
         sx={editorHeaderSx}
       >
-        <Container maxWidth={false} sx={{ px: { xs: 2, sm: 4 } }}>
+        <Container maxWidth={false} sx={{ px: { xs: 2, md: 3 } }}>
           <Box sx={{ 
-            pt: { xs: 2.5, md: 3 },
-            pb: { xs: 1.25, md: 1.35 },
+            pt: { xs: 1.5, md: 1.75 },
+            pb: { xs: 0.75, md: 1 },
             display: 'flex', 
             flexDirection: 'column',
-            gap: 1.35
+            gap: 1
           }}>
             
             {/* Top Row - Back Arrow, Title, and Primary Actions */}
@@ -8074,12 +8113,12 @@ const EnhancedDataEditor = () => {
                 <Box sx={{ minWidth: 0 }}>
                   <Typography
                     variant="h5"
-                      fontWeight={600}
+                      fontWeight={700}
                     sx={{
                       lineHeight: 1.15,
                       color: t.text.heading,
-                      fontSize: { xs: '1.1rem', md: '1.25rem' },
-                      letterSpacing: 0
+                      fontSize: { xs: '1.2rem', md: '1.45rem' },
+                      letterSpacing: '-0.02em'
                     }}
                   >
                     FactWise BOM Scrubber
@@ -8637,7 +8676,7 @@ const EnhancedDataEditor = () => {
         </Box>
       )}
 
-      <Box sx={{ px: 2, pt: 1.25 }}>
+      <Box sx={{ px: { xs: 2, md: 3 } }}>
         <BomDuplicatePolicyBanner
           sessionId={sessionId}
           refreshKey={`${totalRows}:${sessionVersion}`}
@@ -8645,7 +8684,7 @@ const EnhancedDataEditor = () => {
       </Box>
 
       {/* Main Grid Container */}
-      <Box sx={{ flexGrow: 1, px: 2, pt: 1.5, pb: 2, overflow: 'hidden' }}>
+      <Box sx={{ flex: '1 1 0', minHeight: 0, display: 'flex', flexDirection: 'column', px: { xs: 2, md: 3 }, pt: 0.75, pb: 2, overflow: 'hidden' }}>
         <Paper 
           elevation={0} 
           sx={gridPanelSx}
@@ -8699,7 +8738,7 @@ const EnhancedDataEditor = () => {
               </Alert>
             )}
             {pageLoading && !partialLoad && <LinearProgress sx={{ mb: 1 }} />}
-            <Box role="group" aria-label="Table controls" sx={{ px: 1.5, py: 1, bgcolor: tableTone.panel, display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 1, flexShrink: 0 }}>
+            <Box role="group" aria-label="Table controls" sx={{ px: 2, py: 1.25, bgcolor: isDarkMode ? 'rgba(23, 27, 35, 0.95)' : '#fbfcfe', display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 1, flexShrink: 0 }}>
               <TextField
                 value={rowSearchTerm}
                 disabled={Boolean(partialLoad)}
@@ -8711,18 +8750,21 @@ const EnhancedDataEditor = () => {
                   '& .MuiOutlinedInput-root': {
                     minHeight: 36,
                     height: 36,
-                    borderRadius: '8px',
+                    borderRadius: '999px',
+                    pl: 1.5,
                     color: t.text.primary,
                     backgroundColor: t.surface.controlSoft,
+                    transition: 'box-shadow 160ms ease',
                     '& fieldset': { borderColor: t.border.default },
                     '&:hover fieldset': { borderColor: t.border.hover },
-                    '&.Mui-focused fieldset': { borderColor: t.color.primary }
+                    '&.Mui-focused': { boxShadow: '0 0 0 3px rgba(0, 122, 255, 0.14)' },
+                    '&.Mui-focused fieldset': { borderColor: t.color.primary, borderWidth: 1 }
                   },
                   '& .MuiInputBase-input': {
                     py: 0,
-                    fontSize: '13px',
+                    fontSize: '12.5px',
                     fontWeight: 400,
-                    height: 36,
+                    height: 34,
                     boxSizing: 'border-box',
                   }
                 }}
@@ -8938,7 +8980,7 @@ const EnhancedDataEditor = () => {
                 </MenuItem>
               </Menu>
             </Box>
-            <div style={tableScrollStyle}>
+            <div className="fw-grid-scroll" style={tableScrollStyle}>
               <table style={tableBaseStyle}>
                 <colgroup>
                   {orderedColumnDefs.map(col => {
@@ -8995,6 +9037,9 @@ const EnhancedDataEditor = () => {
                         }}
                         style={{
                           padding: isRowNumber ? '8px 10px' : '11px 12px',
+                          fontSize: '12.5px',
+                          fontWeight: 600,
+                          letterSpacing: '0.01em',
                           textAlign: 'left',
                           color: tableTone.headerText,
                           borderRight: `1px solid ${tableTone.line}`,
@@ -9009,8 +9054,6 @@ const EnhancedDataEditor = () => {
                           height: `${HEADER_ROW_HEIGHT}px`,
                           boxSizing: 'border-box',
                           width: `${colWidth}px`,
-                          borderTopLeftRadius: index === 0 ? '10px' : undefined,
-                          borderTopRightRadius: index === orderedColumnDefs.length - 1 ? '10px' : undefined,
                         }}
                         title={isRowNumber ? undefined : "Click pin to freeze. Drag edge to resize."}
                       >
@@ -9223,7 +9266,9 @@ const EnhancedDataEditor = () => {
                           toggleRowSelection(rowIndex);
                         }}
                         style={{
-                          backgroundColor: rowBackgroundColor,
+                          backgroundColor: factwiseErrorHighlight?.rows.has(rowIndex + 1)
+                            ? (isDarkMode ? 'rgba(239, 68, 68, 0.14)' : '#fff1f2')
+                            : rowBackgroundColor,
                           height: `${rowHeight}px`,
                           transition: 'background-color 120ms ease',
                           cursor: 'pointer',
@@ -9231,7 +9276,6 @@ const EnhancedDataEditor = () => {
                         }}
                         onMouseEnter={(e) => { if (!isSelected) e.currentTarget.style.backgroundColor = tableTone.rowHover; }}
                         onMouseLeave={(e) => { if (!isSelected) e.currentTarget.style.backgroundColor = factwiseErrorHighlight?.rows.has(rowIndex + 1) ? (isDarkMode ? 'rgba(239, 68, 68, 0.14)' : '#fff1f2') : rowBackgroundColor; }}
-                        style={factwiseErrorHighlight?.rows.has(rowIndex + 1) ? { backgroundColor: isDarkMode ? 'rgba(239, 68, 68, 0.14)' : '#fff1f2' } : undefined}
                       >
                         {orderedColumnDefs.map((col) => {
                           const isRowNumber = col.field === '__row_number__';
@@ -9271,11 +9315,23 @@ const EnhancedDataEditor = () => {
                               : rowBackgroundColor);
 
                           return (
-                            <Box component="td" sx={factWiseTableBodyCellSx(tableTone)}
+                            <Box component="td" sx={{
+                              ...factWiseTableBodyCellSx(tableTone),
+                              ...(!isRowNumber && {
+                                '&:focus-within': {
+                                  boxShadow: `inset 0 0 0 1.5px ${t.color.primary}`,
+                                  backgroundColor: isDarkMode ? 'rgba(0, 122, 255, 0.12)' : '#f5faff',
+                                },
+                              }),
+                            }}
                               key={`${col.field}-${rowIndex}`}
                               style={{
-                                padding: isRowNumber ? '8px 10px' : '11px 14px',
-                                borderRight: isDupHighlighted ? '2px solid #f59e0b' : (isFrozen ? `1px solid ${tableTone.line}` : 0),
+                                padding: isRowNumber ? '6px 10px' : '9px 14px',
+                                borderRight: isDupHighlighted
+                                  ? '2px solid #f59e0b'
+                                  : (isFrozen
+                                    ? `1px solid ${tableTone.line}`
+                                    : `1px solid ${isDarkMode ? 'rgba(148, 163, 184, 0.09)' : 'rgba(203, 213, 225, 0.42)'}`),
                                 borderBottom: isDupHighlighted ? '2px solid #f59e0b' : `1px solid ${tableTone.rowLine}`,
                                 backgroundColor: cellBg,
                                 color: isFactwiseErrorCell ? (isDarkMode ? '#fecaca' : '#991b1b') : (isDupHighlighted ? t.color.warningText : (isInvalidMpn ? t.color.danger : (isUnknown ? t.color.danger : tableTone.text))),
@@ -9312,7 +9368,7 @@ const EnhancedDataEditor = () => {
                                     }}
                                     inputProps={{ 'aria-label': `Select row ${rowIndex + 1}` }}
                                   />
-                                  <span style={{ color: isSelected ? t.color.primary : t.text.secondary, fontWeight: isSelected ? 600 : 400, fontSize: '12px' }}>
+                                  <span style={{ color: isSelected ? t.color.primary : t.text.secondary, fontWeight: isSelected ? 600 : 500, fontSize: '12px', fontVariantNumeric: 'tabular-nums' }}>
                                     {rowIndex + 1}
                                   </span>
                                   <Tooltip
@@ -9329,13 +9385,17 @@ const EnhancedDataEditor = () => {
                                           handleDeleteSingleRow(rowIndex);
                                         }}
                                         sx={{
-                                          p: 0.25,
-                                          color: t.color.danger,
-                                          opacity: 1,
-                                          transition: 'opacity 120ms ease',
-                                          'tr:hover &': { opacity: 1 },
-                                          '&:hover': { opacity: 1 },
-                                          '&:focus-visible': { opacity: 1 }
+                                          p: 0.3,
+                                          color: t.text.secondary,
+                                          opacity: 0.32,
+                                          transition: 'opacity 140ms ease, color 140ms ease, background-color 140ms ease',
+                                          'tr:hover &': { opacity: 0.85, color: t.color.danger },
+                                          '&:hover': {
+                                            opacity: 1,
+                                            color: t.color.danger,
+                                            bgcolor: isDarkMode ? 'rgba(239, 68, 68, 0.16)' : 'rgba(239, 68, 68, 0.08)',
+                                          },
+                                          '&:focus-visible': { opacity: 1, color: t.color.danger }
                                         }}
                                       >
                                         {deletingRowIndex === rowIndex
@@ -9391,9 +9451,9 @@ const EnhancedDataEditor = () => {
                   }}
                   sx={{
                     ...compactSelectSx,
-                    minWidth: 70,
-                    height: 40,
-                    borderRadius: '10px',
+                    minWidth: 66,
+                    height: 32,
+                    borderRadius: '999px',
                     bgcolor: tableTone.controlBg,
                     '& .MuiOutlinedInput-notchedOutline': { borderColor: tableTone.outerLine },
                     '&:hover .MuiOutlinedInput-notchedOutline': { borderColor: t.color.primary },
@@ -9415,8 +9475,8 @@ const EnhancedDataEditor = () => {
                 shape="rounded"
                 sx={{
                   '& .MuiPaginationItem-root': {
-                    minWidth: 30,
-                    height: 30,
+                    minWidth: 28,
+                    height: 28,
                     borderRadius: '999px',
                     fontSize: 12.5,
                     fontWeight: 500,
