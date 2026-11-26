@@ -518,7 +518,8 @@ const EnhancedDataEditor = () => {
   const [columnDefs, setColumnDefs] = useState([]);
   const [hiddenColumnFields, setHiddenColumnFields] = useState(() => {
     try {
-      const stored = window.localStorage.getItem(`factwise-editor-hidden-columns:${sessionId || 'default'}`);
+      const stored = window.localStorage.getItem('factwise-editor-hidden-columns')
+        ?? window.localStorage.getItem(`factwise-editor-hidden-columns:${sessionId || 'default'}`);
       const fields = stored ? JSON.parse(stored) : [];
       return new Set(Array.isArray(fields) ? fields.filter((field) => typeof field === 'string') : []);
     } catch (_) {
@@ -528,13 +529,13 @@ const EnhancedDataEditor = () => {
   useEffect(() => {
     try {
       window.localStorage.setItem(
-        `factwise-editor-hidden-columns:${sessionId || 'default'}`,
+        'factwise-editor-hidden-columns',
         JSON.stringify(Array.from(hiddenColumnFields))
       );
     } catch (_) {
       // Keep column visibility usable when browser storage is unavailable.
     }
-  }, [hiddenColumnFields, sessionId]);
+  }, [hiddenColumnFields]);
   const [rowSearchTerm, setRowSearchTerm] = useState('');
   const [columnWidths, setColumnWidths] = useState({});
   const [autoFitApplied, setAutoFitApplied] = useState(false);
@@ -603,14 +604,68 @@ const EnhancedDataEditor = () => {
   const [pageSize, setPageSize] = useState(20);
   const [pageLoading, setPageLoading] = useState(false);
   // Per-column filter text, keyed by column field. Empty/absent means no filter.
-  const [columnFilters, setColumnFilters] = useState({});
+  const readStoredColumnFilters = (sid) => {
+    try {
+      const stored = window.localStorage.getItem(`factwise-editor-column-filters:${sid || 'default'}`);
+      const parsed = stored ? JSON.parse(stored) : null;
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+      return Object.entries(parsed).reduce((acc, [field, value]) => {
+        if (typeof field === 'string' && typeof value === 'string' && value !== '') {
+          acc[field] = value;
+        }
+        return acc;
+      }, {});
+    } catch (_) {
+      return {};
+    }
+  };
+  const [columnFilters, setColumnFilters] = useState(() => readStoredColumnFilters(sessionId));
+  const columnFiltersSessionRef = useRef(sessionId);
   // Rows a BOM issue actually points at. A column filter cannot express "any of
   // these ten codes", and a duplicate-code issue carries no row numbers at all,
   // so the grid needs its own value-set filter to show them together.
   const [issueRowFilter, setIssueRowFilter] = useState(null);
-  const [showColumnFilters, setShowColumnFilters] = useState(false);
+  const [showColumnFilters, setShowColumnFilters] = useState(() => Object.keys(readStoredColumnFilters(sessionId)).length > 0);
+  useEffect(() => {
+    if (columnFiltersSessionRef.current !== sessionId) {
+      columnFiltersSessionRef.current = sessionId;
+      const restored = readStoredColumnFilters(sessionId);
+      setColumnFilters(restored);
+      setShowColumnFilters(Object.keys(restored).length > 0);
+      return;
+    }
+    try {
+      const key = `factwise-editor-column-filters:${sessionId || 'default'}`;
+      if (Object.keys(columnFilters).length > 0) {
+        window.localStorage.setItem(key, JSON.stringify(columnFilters));
+      } else {
+        window.localStorage.removeItem(key);
+      }
+    } catch (_) {
+      // Keep column filters usable when browser storage is unavailable.
+    }
+  }, [columnFilters, sessionId]);
   // Column freeze / pinning state
-  const [frozenFields, setFrozenFields] = useState(() => new Set(['__row_number__']));
+  const [frozenFields, setFrozenFields] = useState(() => {
+    try {
+      const stored = window.localStorage.getItem('factwise-editor-frozen-columns');
+      const fields = stored ? JSON.parse(stored) : [];
+      const valid = Array.isArray(fields) ? fields.filter((field) => typeof field === 'string') : [];
+      return new Set(['__row_number__', ...valid]);
+    } catch (_) {
+      return new Set(['__row_number__']);
+    }
+  });
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        'factwise-editor-frozen-columns',
+        JSON.stringify(Array.from(frozenFields))
+      );
+    } catch (_) {
+      // Keep column pinning usable when browser storage is unavailable.
+    }
+  }, [frozenFields]);
   // Column sort state: { field: string | null, direction: 'asc' | 'desc' | null }
   const [sortRules, setSortRules] = useState([]);
   // Persistent row selection state: Set of stable row indices

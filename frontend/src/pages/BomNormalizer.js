@@ -17116,6 +17116,7 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
             overflowX: 'hidden',
             overflowY: 'hidden',
           }),
+          ...(isPreparingLaunchFile && { overflowY: 'hidden' }),
           overscrollBehavior: 'contain',
           mx: 'auto',
           my: 1.5,
