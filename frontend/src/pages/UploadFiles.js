@@ -4583,7 +4583,7 @@ const UploadFiles = () => {
   }
 
   return (
-    <Box sx={{ position: 'relative', minHeight: 'calc(100vh - 64px)', px: { xs: 1.5, md: 3 }, py: { xs: 2, md: 3 }, bgcolor: fwPageTokens.bg, background: Nn.pageBg, color: Nn.text, overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+    <Box sx={{ position: 'relative', minHeight: 'calc(100vh - 64px)', px: { xs: 1.5, md: 3 }, py: { xs: 1.5, md: 2 }, bgcolor: fwPageTokens.bg, background: Nn.pageBg, color: Nn.text, overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
       <Box sx={factWiseTopShadeSx(isDarkMode)} />
       <Box sx={factWiseGlowSx(fwPageTokens)} />
       <Box sx={factWiseGridOverlaySx(fwPageTokens)} />
@@ -4593,15 +4593,15 @@ const UploadFiles = () => {
         sx={{
           position: 'relative',
           zIndex: 1,
-          width: 'min(920px, calc(100vw - 32px))',
-          minHeight: '580px',
+          width: 'min(760px, calc(100vw - 32px))',
+          minHeight: userFile ? 'auto' : '520px',
           borderRadius: '22px',
           border: `1px solid ${Nn.cardBorder}`,
           background: Nn.cardBg,
           backdropFilter: 'blur(28px)',
           boxShadow: Nn.modalShadow,
           color: Nn.text,
-          p: { xs: 2.5, md: 3.5 },
+          p: { xs: 2.25, md: 3 },
           display: 'flex',
           flexDirection: 'column',
           justifyContent: 'space-between'
@@ -4612,19 +4612,19 @@ const UploadFiles = () => {
           display: 'flex',
           justifyContent: 'center',
           alignItems: 'center',
-          mb: 3,
+          mb: userFile ? 2 : 3,
           position: 'relative',
           textAlign: 'center'
         }}>
           <Box>
-            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 1.5, mb: 0.5 }}>
-              <Typography variant="h5" fontWeight="600" sx={{ color: Nn.text, letterSpacing: '-0.02em', fontSize: '1.4rem' }}>
+            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 1.5, mb: 0.35 }}>
+              <Typography variant="h5" fontWeight="600" sx={{ color: Nn.text, letterSpacing: '-0.02em', fontSize: '1.35rem' }}>
                 Upload Files
               </Typography>
             </Box>
-            <Typography variant="caption" sx={{ color: Nn.muted, fontSize: '0.85rem' }}>
+            <Typography variant="caption" sx={{ color: Nn.muted, fontSize: '0.82rem' }}>
               {userFile
-                ? 'Review the sheet setup, optionally choose a saved workflow, then continue to BOM Normalizer or Process Upload.'
+                ? 'Confirm sheet setup and continue.'
                 : 'Upload the client source data. Destination: FactWise item default.'}
             </Typography>
           </Box>
@@ -4633,8 +4633,9 @@ const UploadFiles = () => {
             size="small"
             sx={{
               position: 'absolute',
-              top: 0,
+              top: '50%',
               right: 0,
+              transform: 'translateY(-50%)',
               height: 22,
               borderRadius: '999px',
               fontSize: '11px',
@@ -4821,12 +4822,9 @@ const UploadFiles = () => {
               </Box>
             )}
 
-            <Grid container spacing={2.5} justifyContent="center">
+            <Grid container spacing={2} justifyContent="center">
               {/* Client File Dropzone Column */}
-              <Grid item xs={12} md={10} lg={9}>
-                <Typography variant="subtitle2" sx={{ color: Nn.muted, fontWeight: 500, fontSize: 13, mb: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 1 }}>
-                </Typography>
-
+              <Grid item xs={12}>
                 <Box
                   {...getUserRootProps()}
                   onMouseEnter={() => setIsUserHovered(true)}
@@ -4838,18 +4836,18 @@ const UploadFiles = () => {
                       : (isUserDragActive || isUserHovered)
                       ? `1.5px dashed ${isDarkMode ? Nn.accent : uploadActionColor}`
                       : `1.5px dashed ${Nn.inputBorder}`,
-                    borderRadius: '16px',
-                    py: userFile ? { xs: 2.25, md: 2.5 } : { xs: 4, md: 5 },
-                    px: userFile ? { xs: 2.25, md: 3 } : { xs: 2.5, md: 4 },
+                    borderRadius: '14px',
+                    py: userFile ? { xs: 2, md: 2.25 } : { xs: 4, md: 5 },
+                    px: userFile ? { xs: 2.25, md: 2.75 } : { xs: 2.5, md: 4 },
                     textAlign: 'center',
                     cursor: 'pointer',
-                    minHeight: userFile ? { xs: 142, md: 154 } : { xs: 220, md: 250 },
+                    minHeight: userFile ? 'auto' : { xs: 220, md: 250 },
                     width: '100%',
                     display: 'flex',
                     flexDirection: userFile ? { xs: 'column', sm: 'row' } : 'column',
                     justifyContent: 'center',
                     alignItems: 'center',
-                    gap: userFile ? { xs: 1.25, sm: 2 } : 0,
+                    gap: userFile ? { xs: 1.5, sm: 2.25 } : 0,
                     position: 'relative',
                     background: (isUserDragActive || isUserHovered)
                       ? isDarkMode
@@ -4865,7 +4863,22 @@ const UploadFiles = () => {
                   }}
                 >
                   <input {...getUserInputProps()} />
-                  <Box sx={{ transform: userFile ? 'scale(0.74)' : 'none', transformOrigin: 'center', mb: userFile ? { xs: -1.5, sm: -0.75 } : 0, flexShrink: 0 }}>
+                  <Box
+                    sx={userFile ? {
+                      width: 56,
+                      height: 46,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      flexShrink: 0,
+                      overflow: 'visible',
+                      '& > *': {
+                        transform: 'scale(0.56)',
+                        transformOrigin: 'center',
+                        mb: '0 !important',
+                      },
+                    } : { flexShrink: 0 }}
+                  >
                     <DropzoneFileStackIcon
                       color={uploadActionColor}
                       glowColor={isDarkMode ? '#22c55e' : uploadActionColor}
@@ -5097,7 +5110,7 @@ const UploadFiles = () => {
 
                 {/* Client file, sheet setup, and workflow selection */}
                 {userFile && (
-                  <Box sx={{ mt: 1.25, p: 2, borderRadius: '14px', border: `1px solid ${Nn.panelBorder}`, bgcolor: Nn.panelBg, boxShadow: isDarkMode ? '0 10px 24px -22px rgba(0,0,0,0.9)' : '0 12px 28px -24px rgba(15, 23, 42, 0.28)' }}>
+                  <Box sx={{ mt: 1.75, p: 2, borderRadius: '14px', border: `1px solid ${Nn.panelBorder}`, bgcolor: Nn.panelBg, boxShadow: isDarkMode ? '0 10px 24px -22px rgba(0,0,0,0.9)' : '0 12px 28px -24px rgba(15, 23, 42, 0.28)' }}>
                     <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1.5 }}>
                       <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                         <CheckCircleIcon sx={{ color: isDarkMode ? '#4ade80' : '#16a34a', fontSize: 18 }} />
@@ -5127,9 +5140,6 @@ const UploadFiles = () => {
                               </Tooltip>
                             )}
                           </Stack>
-                          <Typography variant="caption" sx={{ color: Nn.muted, fontSize: 12, lineHeight: 1.25, display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: { xs: 220, sm: 420 } }}>
-                            {userFile.name}
-                          </Typography>
                         </Box>
                       </Box>
                       <Stack direction="row" spacing={0.75} alignItems="center">
@@ -5274,7 +5284,6 @@ const UploadFiles = () => {
                                         );
                                       })}
                                     </Select>
-                                    <FormHelperText>Select one sheet, or multiple sheets with matching columns.</FormHelperText>
                                   </FormControl>
                                 ) : false && combineSheetsMode ? (
                                   <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
@@ -5548,7 +5557,7 @@ const UploadFiles = () => {
               <Grid item xs={12}>
                 <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
                   <Box>
-                    <Box sx={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 1.5, mb: 2 }}>
+                    <Box sx={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 1.5, mb: 1.25 }}>
                       <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 1.25, minWidth: 0, flex: '1 1 auto' }}>
                         <Box
                           sx={{
@@ -5899,8 +5908,8 @@ const UploadFiles = () => {
             {/* Upload actions, outside the sheet setup card */}
             {userFile && (
             <Box sx={{
-              mt: 2.5,
-              pt: 2,
+              mt: 2,
+              pt: 1.5,
               borderTop: `1px solid ${Nn.divider}`,
               display: 'flex',
               alignItems: 'center',

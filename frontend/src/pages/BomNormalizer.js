@@ -10990,12 +10990,6 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
   const [detectedSetupPreview, setDetectedSetupPreview] = useState({ kind: 'identity', option: null });
   const [configureSubStep, setConfigureSubStep] = useState('mapping');
   const [sourceSetupExpanded, setSourceSetupExpanded] = useState(false);
-
-  useEffect(() => {
-    if ((workbook?.SheetNames?.length || 0) > 1) {
-      setSourceSetupExpanded(true);
-    }
-  }, [workbook]);
   const [columnMapFilter, setColumnMapFilter] = useState('all');
   const [columnMapSearch, setColumnMapSearch] = useState('');
   const [, setReviewTablePageInfo] = useState({ page: 0, pageCount: 1, totalRows: 0, pageSize: 25 });
@@ -17104,12 +17098,12 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
         minHeight: 'calc(100vh - 66px)',
         ...(inlineMode ? {
           width: configureSubStep === 'review' ? 'calc(100vw - 48px)' : 'min(1240px, calc(100vw - 48px))',
-          maxHeight: 'calc(100dvh - 90px)',
+          maxHeight: 'calc(100dvh - 112px)',
           minHeight: 0,
           overflowY: 'auto',
           overflowX: 'hidden',
           ...(hasMappingFooter && {
-            height: 'calc(100dvh - 90px)',
+            height: 'calc(100dvh - 112px)',
             boxSizing: 'border-box',
             display: 'flex',
             flexDirection: 'column',
@@ -17119,7 +17113,7 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
           ...(isPreparingLaunchFile && { overflowY: 'hidden' }),
           overscrollBehavior: 'contain',
           mx: 'auto',
-          my: 1.5,
+          my: 3,
           borderRadius: '22px',
           border: `1px solid ${normalizerTheme.border}`,
           background: normalizerTheme.panelGradient,
@@ -18371,10 +18365,8 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
                       if (config.followingItemRowsManufacturerColumn) headerToAlternateLabel[config.followingItemRowsManufacturerColumn] = 'Alternate Manufacturer';
                     }
                   }
-                  const columnRows = visibleSourceHeaders.map((header, idx) => {
-                    const roleKey = headerToRoleKey[header] || '';
-                    const altLabel = !roleKey ? (headerToAlternateLabel[header] || '') : '';
-                    const isAlternate = Boolean(altLabel);
+                  const samplesByHeader = {};
+                  visibleSourceHeaders.forEach((header) => {
                     const colIdx = headers.indexOf(header);
                     const samples = [];
                     for (let r = 0; r < Math.min(dataRows.length, 40) && samples.length < 2; r += 1) {
@@ -18384,24 +18376,47 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
                         samples.push(rawVal.length > 36 ? `${rawVal.slice(0, 36)}…` : rawVal);
                       }
                     }
-                    return { header, index: idx, roleKey, altLabel, isAlternate, isMatched: Boolean(roleKey || isAlternate), samples };
+                    samplesByHeader[header] = samples;
                   });
-                  const matchedCount = columnRows.filter((c) => c.isMatched).length;
-                  const alternateMappedCount = columnRows.filter((c) => c.isAlternate).length;
-                  const unmatchedCount = columnRows.length - matchedCount;
+                  const roleRows = ROLE_FIELDS.map((field) => {
+                    const mappedHeader = roles?.[field.key] || '';
+                    const samples = mappedHeader ? (samplesByHeader[mappedHeader] || []) : [];
+                    return {
+                      key: field.key,
+                      label: field.label,
+                      mappedHeader,
+                      isAlternate: false,
+                      isMatched: Boolean(mappedHeader),
+                      samples,
+                      targetField: field,
+                    };
+                  });
+                  const alternateRows = visibleSourceHeaders
+                    .filter((header) => !headerToRoleKey[header] && Boolean(headerToAlternateLabel[header]))
+                    .map((header) => ({
+                      key: `alt-${header}`,
+                      label: headerToAlternateLabel[header],
+                      mappedHeader: header,
+                      isAlternate: true,
+                      isMatched: true,
+                      samples: samplesByHeader[header] || [],
+                      targetField: null,
+                    }));
+                  const mappingRows = [...roleRows, ...alternateRows];
+                  const matchedCount = mappingRows.filter((c) => c.isMatched).length;
+                  const alternateMappedCount = alternateRows.length;
+                  const unmatchedCount = mappingRows.length - matchedCount;
                   const searchQuery = fmt(columnMapSearch).toLowerCase();
-                  const filteredColumnRows = columnRows.filter((row) => {
+                  const filteredMappingRows = mappingRows.filter((row) => {
                     if (columnMapFilter === 'matched' && !row.isMatched) return false;
                     if (columnMapFilter === 'unmatched' && row.isMatched) return false;
                     if (!searchQuery) return true;
-                    const targetLabel = row.altLabel || ROLE_FIELDS.find((f) => f.key === row.roleKey)?.label || '';
-                    return row.header.toLowerCase().includes(searchQuery) || targetLabel.toLowerCase().includes(searchQuery) || row.samples.some((s) => s.toLowerCase().includes(searchQuery));
+                    return (
+                      row.label.toLowerCase().includes(searchQuery)
+                      || row.mappedHeader.toLowerCase().includes(searchQuery)
+                      || row.samples.some((s) => s.toLowerCase().includes(searchQuery))
+                    );
                   });
-                  const handleSourceColumnTargetChange = (sourceHeader, nextRoleKey) => {
-                    const prevRoleKey = headerToRoleKey[sourceHeader];
-                    if (prevRoleKey && prevRoleKey !== nextRoleKey) handleRoleChange(prevRoleKey, '');
-                    if (nextRoleKey) handleRoleChange(nextRoleKey, sourceHeader);
-                  };
                   return (
                     <Paper
                       elevation={0}
@@ -18456,7 +18471,7 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
                       <Stack direction={{ xs: 'column', sm: 'row' }} alignItems={{ xs: 'stretch', sm: 'center' }} justifyContent="space-between" gap={1} sx={{ px: 2, py: 0.65, minHeight: 48, boxSizing: 'border-box', borderBottom: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}>
                         <Stack direction="row" alignItems="center" gap={0.75} flexWrap="wrap">
                           {[
-                            { key: 'all', label: 'All', count: columnRows.length, dotColor: '#007aff' },
+                            { key: 'all', label: 'All', count: mappingRows.length, dotColor: '#007aff' },
                             { key: 'matched', label: 'Mapped', count: matchedCount, dotColor: '#10b981' },
                             { key: 'unmatched', label: 'Unmapped', count: unmatchedCount, dotColor: '#f59e0b' },
                           ].map((tab) => {
@@ -18470,23 +18485,23 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
                             );
                           })}
                         </Stack>
-                        <TextField size="small" value={columnMapSearch} onChange={(e) => setColumnMapSearch(e.target.value)} placeholder="Search columns..." InputProps={{ startAdornment: <InputAdornment position="start"><SearchIcon sx={{ fontSize: 15, color: normalizerTheme.muted }} /></InputAdornment> }} sx={{ width: { xs: '100%', sm: 240 }, '& .MuiOutlinedInput-root': { height: 34, fontSize: 12.5, borderRadius: '999px' }, '& .MuiInputBase-input': { py: 0.5 } }} />
+                        <TextField size="small" value={columnMapSearch} onChange={(e) => setColumnMapSearch(e.target.value)} placeholder="Search fields or columns..." InputProps={{ startAdornment: <InputAdornment position="start"><SearchIcon sx={{ fontSize: 15, color: normalizerTheme.muted }} /></InputAdornment> }} sx={{ width: { xs: '100%', sm: 240 }, '& .MuiOutlinedInput-root': { height: 34, fontSize: 12.5, borderRadius: '999px' }, '& .MuiInputBase-input': { py: 0.5 } }} />
                       </Stack>
 
                       <Box aria-hidden="true" sx={{ display: { xs: 'none', md: 'grid' }, gridTemplateColumns: 'minmax(220px, 0.8fr) 112px minmax(0, 1.2fr)', gap: 1, px: 2.75, py: 0.75, flexShrink: 0, bgcolor: normalizerTheme.paperSoft, borderBottom: `1px solid ${normalizerTheme.border}`, color: normalizerTheme.muted, fontSize: 11, fontWeight: 600 }}>
-                        <span>Source column</span>
+                        <span>BOM field</span>
                         <Box component="span" sx={{ textAlign: 'center' }}>Status</Box>
-                        <span>Map to</span>
+                        <span>Source column</span>
                       </Box>
                       <Box role="region" aria-label="Column mapping list" tabIndex={0} sx={{ flex: '1 1 0px', minHeight: hasMappingFooter ? 96 : 0, maxHeight: hasMappingFooter ? undefined : 460, overflowY: 'auto', overscrollBehaviorY: 'contain', scrollbarGutter: 'stable', px: 1.5, py: 0.5 }}>
                         <Box sx={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', alignItems: 'start', gap: 0 }}>
-                        {filteredColumnRows.map((row) => {
-                          const targetField = ROLE_FIELDS.find((f) => f.key === row.roleKey) || null;
+                        {filteredMappingRows.map((row) => {
+                          const targetField = row.targetField;
                           const rowConditionalRule = targetField ? config.conditionalFieldMappings?.[targetField.key] : null;
                           const isRowRuleExpanded = Boolean(targetField && conditionalMappingField?.key === targetField.key);
                           return (
                             <Box
-                              key={`col-map-${row.header}`}
+                              key={`col-map-${row.key}`}
                               sx={{
                                 display: 'grid',
                                 gridTemplateColumns: { xs: '1fr', md: 'minmax(220px, 0.8fr) 112px minmax(0, 1.2fr)' },
@@ -18501,8 +18516,14 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
                             >
                               <Stack direction="row" alignItems="center" gap={1.1} sx={{ minWidth: 0 }}>
                                 <Box sx={{ minWidth: 0 }}>
-                                  <Typography noWrap sx={{ fontSize: 13.5, fontWeight: 600, color: normalizerTheme.text, lineHeight: 1.3 }}>{row.header}</Typography>
-                                  <Typography noWrap sx={{ fontSize: 11.5, color: normalizerTheme.muted, mt: 0.2 }}>{row.samples.length ? `Sample: ${row.samples.join(' · ')}` : 'No sample values detected'}</Typography>
+                                  <Typography noWrap sx={{ fontSize: 13.5, fontWeight: 600, color: normalizerTheme.text, lineHeight: 1.3 }}>
+                                    {row.isAlternate ? `Alternate · ${row.label}` : row.label}
+                                  </Typography>
+                                  <Typography noWrap sx={{ fontSize: 11.5, color: normalizerTheme.muted, mt: 0.2 }}>
+                                    {row.mappedHeader
+                                      ? (row.samples.length ? `Sample: ${row.samples.join(' · ')}` : 'No sample values detected')
+                                      : 'Not mapped to a source column'}
+                                  </Typography>
                                 </Box>
                               </Stack>
 
@@ -18525,36 +18546,56 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
                               </Stack>
 
                               <Stack direction="row" alignItems="center" gap={1} sx={{ gridColumn: { xs: 'auto', md: '3' }, minWidth: 0 }}>
-                                <FormControl fullWidth size="small">
-                                  <Select
-                                    displayEmpty
-                                    value={row.roleKey}
-                                    onChange={(event) => handleSourceColumnTargetChange(row.header, event.target.value)}
-                                    renderValue={(selected) => {
-                                      if (!selected && row.altLabel) {
+                                {row.isAlternate ? (
+                                  <Box sx={{ flex: 1, minWidth: 0, height: 34, px: 1.5, display: 'flex', alignItems: 'center', borderRadius: '8px', border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paperSoft }}>
+                                    <Typography noWrap sx={{ fontSize: 12.5, fontWeight: 500, color: isDarkMode ? '#93c5fd' : '#0062cc' }}>
+                                      {row.mappedHeader}
+                                    </Typography>
+                                  </Box>
+                                ) : (
+                                  <FormControl fullWidth size="small">
+                                    <Select
+                                      displayEmpty
+                                      value={row.mappedHeader}
+                                      onChange={(event) => handleRoleChange(row.key, event.target.value)}
+                                      renderValue={(selected) => {
+                                        if (!selected) return <Typography sx={{ fontSize: 12.5, color: normalizerTheme.muted }}>Select source column…</Typography>;
+                                        return <Typography noWrap sx={{ fontSize: 12.5, color: normalizerTheme.text, fontWeight: 500 }}>{selected}</Typography>;
+                                      }}
+                                      sx={{ height: 34, borderRadius: '8px', bgcolor: normalizerTheme.paper }}
+                                    >
+                                      <MenuItem value=""><Typography sx={{ fontSize: 12.5, color: normalizerTheme.muted }}>Do not map (Ignore)</Typography></MenuItem>
+                                      {visibleSourceHeaders.map((sourceHeader) => {
+                                        const assignedRoleKey = headerToRoleKey[sourceHeader];
+                                        const assignedRoleLabel = assignedRoleKey && assignedRoleKey !== row.key
+                                          ? (ROLE_FIELDS.find((f) => f.key === assignedRoleKey)?.label || assignedRoleKey)
+                                          : '';
+                                        const samplePreview = samplesByHeader[sourceHeader]?.[0] || '';
                                         return (
-                                          <Typography sx={{ fontSize: 12.5, color: isDarkMode ? '#93c5fd' : '#0062cc', fontWeight: 600 }}>
-                                            Alternate · {row.altLabel}
-                                          </Typography>
+                                          <MenuItem key={sourceHeader} value={sourceHeader}>
+                                            <Stack direction="row" alignItems="center" justifyContent="space-between" width="100%" gap={1}>
+                                              <Box sx={{ minWidth: 0 }}>
+                                                <Typography noWrap sx={{ fontSize: 12.5, fontWeight: row.mappedHeader === sourceHeader ? 600 : 400 }}>
+                                                  {sourceHeader}
+                                                </Typography>
+                                                {samplePreview && (
+                                                  <Typography noWrap sx={{ fontSize: 11, color: normalizerTheme.muted }}>
+                                                    e.g. {samplePreview}
+                                                  </Typography>
+                                                )}
+                                              </Box>
+                                              {assignedRoleLabel && (
+                                                <Typography sx={{ fontSize: 11, color: normalizerTheme.muted, flexShrink: 0 }}>
+                                                  (mapped to: {assignedRoleLabel})
+                                                </Typography>
+                                              )}
+                                            </Stack>
+                                          </MenuItem>
                                         );
-                                      }
-                                      if (!selected) return <Typography sx={{ fontSize: 12.5, color: normalizerTheme.muted }}>Do not map (Ignore)</Typography>;
-                                      const target = ROLE_FIELDS.find((f) => f.key === selected);
-                                      return <Typography sx={{ fontSize: 12.5, color: normalizerTheme.text, fontWeight: 500 }}>BOM · {target?.label || selected}</Typography>;
-                                    }}
-                                    sx={{ height: 34, borderRadius: '8px', bgcolor: normalizerTheme.paper }}
-                                  >
-                                    <MenuItem value=""><Typography sx={{ fontSize: 12.5, color: normalizerTheme.muted }}>{row.altLabel ? `Keep as ${row.altLabel}` : 'Do not map (Ignore)'}</Typography></MenuItem>
-                                    {ROLE_FIELDS.map((field) => (
-                                      <MenuItem key={field.key} value={field.key}>
-                                        <Stack direction="row" alignItems="center" justifyContent="space-between" width="100%" gap={1}>
-                                          <Typography sx={{ fontSize: 12.5, fontWeight: row.roleKey === field.key ? 600 : 400 }}>BOM · {field.label}</Typography>
-                                          {roles[field.key] && roles[field.key] !== row.header && <Typography sx={{ fontSize: 11, color: normalizerTheme.muted }}>(currently: {roles[field.key]})</Typography>}
-                                        </Stack>
-                                      </MenuItem>
-                                    ))}
-                                  </Select>
-                                </FormControl>
+                                      })}
+                                    </Select>
+                                  </FormControl>
+                                )}
                                 {row.isAlternate ? (
                                   <Tooltip title="Edit alternate column groups in Detected setup" arrow>
                                     <Button
@@ -18574,12 +18615,12 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
                                     </Button>
                                   </Tooltip>
                                 ) : (
-                                  <Tooltip title={targetField ? 'Add or edit IF / ELSE fallback rule' : 'Map this column first to add a fallback rule'} arrow>
+                                  <Tooltip title={row.mappedHeader ? 'Add or edit IF / ELSE fallback rule' : 'Select a source column first to add a fallback rule'} arrow>
                                     <span>
                                       <Button
                                         size="small"
                                         variant="outlined"
-                                        disabled={!targetField}
+                                        disabled={!row.mappedHeader}
                                         startIcon={<AltRouteOutlinedIcon sx={{ fontSize: 14 }} />}
                                         onClick={() => targetField && (isRowRuleExpanded ? closeConditionalFieldMapping() : openConditionalFieldMapping(targetField))}
                                         sx={{
@@ -18589,11 +18630,11 @@ const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = nu
                                           bgcolor: (rowConditionalRule || isRowRuleExpanded) ? '#007aff' : (isDarkMode ? 'rgba(59, 130, 246, 0.12)' : 'rgba(0, 122, 255, 0.06)'),
                                           transition: 'transform 0.15s ease, background-color 0.15s ease',
                                           '&:hover': { borderColor: '#007aff', transform: 'translateY(-1px)', bgcolor: (rowConditionalRule || isRowRuleExpanded) ? '#0062cc' : 'rgba(0, 122, 255, 0.14)' },
-                                        '&:active': { transform: 'scale(0.96)' },
-                                      }}
-                                    >
-                                      Rule
-                                    </Button>
+                                          '&:active': { transform: 'scale(0.96)' },
+                                        }}
+                                      >
+                                        Rule
+                                      </Button>
                                     </span>
                                   </Tooltip>
                                 )}
