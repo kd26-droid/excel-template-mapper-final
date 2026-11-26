@@ -8637,6 +8637,7 @@ const EnhancedDataEditor = () => {
             <BomDuplicatePolicyBanner
               sessionId={sessionId}
               refreshKey={`${totalRows}:${sessionVersion}`}
+              onGridChanged={fetchDataSynchronized}
             />
             {dupHighlight && (
               <Alert
