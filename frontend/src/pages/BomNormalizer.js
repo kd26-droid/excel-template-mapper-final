@@ -1,3 +1,4 @@
+import GridViewIcon from '@mui/icons-material/GridView';
 import SheetSortPopover from '../components/SheetSortPopover';
 import FactWiseToast from '../components/FactWiseToast';
 import SheetColumnsPopover from '../components/SheetColumnsPopover';
@@ -49,6 +50,7 @@ import {
   Table,
   TableBody,
   TableCell,
+  Portal,
   TableContainer,
   TableHead,
   TableRow,
@@ -8939,12 +8941,12 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
                         maxWidth: isFrozen ? colWidth : colWidth + 40,
                         p: column.editable ? 0.5 : undefined,
                         minWidth: colWidth,
+                        bgcolor: stickyCellBg,
                         ...(isFrozen ? {
                           width: colWidth,
                           position: 'sticky',
                           left: frozenLeftOffsets[column.key],
                           zIndex: 2,
-                          bgcolor: stickyCellBg,
                           borderRight: isLastFrozen ? '2px solid rgba(0, 122, 255, 0.35)' : `1px solid ${tableTone.headerBorder}`,
                           boxShadow: isLastFrozen ? '3px 0 8px -3px rgba(15, 23, 42, 0.14)' : 'none',
                         } : {}),
@@ -9517,6 +9519,26 @@ const FieldPatternReviewTable = ({
 
         {/* Right side: View detected patterns & Search */}
         <Stack direction={{ xs: 'column', sm: 'row' }} alignItems="center" gap={1} sx={{ width: { xs: '100%', md: 'auto' } }}>
+          {onBack && (
+            <Button
+              variant="outlined"
+              size="small"
+              startIcon={<TuneIcon sx={{ fontSize: 16 }} />}
+              onClick={onBack}
+              sx={{
+                textTransform: 'none',
+                fontSize: '12.5px',
+                fontWeight: 500,
+                borderColor: isReviewDark ? 'rgba(148, 163, 184, 0.3)' : '#bfdbfe',
+                color: isReviewDark ? '#93c5fd' : '#1d4ed8',
+                whiteSpace: 'nowrap',
+                height: 36,
+                px: 1.5,
+              }}
+            >
+              Edit column mapping
+            </Button>
+          )}
           {onViewPatterns && (
             <Button variant="outlined" size="small" startIcon={<TuneIcon sx={{ fontSize: 16 }} />} onClick={onViewPatterns} sx={{ textTransform: 'none', fontSize: '12.5px', fontWeight: 500, borderColor: isReviewDark ? 'rgba(148, 163, 184, 0.3)' : '#bfdbfe', color: isReviewDark ? '#93c5fd' : '#1d4ed8', bgcolor: isReviewDark ? 'rgba(37, 99, 235, 0.1)' : '#eff6ff', whiteSpace: 'nowrap', height: 36, px: 1.5 }}>
               View detected patterns ({Number(contract?.summary?.patternCount || contract?.patterns?.length || 0)})
@@ -9601,10 +9623,24 @@ const FieldPatternReviewTable = ({
               </Box>
             </Tooltip>
           ) : (
-            <Box sx={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', width: 8, height: 28, borderRadius: '4px', bgcolor: isDraggingSplitter ? '#007aff' : (isReviewDark ? '#1e293b' : '#f1f5f9'), border: `1px solid ${isDraggingSplitter ? '#007aff' : (isReviewDark ? '#64748b' : '#94a3b8')}`, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '1.5px', boxShadow: '0 1px 3px rgba(0,0,0,0.18)', pointerEvents: 'none', zIndex: 12 }}>
-              <Box sx={{ width: 1.5, height: 14, borderRadius: 1, bgcolor: isDraggingSplitter ? '#ffffff' : (isReviewDark ? '#94a3b8' : '#475569') }} />
-              <Box sx={{ width: 1.5, height: 14, borderRadius: 1, bgcolor: isDraggingSplitter ? '#ffffff' : (isReviewDark ? '#94a3b8' : '#475569') }} />
-            </Box>
+            <Tooltip title="Expand FactWise interpretation" arrow>
+              <IconButton
+                size="small"
+                aria-label="Expand FactWise interpretation"
+                onMouseDown={(event) => event.stopPropagation()}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setClientPaneWidth(0);
+                }}
+                sx={{
+                  width: 24, height: 28, zIndex: 1, borderRadius: '8px',
+                  bgcolor: theme.paper, color: theme.text, border: `1px solid ${reviewStrongLine}`,
+                  '&:hover, &:focus-visible': { bgcolor: '#007aff', color: '#fff' },
+                }}
+              >
+                <ChevronRightIcon sx={{ fontSize: 18, transform: 'rotate(180deg)' }} />
+              </IconButton>
+            </Tooltip>
           )}
         </Box>
 
@@ -9769,11 +9805,15 @@ const FieldPatternReviewTable = ({
       {(onApplyPatterns || onBack || filteredRows.length > pageSize) && (
         <Stack direction={{ xs: 'column', sm: 'row' }} alignItems={{ xs: 'stretch', sm: 'center' }} justifyContent="space-between" gap={1.5} sx={{ px: 2, py: 1.25, borderTop: `1px solid ${reviewLine}`, bgcolor: isReviewDark ? '#17181d' : theme.paperSoft }}>
           <Stack direction="row" alignItems="center" gap={1.25}>
-            <ShadcnButton variant="outline" disabled={safePage === 0} onClick={() => onPageChange(Math.max(0, safePage - 1))} className="h-8 px-3 text-xs">Previous</ShadcnButton>
-            <Typography sx={{ fontSize: 12.5, fontWeight: 500, color: theme.text }}>
+            <IconButton size="small" disabled={safePage === 0} onClick={() => onPageChange(Math.max(0, safePage - 1))} aria-label="Previous page" title="Previous page" sx={{ width: 32, height: 32, border: '1px solid transparent', borderRadius: '50%', color: '#fff', bgcolor: '#007aff', boxShadow: '0 2px 8px rgba(0, 122, 255, 0.24)', '&:hover': { bgcolor: '#0062cc' }, '&.Mui-disabled': { color: theme.muted, bgcolor: theme.paperSoft, borderColor: reviewLine, boxShadow: 'none', opacity: 0.72 } }}>
+              <ChevronLeftIcon sx={{ fontSize: 19 }} />
+            </IconButton>
+            <Typography sx={{ minWidth: 112, textAlign: 'center', fontSize: 12.5, fontWeight: 500, color: theme.text, fontVariantNumeric: 'tabular-nums' }}>
               Rows {filteredRows.length === 0 ? 0 : pageStart + 1}–{Math.min(pageStart + visibleRows.length, filteredRows.length)} of {filteredRows.length}
             </Typography>
-            <ShadcnButton variant="outline" disabled={safePage >= pageCount - 1} onClick={() => onPageChange(Math.min(pageCount - 1, safePage + 1))} className="h-8 px-3 text-xs">Next</ShadcnButton>
+            <IconButton size="small" disabled={safePage >= pageCount - 1} onClick={() => onPageChange(Math.min(pageCount - 1, safePage + 1))} aria-label="Next page" title="Next page" sx={{ width: 32, height: 32, border: '1px solid transparent', borderRadius: '50%', color: '#fff', bgcolor: '#007aff', boxShadow: '0 2px 8px rgba(0, 122, 255, 0.24)', '&:hover': { bgcolor: '#0062cc' }, '&.Mui-disabled': { color: theme.muted, bgcolor: theme.paperSoft, borderColor: reviewLine, boxShadow: 'none', opacity: 0.72 } }}>
+              <ChevronRightIcon sx={{ fontSize: 19 }} />
+            </IconButton>
           </Stack>
           {onApplyPatterns && (
             <Stack direction="row" alignItems="center" gap={1.25}>
@@ -10127,9 +10167,78 @@ const OptionExampleTooltip = ({ option, children }) => {
   );
 };
 
-const BomNormalizer = () => {
+const DetectedSetupLivePreview = ({ title, option, normalizerTheme, isDarkMode }) => {
+  const roleStyles = getExampleRoleStyles(isDarkMode);
+  const example = option?.example;
+  return (
+    <Paper elevation={0} sx={{ position: 'sticky', top: 0, p: 1, borderRadius: '12px', border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper, minWidth: 0 }}>
+      <Typography sx={{ fontSize: 11, fontWeight: 600, color: isDarkMode ? '#60a5fa' : '#007aff', textTransform: 'uppercase', letterSpacing: '.05em' }}>{title} example</Typography>
+      {example ? (
+        <>
+          <Typography sx={{ mt: 0.5, mb: 0.5, fontSize: 12, lineHeight: 1.5, color: normalizerTheme.muted }}>{example.caption}</Typography>
+          <Box sx={{ width: '100%', overflowX: 'auto' }}>
+            <Box component="table" aria-label={`${option.label} example pattern`} sx={{ width: '100%', borderCollapse: 'separate', borderSpacing: '2px', fontSize: 11.5, '& td': { border: `1px solid ${normalizerTheme.border}`, borderRadius: '6px', px: 0.8, py: 0.3, whiteSpace: 'nowrap' } }}>
+              <tbody>
+                {example.rows.map((row, rowIndex) => (
+                  <tr key={`${option.value}-${rowIndex}`}>
+                    {row.map((cell, cellIndex) => {
+                      const style = roleStyles[cell.role] || roleStyles.plain;
+                      return <Box component="td" key={`${option.value}-${rowIndex}-${cellIndex}`} sx={{ bgcolor: style.bg, color: style.color, fontWeight: style.weight }}>{cell.text || '—'}</Box>;
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </Box>
+          </Box>
+        </>
+      ) : (
+        <Typography sx={{ mt: 0.5, fontSize: 12, lineHeight: 1.5, color: normalizerTheme.muted }}>
+          {option?.description || 'Choose an option to see how it affects the source pattern.'}
+        </Typography>
+      )}
+    </Paper>
+  );
+};
+
+const WorkbookScanner = ({ isDarkMode }) => (
+  <Box aria-hidden="true" sx={{
+      '@keyframes fwInterpretPulse': {
+        '0%': { transform: 'scale(0.92)', opacity: 0.65 },
+        '70%': { transform: 'scale(1.24)', opacity: 0 },
+        '100%': { transform: 'scale(1.24)', opacity: 0 },
+      },
+      '@keyframes fwInterpretScan': {
+        '0%': { top: '10%', opacity: 0.25 },
+        '50%': { top: '80%', opacity: 1 },
+        '100%': { top: '10%', opacity: 0.25 },
+      },
+      '@media (prefers-reduced-motion: reduce)': { '& *': { animation: 'none !important' } },
+      position: 'relative', width: 88, height: 88, display: 'flex', alignItems: 'center', justifyContent: 'center', mb: 2.25 }}>
+    <Box sx={{ position: 'absolute', inset: 0, borderRadius: '50%', border: '2px solid rgba(0, 122, 255, 0.32)', animation: 'fwInterpretPulse 2s cubic-bezier(0.16, 1, 0.3, 1) infinite' }} />
+    <Box sx={{ position: 'absolute', inset: 8, borderRadius: '50%', bgcolor: isDarkMode ? 'rgba(0, 122, 255, 0.14)' : '#eff6ff', border: `1.5px solid ${isDarkMode ? 'rgba(96, 165, 250, 0.35)' : '#bfdbfe'}` }} />
+    <Box sx={{ position: 'relative', width: 46, height: 42, borderRadius: '8px', bgcolor: isDarkMode ? '#1e293b' : '#ffffff', border: '1.5px solid #007aff', boxShadow: '0 8px 22px -6px rgba(0, 122, 255, 0.4)', display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: '5px', px: 0.9, overflow: 'hidden' }}>
+      <Stack direction="row" gap={0.5}>
+        <Box sx={{ height: 4, width: '35%', borderRadius: 2, bgcolor: '#10b981' }} />
+        <Box sx={{ height: 4, width: '65%', borderRadius: 2, bgcolor: '#007aff', opacity: 0.75 }} />
+      </Stack>
+      <Stack direction="row" gap={0.5}>
+        <Box sx={{ height: 3.5, width: '45%', borderRadius: 2, bgcolor: isDarkMode ? '#475569' : '#cbd5e1' }} />
+        <Box sx={{ height: 3.5, width: '55%', borderRadius: 2, bgcolor: '#10b981', opacity: 0.65 }} />
+      </Stack>
+      <Stack direction="row" gap={0.5}>
+        <Box sx={{ height: 3.5, width: '30%', borderRadius: 2, bgcolor: isDarkMode ? '#475569' : '#cbd5e1' }} />
+        <Box sx={{ height: 3.5, width: '70%', borderRadius: 2, bgcolor: isDarkMode ? '#475569' : '#cbd5e1' }} />
+      </Stack>
+      <Box sx={{ position: 'absolute', left: 0, right: 0, height: 2.5, bgcolor: '#007aff', boxShadow: '0 0 8px 2px rgba(0, 122, 255, 0.65)', animation: 'fwInterpretScan 1.7s ease-in-out infinite' }} />
+    </Box>
+  </Box>
+);
+
+const BomNormalizer = ({ modalMode = false, inlineMode = false, launchState = null, onAdvanceToFactwisePage, onReturnToMapping, onBackToUpload }) => {
+  const mappingFooterRef = useRef(null);
   const navigate = useNavigate();
   const location = useLocation();
+  const routeState = launchState || location.state;
   const { isDarkMode, tokens: themeTokens } = useThemeContext();
   const normalizerTheme = useMemo(() => {
     const pageTokens = buildFactWisePageTokens(isDarkMode, themeTokens);
@@ -10152,6 +10261,15 @@ const BomNormalizer = () => {
       pageTokens,
     };
   }, [isDarkMode, themeTokens]);
+  const advanceToFactwiseInterpretation = () => {
+    setConfigureSubStep('review');
+    if (!fieldPatternLoading) handleTeachFieldPattern(null, { openModal: false });
+    if (inlineMode) onAdvanceToFactwisePage?.();
+  };
+  const returnToColumnMapping = () => {
+    setConfigureSubStep('mapping');
+    if (!inlineMode) onReturnToMapping?.();
+  };
   const normalizerTableTone = useMemo(
     () => buildFactWiseTableTone(normalizerTheme.pageTokens),
     [normalizerTheme.pageTokens]
@@ -10743,6 +10861,7 @@ const BomNormalizer = () => {
   const [bomStructureSeed, setBomStructureSeed] = useState(null);
   const [pendingBomAction, setPendingBomAction] = useState(null);
   const [workbook, setWorkbook] = useState(null);
+  const isPreparingLaunchFile = Boolean((modalMode || inlineMode) && routeState?.initialFile && !workbook);
   const [fileName, setFileName] = useState('');
   const [sheetName, setSheetName] = useState('');
   const [sheetScope, setSheetScope] = useState('single');
@@ -10868,6 +10987,7 @@ const BomNormalizer = () => {
   const [patternParserOverrides, setPatternParserOverrides] = useState([]);
   const [fieldPatternReviewOpen, setFieldPatternReviewOpen] = useState(false);
   const [mappingDrawerOpen, setMappingDrawerOpen] = useState(false);
+  const [detectedSetupPreview, setDetectedSetupPreview] = useState({ kind: 'identity', option: null });
   const [configureSubStep, setConfigureSubStep] = useState('mapping');
   const [sourceSetupExpanded, setSourceSetupExpanded] = useState(false);
 
@@ -10881,6 +11001,7 @@ const BomNormalizer = () => {
   const [, setReviewTablePageInfo] = useState({ page: 0, pageCount: 1, totalRows: 0, pageSize: 25 });
   const [fieldPatternReviewStage, setFieldPatternReviewStage] = useState('patterns');
   const [fieldPatternFieldFilter, setFieldPatternFieldFilter] = useState('all');
+  const [fieldPatternStatusFilter, setFieldPatternStatusFilter] = useState('all');
   const [fieldPatternExpandedPatternKey, setFieldPatternExpandedPatternKey] = useState('');
   const [fieldPatternLoading, setFieldPatternLoading] = useState(false);
   const [fieldPatternGroups, setFieldPatternGroups] = useState([]);
@@ -11267,6 +11388,7 @@ const BomNormalizer = () => {
     () => ALTERNATE_LAYOUT_OPTIONS.find((option) => option.value === config.alternateLayout),
     [config.alternateLayout]
   );
+
 
   const followingRowsInsideCellAlternateInfo = useMemo(() => {
     if (config.alternateLayout !== 'following_rows') return null;
@@ -11926,9 +12048,10 @@ const BomNormalizer = () => {
   ), [fieldPatternGroups, selectedFieldPatternId]);
   const fieldPatternReviewPatterns = fieldPatternReviewContract.patterns || [];
   const fieldPatternFieldFilterOptions = fieldPatternReviewContract.fieldFilters || [];
-  const filteredFieldPatternReviewPatterns = (
-    fieldPatternReviewContract.patternsByField?.[fieldPatternFieldFilter] || []
-  );
+  const fieldFilteredPatternList = fieldPatternReviewContract.patternsByField?.[fieldPatternFieldFilter] || [];
+  const filteredFieldPatternReviewPatterns = fieldPatternStatusFilter === 'all'
+    ? fieldFilteredPatternList
+    : fieldFilteredPatternList.filter((pattern) => Boolean(pattern.recognized) === (fieldPatternStatusFilter === 'recognized'));
   const mappedFieldPatternRuleOptions = fieldPatternReviewContract.mappedFieldOptions || [];
   const bulkPatternParsingContract = fieldPatternReviewContract.bulkParsing || {};
   const visualTeachDelimiterOptions = bulkPatternParsingContract.alternateSeparatorOptions || [];
@@ -12567,7 +12690,7 @@ const BomNormalizer = () => {
   }, [buildNormalizedResultsSnapshot, currentStep, normalizedRows]);
 
   useEffect(() => {
-    const state = location.state || {};
+    const state = routeState || {};
     const snapshotKey = state.bomNormalizerReturnKey;
     const routeRestoreId = snapshotKey || (state.bomNormalizerReturnSnapshot ? 'route-snapshot' : '');
 
@@ -12691,12 +12814,12 @@ const BomNormalizer = () => {
       setError(err.message || 'Could not restore the BOM Normalizer page.');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [location.pathname, location.state, navigate]);
+  }, [location.pathname, routeState, navigate]);
 
   useEffect(() => {
     if (workspaceRestoredRef.current) return;
 
-    const state = location.state || {};
+    const state = routeState || {};
     const routeIsProvidingSource = Boolean(
       state.initialFile ||
       state.fromPdfZone ||
@@ -12833,7 +12956,7 @@ const BomNormalizer = () => {
       if (!workspaceRestoredRef.current) restoreInFlightRef.current = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [location.state]);
+  }, [routeState]);
 
   useEffect(() => {
     if (!workspaceRestoredRef.current || restoreInFlightRef.current) return undefined;
@@ -13209,7 +13332,7 @@ const BomNormalizer = () => {
   }, [config, inferNormalizerRoles, restoreInferenceNonce]);
 
   useEffect(() => {
-    const state = location.state || {};
+    const state = routeState || {};
     if (!state.fromPdfZone || !state.pdfSessionId) return;
 
     let cancelled = false;
@@ -13264,7 +13387,7 @@ const BomNormalizer = () => {
     return () => {
       cancelled = true;
     };
-  }, [handleWorkbookLoaded, location.state, navigate]);
+  }, [handleWorkbookLoaded, routeState, navigate]);
 
   const parseFilesForCombine = useCallback(async (files, idPrefix = 'source') => {
     return Promise.all(files.map(async (file, index) => {
@@ -13306,7 +13429,7 @@ const BomNormalizer = () => {
   }, []);
 
   useEffect(() => {
-    const state = location.state || {};
+    const state = routeState || {};
     const initialFile = state.initialFile;
     const seedKey = initialFile
       ? `${initialFile.name || 'file'}-${initialFile.size || 0}-${initialFile.lastModified || 0}-${state.initialFileMode || 'source'}-${state.initialSheetName || ''}-${state.initialHeaderRow || ''}-${state.initialSheetScope || ''}-${(state.initialSelectedSheets || []).join('|')}`
@@ -13366,7 +13489,7 @@ const BomNormalizer = () => {
         delete remainingState.initialSheetScope;
         delete remainingState.initialSelectedSheets;
         delete remainingState.initialHeaderRowExplicit;
-        navigate(location.pathname, { replace: true, state: remainingState });
+        if (!launchState) navigate(location.pathname, { replace: true, state: remainingState });
       } catch (err) {
         setCombineError(err.message || 'Unable to prepare the uploaded file for BOM Normalizer.');
       } finally {
@@ -13375,10 +13498,10 @@ const BomNormalizer = () => {
     };
 
     seedInitialFileAsSource();
-  }, [handleWorkbookLoaded, location.pathname, location.state, navigate, parseFilesForCombine]);
+  }, [handleWorkbookLoaded, launchState, location.pathname, routeState, navigate, parseFilesForCombine]);
 
   useEffect(() => {
-    const state = location.state || {};
+    const state = routeState || {};
     const processingTemplate = state.autoReplayProcessingTemplate;
     const workflow = getProcessingTemplateNormalizerWorkflow(processingTemplate);
     const mappingTemplateId = state.autoReplayMappingTemplateId || getProcessingTemplateMappingId(processingTemplate);
@@ -13460,8 +13583,8 @@ const BomNormalizer = () => {
         formData.append('headerRow', '1');
         // Template replay runs without the gate; answers only exist if they were
         // captured earlier and travelled in on the route state.
-        if (bomStructureAnswers || location.state?.bomStructure) {
-          formData.append('bomStructure', JSON.stringify(bomStructureAnswers || location.state.bomStructure));
+        if (bomStructureAnswers || routeState?.bomStructure) {
+          formData.append('bomStructure', JSON.stringify(bomStructureAnswers || routeState.bomStructure));
         }
 
         const response = await api.uploadFilesWithTemplate(formData, mappingTemplateId);
@@ -13495,7 +13618,7 @@ const BomNormalizer = () => {
     config,
     fileName,
     headerRowIndex,
-    location.state,
+    routeState,
     navigate,
     preparedDataRows,
     preparedHeaders,
@@ -13924,7 +14047,7 @@ const BomNormalizer = () => {
     const passed = (maybeAnswers && maybeAnswers.sheets) ? maybeAnswers : null;
     // Answers may already have been captured on the upload page; asking a
     // second time for the same workbook would just be noise.
-    let answers = passed || bomStructureAnswers || location.state?.bomStructure || null;
+    let answers = passed || bomStructureAnswers || routeState?.bomStructure || null;
 
     // A reused mapping template pre-answers the gate but never replaces it. Its
     // format answers always apply and its identity answers only while they
@@ -13938,7 +14061,7 @@ const BomNormalizer = () => {
     // it — and defaulting it to "new" without asking is how a file meant to
     // revise a BOM silently becomes a second BOM beside it.
     if (!answers) {
-      const saved = location.state?.savedBomStructure
+      const saved = routeState?.savedBomStructure
         || workflowTemplateInUse?.workflow?.bomStructure;
       if (saved) {
         const reconciled = reconcileSavedBomStructure(saved, {
@@ -13989,8 +14112,8 @@ const BomNormalizer = () => {
     formData.append('headerRow', '1');
     // Forward the BOM structure answers captured on the upload page so the
     // session created here keeps them.
-    if (answers || location.state?.bomStructure) {
-      formData.append('bomStructure', JSON.stringify(answers || location.state.bomStructure));
+    if (answers || routeState?.bomStructure) {
+      formData.append('bomStructure', JSON.stringify(answers || routeState.bomStructure));
     }
     const returnSnapshotKey = saveReturnSnapshot('normalized-results');
     const returnSnapshot = buildNormalizedResultsSnapshot(handoffRows);
@@ -14008,7 +14131,7 @@ const BomNormalizer = () => {
         const sessionId = response.data?.session_id;
         if (!sessionId) throw new Error('Upload response missing session id.');
 
-        const uploadSource = location.state?.uploadSource || null;
+        const uploadSource = routeState?.uploadSource || null;
         const workflow = buildNormalizerWorkflowRecipe('normalized-results', handoffRows);
         const nextUploadSource = uploadSource ? {
           ...uploadSource,
@@ -14032,7 +14155,7 @@ const BomNormalizer = () => {
           let existingDefaultValues = {};
           let existingDefaultValueRules = {};
           let existingColumnCounts = null;
-          const sourceMappingSessionId = location.state?.sourceMappingSessionId
+          const sourceMappingSessionId = routeState?.sourceMappingSessionId
             || sessionStorage.getItem('bomNormalizer.sourceMappingSessionId')
             || '';
           try {
@@ -14109,7 +14232,7 @@ const BomNormalizer = () => {
     fileName,
     headerRowIndex,
     headers,
-    location.state,
+    routeState,
     lowConfidenceOnly,
     navigate,
     normalizationSummary,
@@ -14129,7 +14252,7 @@ const BomNormalizer = () => {
     const passed = (maybeAnswers && maybeAnswers.sheets) ? maybeAnswers : null;
     // Answers may already have been captured on the upload page; asking a
     // second time for the same workbook would just be noise.
-    let answers = passed || bomStructureAnswers || location.state?.bomStructure || null;
+    let answers = passed || bomStructureAnswers || routeState?.bomStructure || null;
 
     // A reused mapping template pre-answers the gate but never replaces it. Its
     // format answers always apply and its identity answers only while they
@@ -14143,7 +14266,7 @@ const BomNormalizer = () => {
     // it — and defaulting it to "new" without asking is how a file meant to
     // revise a BOM silently becomes a second BOM beside it.
     if (!answers) {
-      const saved = location.state?.savedBomStructure
+      const saved = routeState?.savedBomStructure
         || workflowTemplateInUse?.workflow?.bomStructure;
       if (saved) {
         const reconciled = reconcileSavedBomStructure(saved, {
@@ -14189,8 +14312,8 @@ const BomNormalizer = () => {
     formData.append('headerRow', '1');
     // Forward the BOM structure answers captured on the upload page so the
     // session created here keeps them.
-    if (answers || location.state?.bomStructure) {
-      formData.append('bomStructure', JSON.stringify(answers || location.state.bomStructure));
+    if (answers || routeState?.bomStructure) {
+      formData.append('bomStructure', JSON.stringify(answers || routeState.bomStructure));
     }
     const returnSnapshotKey = saveReturnSnapshot('merge-preview');
 
@@ -14205,8 +14328,8 @@ const BomNormalizer = () => {
             fromUpload: true,
             fromBomNormalizer: true,
             normalizerSuggestedMappings: suggestedMappings,
-            uploadSource: location.state?.uploadSource ? {
-              ...location.state.uploadSource,
+            uploadSource: routeState?.uploadSource ? {
+              ...routeState.uploadSource,
               processingPath: 'normalize',
               normalizerWorkflow: buildNormalizerWorkflowRecipe('merge-preview', rows),
             } : null,
@@ -14221,7 +14344,7 @@ const BomNormalizer = () => {
         setCombineError(err.response?.data?.error || err.message || 'Could not continue to BOM Mapping.');
       })
       .finally(() => setBusy(false));
-  }, [buildNormalizerWorkflowRecipe, location.state, mergePreview, mergePreviewFilter, mergeVisibleColumns, navigate, saveReturnSnapshot, workflowTemplateInUse]);
+  }, [buildNormalizerWorkflowRecipe, routeState, mergePreview, mergePreviewFilter, mergeVisibleColumns, navigate, saveReturnSnapshot, workflowTemplateInUse]);
 
   // Sheets offered to the gate: whichever the user actually normalized.
   // A column saying which source each row came from, when there is more than
@@ -16434,8 +16557,8 @@ const BomNormalizer = () => {
   }, []);
 
   const handleBackFromSourceSetup = useCallback(() => {
-    if (location.state?.uploadSource) {
-      const uploadSource = location.state.uploadSource || {};
+    if (routeState?.uploadSource) {
+      const uploadSource = routeState.uploadSource || {};
       const selectedProcessingTemplateId = uploadSource.selectedProcessingTemplateId
         || uploadSource.selectedProcessingTemplate?.id
         || '';
@@ -16518,7 +16641,7 @@ const BomNormalizer = () => {
     setManufacturerMatchOpen(false);
     setMergeStage('preview');
     setError('');
-  }, [handleReset, headerRowIndex, location.state, mergePreview, navigate, selectedSheetNames, sheetName, sheetScope]);
+  }, [handleReset, headerRowIndex, routeState, mergePreview, navigate, selectedSheetNames, sheetName, sheetScope]);
 
   // Changing the source or parser settings invalidates any previous run. Skipped
   // while a restore is applying: that path sets roles/config and currentStep in the
@@ -16639,7 +16762,7 @@ const BomNormalizer = () => {
     });
   }, [config, currentStep, dataRows, headers, parserTouched, roles]);
 
-  const autoReplayTemplate = location.state?.autoReplayProcessingTemplate || null;
+  const autoReplayTemplate = routeState?.autoReplayProcessingTemplate || null;
   if (autoReplayTemplate) {
     const replayName = autoReplayTemplate.name || 'selected template';
     const progressTotal = Number(progress.total || 0);
@@ -16968,12 +17091,38 @@ const BomNormalizer = () => {
     );
   };
 
+  const hasMappingFooter = inlineMode && (currentStep === 1 || currentStep === 2) && configureSubStep === 'mapping';
+  const mappingSectionSx = hasMappingFooter ? { display: 'flex', flexDirection: 'column', flex: '1 1 auto', minHeight: 0 } : undefined;
   return (
     <Box
       className="bom-normalizer-page"
       sx={{
         ...factWisePageShellSx(normalizerTheme.pageTokens),
+        width: configureSubStep === 'review' ? 'calc(100vw - 48px)' : 'min(1240px, calc(100vw - 48px))',
+        maxWidth: configureSubStep === 'review' ? 1800 : undefined,
+        mx: 'auto',
         minHeight: 'calc(100vh - 66px)',
+        ...(inlineMode ? {
+          width: configureSubStep === 'review' ? 'calc(100vw - 48px)' : 'min(1240px, calc(100vw - 48px))',
+          maxHeight: 'calc(100dvh - 92px)',
+          minHeight: 0,
+          overflowY: 'auto',
+          overflowX: 'hidden',
+          ...(hasMappingFooter && {
+            height: 'calc(100dvh - 92px)',
+            boxSizing: 'border-box',
+            display: 'flex',
+            flexDirection: 'column',
+            overflowX: 'hidden',
+            overflowY: 'hidden',
+          }),
+          overscrollBehavior: 'contain',
+          mx: 'auto',
+          my: 2,
+          border: `1px solid ${normalizerTheme.borderStrong}`,
+          borderRadius: '18px',
+          boxShadow: isDarkMode ? '0 18px 48px rgba(0,0,0,0.3)' : '0 18px 48px rgba(15,23,42,0.14)',
+        } : {}),
         '& .MuiPaper-root, & .MuiCard-root': {
           background: `${normalizerTheme.panelGradient} !important`,
           color: `${normalizerTheme.text} !important`,
@@ -17070,17 +17219,35 @@ const BomNormalizer = () => {
         },
       }}
     >
+      {isPreparingLaunchFile && (
+        <Box sx={{
+          position: 'absolute',
+          inset: 0,
+          zIndex: 20,
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: 0.5,
+          backgroundImage: 'radial-gradient(ellipse at center, rgba(0,122,255,0.09), transparent 60%)',
+          bgcolor: normalizerTheme.page,
+        }}>
+          <WorkbookScanner isDarkMode={isDarkMode} />
+          <Typography role="status" sx={{ fontSize: 18, fontWeight: 600, color: normalizerTheme.text }}>Preparing your BOM…</Typography>
+          <Typography sx={{ fontSize: 13, color: normalizerTheme.muted }}>Loading the workbook and its columns</Typography>
+        </Box>
+      )}
       <GlobalStyles styles={normalizerGlobalFieldStyles} />
       <Box sx={factWiseTopShadeSx(isDarkMode)} />
       <Box sx={factWiseGlowSx(normalizerTheme.pageTokens)} />
       <Box sx={factWiseGridOverlaySx(normalizerTheme.pageTokens)} />
 
-      <Box sx={{ position: 'relative', zIndex: 1, px: { xs: 2, lg: 4 }, pt: 2.25, pb: 1.75 }}>
+      <Box sx={{ position: 'relative', zIndex: 1, px: { xs: 2, lg: 4 }, pt: hasMappingFooter ? 1.5 : 2.25, pb: hasMappingFooter ? 0.5 : 1.75, flexShrink: 0 }}>
         <Stack direction={{ xs: 'column', md: 'row' }} alignItems={{ xs: 'flex-start', md: 'center' }} justifyContent="space-between" gap={2}>
-          <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 1.25, minWidth: 0 }}>
-            <IconButton
+          <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: hasMappingFooter ? 0 : 1.25, minWidth: 0 }}>
+            {!(inlineMode && configureSubStep === 'mapping') && <IconButton
               aria-label="Back"
-              onClick={() => navigate(-1)}
+            onClick={() => (inlineMode ? onBackToUpload?.() : navigate(-1))}
               size="small"
               sx={{
                 width: 34,
@@ -17099,7 +17266,7 @@ const BomNormalizer = () => {
               }}
             >
               <ChevronLeftIcon fontSize="small" />
-            </IconButton>
+            </IconButton>}
             <Box sx={{ minWidth: 0 }}>
               <Typography sx={{ fontSize: 20, fontWeight: 600, lineHeight: 1.35, color: normalizerTheme.text }}>BOM Normalizer</Typography>
             <Typography sx={{ mt: 0.35, fontSize: 13, fontWeight: 400, color: normalizerTheme.muted }}>
@@ -17110,7 +17277,7 @@ const BomNormalizer = () => {
         </Stack>
       </Box>
 
-      <Box sx={{ position: 'relative', zIndex: 1, px: { xs: 2, lg: 4 }, pt: 1.5, pb: 3 }}>
+      <Box sx={{ position: 'relative', zIndex: 1, px: { xs: 2, lg: 4 }, pt: 1.5, pb: hasMappingFooter ? 1.25 : 3, ...mappingSectionSx, ...(hasMappingFooter && { overflowY: 'auto' }) }}>
         {/* Animated 4-Step FactWise 4.0 Pipeline Stepper (on page background) */}
         {(() => {
           const animatedStepIndex = (!workbook || currentStep === -1)
@@ -17122,11 +17289,8 @@ const BomNormalizer = () => {
                 : 1;
           const pipelineSteps = [
             { index: 0, label: 'Upload File' },
-            { index: 1, label: 'Map Columns & Values', onClick: (currentStep === 1 || currentStep === 2) ? () => setConfigureSubStep('mapping') : undefined },
-            { index: 2, label: 'FactWise Interpretation', onClick: (currentStep === 1 || currentStep === 2) && Object.values(roles).filter(Boolean).length > 0 ? () => {
-              setConfigureSubStep('review');
-              if (!fieldPatternLoading) handleTeachFieldPattern(null, { openModal: false });
-            } : undefined },
+            { index: 1, label: 'Map Columns & Values', onClick: (currentStep === 1 || currentStep === 2) ? returnToColumnMapping : undefined },
+            { index: 2, label: 'FactWise Interpretation', onClick: (currentStep === 1 || currentStep === 2) && Object.values(roles).filter(Boolean).length > 0 ? advanceToFactwiseInterpretation : undefined },
             { index: 3, label: 'Results' },
           ];
           return (
@@ -17248,14 +17412,39 @@ const BomNormalizer = () => {
 
         {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
         {busy && (
-          <Paper elevation={0} sx={{ mb: 2, p: 1.5, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}>
-            <Typography sx={{ mb: 1, fontSize: 13, fontWeight: 600 }}>
-              Processing workbook{progress.total ? `: ${progress.processed}/${progress.total} rows, ${progress.outputRows} output rows, ${progress.skippedRows || 0} skipped` : '...'}
-            </Typography>
-            <LinearProgress
-              variant={progress.total ? 'determinate' : 'indeterminate'}
-              value={progress.total ? Math.round((progress.processed / progress.total) * 100) : undefined}
-            />
+          <Paper elevation={0} sx={{
+            width: '100%', maxWidth: 600, mx: 'auto', my: { xs: 3, md: 5 }, p: { xs: 2, sm: 3 },
+            boxSizing: 'border-box', border: `1px solid ${normalizerTheme.border}`, borderRadius: '16px',
+            bgcolor: normalizerTheme.paper, color: normalizerTheme.text,
+            '@media (prefers-reduced-motion: reduce)': {
+              '& *, & *::before, & *::after': { animation: 'none !important', transition: 'none !important' },
+            },
+          }}>
+            <Stack direction="row" alignItems="center" spacing={1.5}>
+              <Box aria-hidden="true" sx={{ position: 'relative', width: 40, height: 40, flexShrink: 0, display: 'grid', placeItems: 'center', borderRadius: '50%', bgcolor: isDarkMode ? '#192e46' : '#eef5ff' }}>
+                <CircularProgress size={40} thickness={2} sx={{ position: 'absolute', inset: 0, color: '#007aff' }} />
+                <GridViewIcon sx={{ fontSize: 18, color: isDarkMode ? '#93c5fd' : '#005ecb' }} />
+              </Box>
+              <Box sx={{ minWidth: 0 }}>
+                <Typography role="status" sx={{ fontWeight: 600, fontSize: 18 }}>
+                  {progress.total > 0 && progress.processed >= progress.total ? 'Preparing results' : 'Processing workbook'}
+                </Typography>
+                {fileName && <Typography noWrap sx={{ fontSize: 13, color: normalizerTheme.muted }}>{fileName}</Typography>}
+              </Box>
+            </Stack>
+            {progress.total > 0 && (
+              <Box sx={{ mt: 2.5 }}>
+                <LinearProgress aria-label="Workbook rows processed" variant="determinate"
+                  value={Math.min(100, progress.processed / progress.total * 100)}
+                  sx={{ height: 6, borderRadius: 4, bgcolor: normalizerTheme.border, '& .MuiLinearProgress-bar': { borderRadius: 4, bgcolor: '#007aff' } }}
+                />
+                <Stack direction="row" gap={2} flexWrap="wrap" sx={{ mt: 1.25, fontSize: 12, color: normalizerTheme.muted, fontVariantNumeric: 'tabular-nums' }}>
+                  <span>{progress.processed} of {progress.total} rows processed</span>
+                  <span>{progress.outputRows} output rows</span>
+                  <span>{progress.skippedRows || 0} skipped</span>
+                </Stack>
+              </Box>
+            )}
           </Paper>
         )}
 
@@ -17698,7 +17887,7 @@ const BomNormalizer = () => {
             </Grid>
           </Grid>
         ) : (
-          <Stack spacing={2.5}>
+          <Stack spacing={2.5} sx={mappingSectionSx}>
             {currentStep === -1 && (
               <Paper elevation={0} sx={{ p: 2.25, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}>
                 <Typography sx={{ fontSize: 17, fontWeight: 600 }}>Source setup</Typography>
@@ -17900,12 +18089,13 @@ const BomNormalizer = () => {
             )}
 
             {(currentStep === 1 || currentStep === 2) && (
-              <Stack spacing={2}>
+              <Stack spacing={2} sx={mappingSectionSx}>
                 {/* 1. Collapsible Header & Source Setup (collapsed by default) */}
                 <Paper
                   elevation={0}
                   sx={{
                     border: `1px solid ${normalizerTheme.border}`,
+                    flexShrink: 0,
                     borderRadius: '14px',
                     overflow: 'hidden',
                     bgcolor: normalizerTheme.paper,
@@ -18141,7 +18331,6 @@ const BomNormalizer = () => {
 
                 {/* 2. Column Mapping Table (FactWise 4.0 with green Matched / blue Alternate / yellow Unmapped pills & inline Rule editor) */}
                 {configureSubStep === 'mapping' && (() => {
-                  const sheetBadgeLabel = sheetScope === 'single' ? (sheetName || 'Sheet') : (selectedSheetNames[0] || 'BOM');
                   const headerToRoleKey = {};
                   Object.entries(roles || {}).forEach(([roleKey, mappedHeader]) => {
                     if (mappedHeader) headerToRoleKey[mappedHeader] = roleKey;
@@ -18205,6 +18394,8 @@ const BomNormalizer = () => {
                       sx={{
                         border: `1px solid ${normalizerTheme.border}`,
                         borderRadius: '14px',
+                        ...mappingSectionSx,
+                        ...(hasMappingFooter && { minHeight: 320, '& > .MuiStack-root': { flexShrink: 0 } }),
                         overflow: 'hidden',
                         bgcolor: normalizerTheme.paper,
                         boxShadow: isDarkMode ? 'none' : '0 10px 30px -24px rgba(15, 23, 42, 0.25)',
@@ -18248,7 +18439,7 @@ const BomNormalizer = () => {
                         </Stack>
                       </Stack>
 
-                      <Stack direction={{ xs: 'column', sm: 'row' }} alignItems={{ xs: 'stretch', sm: 'center' }} justifyContent="space-between" gap={1.25} sx={{ px: 2.25, py: 1.25, borderBottom: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}>
+                      <Stack direction={{ xs: 'column', sm: 'row' }} alignItems={{ xs: 'stretch', sm: 'center' }} justifyContent="space-between" gap={1} sx={{ px: 2, py: 0.65, minHeight: 48, boxSizing: 'border-box', borderBottom: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}>
                         <Stack direction="row" alignItems="center" gap={0.75} flexWrap="wrap">
                           {[
                             { key: 'all', label: 'All', count: columnRows.length, dotColor: '#007aff' },
@@ -18257,7 +18448,7 @@ const BomNormalizer = () => {
                           ].map((tab) => {
                             const active = columnMapFilter === tab.key;
                             return (
-                              <Button key={tab.key} size="small" onClick={() => setColumnMapFilter(tab.key)} sx={{ height: 30, px: 1.35, borderRadius: '999px', textTransform: 'none', fontSize: 12, fontWeight: active ? 600 : 500, color: active ? (isDarkMode ? '#93c5fd' : '#007aff') : normalizerTheme.muted, bgcolor: active ? (isDarkMode ? 'rgba(0, 122, 255, 0.16)' : '#eff6ff') : 'transparent', border: `1px solid ${active ? (isDarkMode ? 'rgba(59, 130, 246, 0.4)' : '#bfdbfe') : 'transparent'}` }}>
+                              <Button key={tab.key} size="small" onClick={() => setColumnMapFilter(tab.key)} sx={{ height: 27, minHeight: 27, px: 1.15, borderRadius: '999px', textTransform: 'none', fontSize: 11.5, fontWeight: active ? 600 : 500, color: active ? (isDarkMode ? '#93c5fd' : '#007aff') : normalizerTheme.muted, bgcolor: active ? (isDarkMode ? 'rgba(0, 122, 255, 0.16)' : '#eff6ff') : 'transparent', border: `1px solid ${active ? (isDarkMode ? 'rgba(59, 130, 246, 0.4)' : '#bfdbfe') : 'transparent'}` }}>
                                 <Box component="span" sx={{ width: 6, height: 6, borderRadius: '50%', bgcolor: tab.dotColor, mr: 0.75, flexShrink: 0 }} />
                                 {tab.label}
                                 <Box component="span" sx={{ ml: 0.6, opacity: 0.75, fontSize: 11.5 }}>{tab.count}</Box>
@@ -18265,63 +18456,43 @@ const BomNormalizer = () => {
                             );
                           })}
                         </Stack>
-                        <TextField size="small" value={columnMapSearch} onChange={(e) => setColumnMapSearch(e.target.value)} placeholder="Search columns..." InputProps={{ startAdornment: <InputAdornment position="start"><SearchIcon sx={{ fontSize: 16, color: normalizerTheme.muted }} /></InputAdornment> }} sx={{ width: { xs: '100%', sm: 240 } }} />
+                        <TextField size="small" value={columnMapSearch} onChange={(e) => setColumnMapSearch(e.target.value)} placeholder="Search columns..." InputProps={{ startAdornment: <InputAdornment position="start"><SearchIcon sx={{ fontSize: 15, color: normalizerTheme.muted }} /></InputAdornment> }} sx={{ width: { xs: '100%', sm: 240 }, '& .MuiOutlinedInput-root': { height: 34, fontSize: 12.5, borderRadius: '999px' }, '& .MuiInputBase-input': { py: 0.5 } }} />
                       </Stack>
 
-                      <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: 'minmax(0, 1.35fr) 150px minmax(0, 1.15fr)' }, gap: 1.5, px: 2.25, py: 1.1, borderBottom: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paperSoft }}>
-                        <Typography sx={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.05em', textTransform: 'uppercase', color: normalizerTheme.muted }}>Spreadsheet column & sample data</Typography>
-                        <Typography sx={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.05em', textTransform: 'uppercase', color: normalizerTheme.muted, display: { xs: 'none', md: 'block' } }}>Mapping status</Typography>
-                        <Typography sx={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.05em', textTransform: 'uppercase', color: normalizerTheme.muted, display: { xs: 'none', md: 'block' } }}>FactWise 4.0 target field</Typography>
+                      <Box aria-hidden="true" sx={{ display: { xs: 'none', md: 'grid' }, gridTemplateColumns: 'minmax(220px, 0.8fr) 112px minmax(0, 1.2fr)', gap: 1, px: 2.75, py: 0.75, flexShrink: 0, bgcolor: normalizerTheme.paperSoft, borderBottom: `1px solid ${normalizerTheme.border}`, color: normalizerTheme.muted, fontSize: 11, fontWeight: 600 }}>
+                        <span>Source column</span>
+                        <Box component="span" sx={{ textAlign: 'center' }}>Status</Box>
+                        <span>Map to</span>
                       </Box>
-
-                      <Box sx={{ maxHeight: 460, overflowY: 'auto' }}>
-                        {filteredColumnRows.map((row, rowIdx) => {
+                      <Box role="region" aria-label="Column mapping list" tabIndex={0} sx={{ flex: '1 1 0px', minHeight: hasMappingFooter ? 96 : 0, maxHeight: hasMappingFooter ? undefined : 460, overflowY: 'auto', overscrollBehaviorY: 'contain', scrollbarGutter: 'stable', px: 1.5, py: 0.5 }}>
+                        <Box sx={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', alignItems: 'start', gap: 0 }}>
+                        {filteredColumnRows.map((row) => {
                           const targetField = ROLE_FIELDS.find((f) => f.key === row.roleKey) || null;
                           const rowConditionalRule = targetField ? config.conditionalFieldMappings?.[targetField.key] : null;
                           const isRowRuleExpanded = Boolean(targetField && conditionalMappingField?.key === targetField.key);
-                          const rowAccentColor = row.isAlternate ? '#007aff' : row.isMatched ? '#10b981' : '#f59e0b';
-                          const rowHoverBorderColor = row.isAlternate ? '#0062cc' : row.isMatched ? '#059669' : '#d97706';
-                          const rowBg = row.isAlternate
-                            ? (isDarkMode ? 'rgba(0, 122, 255, 0.065)' : '#f2f8ff')
-                            : row.isMatched
-                              ? (isDarkMode ? 'rgba(16, 185, 129, 0.055)' : '#f2fdf7')
-                              : (isDarkMode ? 'rgba(245, 158, 11, 0.045)' : '#fffdf5');
-                          const rowHoverBg = row.isAlternate
-                            ? (isDarkMode ? 'rgba(0, 122, 255, 0.11)' : '#e6f2ff')
-                            : row.isMatched
-                              ? (isDarkMode ? 'rgba(16, 185, 129, 0.1)' : '#e8fbf1')
-                              : (isDarkMode ? 'rgba(245, 158, 11, 0.09)' : '#fef9e7');
                           return (
                             <Box
                               key={`col-map-${row.header}`}
                               sx={{
                                 display: 'grid',
-                                gridTemplateColumns: { xs: '1fr', md: 'minmax(0, 1.35fr) 150px minmax(0, 1.15fr)' },
+                                gridTemplateColumns: { xs: '1fr', md: 'minmax(220px, 0.8fr) 112px minmax(0, 1.2fr)' },
                                 alignItems: 'center',
-                                gap: 1.5,
-                                px: 2.25,
-                                py: 1.35,
+                                gap: 1,
+                                px: 1.25,
+                                py: 0.65,
                                 borderBottom: `1px solid ${normalizerTheme.border}`,
-                                borderLeft: `3.5px solid ${rowAccentColor}`,
-                                bgcolor: rowBg,
-                                animation: `fwRowFadeIn 0.28s cubic-bezier(0.16, 1, 0.3, 1) ${Math.min(rowIdx * 25, 300)}ms both`,
-                                transition: 'background-color 0.16s ease, border-left-color 0.2s ease',
-                                '&:hover': {
-                                  bgcolor: rowHoverBg,
-                                  borderLeftColor: rowHoverBorderColor,
-                                  '& .fw-map-arrow': { transform: 'translateX(4px)', color: '#007aff' },
-                                },
+                                '&:last-child': { borderBottom: 0 },
+                                '&:hover, &:focus-within': { bgcolor: normalizerTheme.paperSoft },
                               }}
                             >
-                              <Stack direction="row" alignItems="center" gap={1.25} sx={{ minWidth: 0 }}>
-                                <Chip size="small" label={sheetBadgeLabel} sx={{ height: 22, maxWidth: 96, fontSize: 11, fontWeight: 500, borderRadius: '6px', bgcolor: isDarkMode ? 'rgba(148, 163, 184, 0.14)' : '#f1f5f9', color: isDarkMode ? '#cbd5e1' : '#475569', flexShrink: 0 }} />
+                              <Stack direction="row" alignItems="center" gap={1.1} sx={{ minWidth: 0 }}>
                                 <Box sx={{ minWidth: 0 }}>
                                   <Typography noWrap sx={{ fontSize: 13.5, fontWeight: 600, color: normalizerTheme.text, lineHeight: 1.3 }}>{row.header}</Typography>
                                   <Typography noWrap sx={{ fontSize: 11.5, color: normalizerTheme.muted, mt: 0.2 }}>{row.samples.length ? `Sample: ${row.samples.join(' · ')}` : 'No sample values detected'}</Typography>
                                 </Box>
                               </Stack>
 
-                              <Stack direction="row" alignItems="center" justifyContent="space-between" gap={1}>
+                              <Stack direction="row" alignItems="center" justifyContent="center" gap={1} sx={{ gridColumn: { xs: 'auto', md: '2' }, minWidth: 0 }}>
                                 {row.isAlternate ? (
                                   <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5, px: 1.15, py: 0.38, borderRadius: '999px', bgcolor: isDarkMode ? 'rgba(0, 122, 255, 0.2)' : '#dbeafe', border: `1px solid ${isDarkMode ? 'rgba(59, 130, 246, 0.45)' : '#93c5fd'}`, animation: 'fwBadgePop 0.28s cubic-bezier(0.16, 1, 0.3, 1) both' }}>
                                     <CheckCircleOutlineIcon sx={{ fontSize: 13.5, color: isDarkMode ? '#60a5fa' : '#007aff' }} />
@@ -18337,10 +18508,9 @@ const BomNormalizer = () => {
                                     <Typography sx={{ fontSize: 11.5, fontWeight: 600, color: isDarkMode ? '#fcd34d' : '#b45309', lineHeight: 1 }}>Unmapped</Typography>
                                   </Box>
                                 )}
-                                <Typography className="fw-map-arrow" sx={{ color: normalizerTheme.muted, fontSize: 15, display: { xs: 'none', md: 'block' }, transition: 'transform 0.18s ease, color 0.18s ease' }}>→</Typography>
                               </Stack>
 
-                              <Stack direction="row" alignItems="center" gap={1}>
+                              <Stack direction="row" alignItems="center" gap={1} sx={{ gridColumn: { xs: 'auto', md: '3' }, minWidth: 0 }}>
                                 <FormControl fullWidth size="small">
                                   <Select
                                     displayEmpty
@@ -18358,7 +18528,7 @@ const BomNormalizer = () => {
                                       const target = ROLE_FIELDS.find((f) => f.key === selected);
                                       return <Typography sx={{ fontSize: 12.5, color: normalizerTheme.text, fontWeight: 500 }}>BOM · {target?.label || selected}</Typography>;
                                     }}
-                                    sx={{ height: 36, borderRadius: '8px', bgcolor: normalizerTheme.paper }}
+                                    sx={{ height: 34, borderRadius: '8px', bgcolor: normalizerTheme.paper }}
                                   >
                                     <MenuItem value=""><Typography sx={{ fontSize: 12.5, color: normalizerTheme.muted }}>{row.altLabel ? `Keep as ${row.altLabel}` : 'Do not map (Ignore)'}</Typography></MenuItem>
                                     {ROLE_FIELDS.map((field) => (
@@ -18424,18 +18594,19 @@ const BomNormalizer = () => {
                                       </Typography>
                                     </Box>
                                   )}
-                                  <Collapse in={isRowRuleExpanded} unmountOnExit>
-                                    <Paper elevation={0} sx={{ p: 2, borderRadius: '10px', border: `1px solid ${isDarkMode ? 'rgba(59, 130, 246, 0.35)' : '#bfdbfe'}`, bgcolor: isDarkMode ? 'rgba(15, 23, 42, 0.55)' : '#f8fafc' }}>
-                                      <Stack direction="row" alignItems="flex-start" justifyContent="space-between" gap={1} sx={{ mb: 1.5 }}>
+                                  <Dialog open={isRowRuleExpanded} onClose={closeConditionalFieldMapping} fullWidth maxWidth="sm"
+                                    aria-label={`Fallback rule for ${targetField.label}`}
+                                    PaperProps={{ sx: { borderRadius: '14px', bgcolor: normalizerTheme.paper, color: normalizerTheme.text, overflow: 'hidden' } }}>
+                                      <Stack direction="row" alignItems="flex-start" justifyContent="space-between" gap={1} sx={{ p: 2, flexShrink: 0, borderBottom: `1px solid ${normalizerTheme.border}` }}>
                                         <Box>
-                                          <Typography sx={{ fontSize: 13.5, fontWeight: 600, color: normalizerTheme.text }}>Fallback rule — {targetField.label}</Typography>
+                                          <Typography sx={{ fontSize: 17, fontWeight: 600, color: normalizerTheme.text }}>Fallback rule — {targetField.label}</Typography>
                                           <Typography sx={{ mt: 0.2, fontSize: 12, color: normalizerTheme.muted }}>Automatically pull from a backup column when a cell is empty or matches a condition.</Typography>
                                         </Box>
-                                        <IconButton size="small" onClick={closeConditionalFieldMapping} sx={{ p: 0.5, color: normalizerTheme.muted, '&:hover': { bgcolor: isDarkMode ? 'rgba(239, 68, 68, 0.16)' : '#fee2e2', color: isDarkMode ? '#f87171' : '#dc2626' } }}>
+                                        <IconButton aria-label="Close rule editor" size="small" onClick={closeConditionalFieldMapping} sx={{ p: 0.5, color: normalizerTheme.muted, '&:hover': { bgcolor: isDarkMode ? 'rgba(239, 68, 68, 0.16)' : '#fee2e2', color: isDarkMode ? '#f87171' : '#dc2626' } }}>
                                           <CloseIcon sx={{ fontSize: 16 }} />
                                         </IconButton>
                                       </Stack>
-                                      <Stack gap={1.5}>
+                                      <Stack gap={2.5} sx={{ p: 2.5, minHeight: 0, overflowY: 'auto' }}>
                                         <Stack direction={{ xs: 'column', sm: 'row' }} gap={1.25} alignItems={{ sm: 'flex-end' }}>
                                           <Chip label="WHEN" size="small" sx={{ width: 60, height: 22, mb: { sm: '7px' }, flexShrink: 0, fontSize: 10.5, fontWeight: 600, bgcolor: isDarkMode ? 'rgba(59, 130, 246, 0.16)' : '#dbeafe', color: isDarkMode ? '#93c5fd' : '#1d4ed8' }} />
                                           <FormControl fullWidth size="small"><InputLabel>Check client column</InputLabel><Select label="Check client column" value={conditionalMappingDraft.conditionColumn} onChange={(e) => setConditionalMappingDraft((p) => ({ ...p, conditionColumn: e.target.value }))}>{visibleSourceHeaders.map((h) => <MenuItem key={h} value={h}>{h}</MenuItem>)}</Select></FormControl>
@@ -18452,26 +18623,27 @@ const BomNormalizer = () => {
                                           <Chip label="ELSE" size="small" sx={{ width: 60, height: 22, mb: { sm: '7px' }, flexShrink: 0, fontSize: 10.5, fontWeight: 600, bgcolor: isDarkMode ? 'rgba(148, 163, 184, 0.16)' : '#e2e8f0', color: isDarkMode ? '#cbd5e1' : '#475569' }} />
                                           <FormControl fullWidth size="small"><InputLabel>Otherwise use client column</InputLabel><Select label="Otherwise use client column" value={conditionalMappingDraft.elseColumn} onChange={(e) => setConditionalMappingDraft((p) => ({ ...p, elseColumn: e.target.value }))}>{visibleSourceHeaders.map((h) => <MenuItem key={h} value={h}>{h}</MenuItem>)}</Select></FormControl>
                                         </Stack>
-                                        <Stack direction="row" alignItems="center" justifyContent="space-between" gap={1}>
+                                        </Stack>
+                                      <Stack direction="row" alignItems="center" justifyContent="space-between" gap={1} sx={{ px: 2, py: 1.5, flexShrink: 0, borderTop: `1px solid ${normalizerTheme.border}` }}>
                                           <Box>{rowConditionalRule && <Button size="small" color="error" onClick={removeConditionalFieldMapping} sx={{ textTransform: 'none', fontSize: 12 }}>Remove rule</Button>}</Box>
                                           <Stack direction="row" gap={1}>
                                             <Button size="small" variant="outlined" onClick={closeConditionalFieldMapping} sx={{ textTransform: 'none', fontSize: 12.5, height: 32, px: 2, borderRadius: '999px', borderColor: normalizerTheme.borderStrong, color: normalizerTheme.text, '&:hover': { bgcolor: isDarkMode ? 'rgba(239, 68, 68, 0.16)' : '#fee2e2', color: isDarkMode ? '#f87171' : '#dc2626', borderColor: '#fca5a5' } }}>Cancel</Button>
                                             <Button size="small" variant="contained" onClick={saveConditionalFieldMapping} sx={{ textTransform: 'none', fontSize: 12.5, height: 32, px: 2.25, borderRadius: '999px', bgcolor: '#007aff', boxShadow: 'none', '&:hover': { bgcolor: '#0062cc', boxShadow: 'none' } }}>Save rule</Button>
                                           </Stack>
                                         </Stack>
-                                      </Stack>
-                                    </Paper>
-                                  </Collapse>
+                                  </Dialog>
                                 </Box>
                               )}
                             </Box>
                           );
                         })}
+                        </Box>
                       </Box>
 
                       {/* Bottom Action Bar */}
+                      <Portal disablePortal={!hasMappingFooter} container={() => mappingFooterRef.current}>
                       <Stack direction={{ xs: 'column', sm: 'row' }} alignItems={{ xs: 'stretch', sm: 'center' }} justifyContent="space-between" gap={1.25} sx={{ px: 2.25, py: 1.5, borderTop: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paperSoft }}>
-                        <ShadcnButton variant="outline" onClick={handleBackFromSourceSetup} disabled={busy} className="h-9 px-4 text-xs">
+                        <ShadcnButton variant="outline" onClick={onBackToUpload || handleBackFromSourceSetup} disabled={busy} className="h-9 px-4 text-xs">
                           ← Back
                         </ShadcnButton>
                         <Stack direction="row" alignItems="center" gap={1.25}>
@@ -18480,12 +18652,7 @@ const BomNormalizer = () => {
                           </Button>
                           <Button
                             variant="contained"
-                            onClick={() => {
-                              setConfigureSubStep('review');
-                              if (!fieldPatternLoading) {
-                                handleTeachFieldPattern(null, { openModal: false });
-                              }
-                            }}
+                            onClick={advanceToFactwiseInterpretation}
                             disabled={matchedCount === 0}
                             sx={{ textTransform: 'none', fontSize: 13, fontWeight: 500, height: 36, px: 2.5, borderRadius: '999px', bgcolor: '#007aff', boxShadow: '0 4px 14px -4px rgba(0, 122, 255, 0.45)', '&:hover': { bgcolor: '#0062cc', transform: 'translateY(-1px)' } }}
                           >
@@ -18493,6 +18660,7 @@ const BomNormalizer = () => {
                           </Button>
                         </Stack>
                       </Stack>
+                      </Portal>
                     </Paper>
                   );
                 })()}
@@ -18517,42 +18685,13 @@ const BomNormalizer = () => {
                           alignItems: 'center',
                           justifyContent: 'center',
                           overflow: 'hidden',
-                          '@keyframes fwInterpretPulse': {
-                            '0%': { transform: 'scale(0.92)', opacity: 0.65 },
-                            '70%': { transform: 'scale(1.24)', opacity: 0 },
-                            '100%': { transform: 'scale(1.24)', opacity: 0 },
-                          },
-                          '@keyframes fwInterpretScan': {
-                            '0%': { top: '10%', opacity: 0.25 },
-                            '50%': { top: '80%', opacity: 1 },
-                            '100%': { top: '10%', opacity: 0.25 },
-                          },
                           '@keyframes fwShimmerRow': {
                             '0%, 100%': { opacity: 0.45 },
                             '50%': { opacity: 0.9 },
                           },
                         }}
                       >
-                        {/* Animated Pattern Scanner Visual */}
-                        <Box sx={{ position: 'relative', width: 88, height: 88, display: 'flex', alignItems: 'center', justifyContent: 'center', mb: 2.25 }}>
-                          <Box sx={{ position: 'absolute', inset: 0, borderRadius: '50%', border: '2px solid rgba(0, 122, 255, 0.32)', animation: 'fwInterpretPulse 2s cubic-bezier(0.16, 1, 0.3, 1) infinite' }} />
-                          <Box sx={{ position: 'absolute', inset: 8, borderRadius: '50%', bgcolor: isDarkMode ? 'rgba(0, 122, 255, 0.14)' : '#eff6ff', border: `1.5px solid ${isDarkMode ? 'rgba(96, 165, 250, 0.35)' : '#bfdbfe'}` }} />
-                          <Box sx={{ position: 'relative', width: 46, height: 42, borderRadius: '8px', bgcolor: isDarkMode ? '#1e293b' : '#ffffff', border: '1.5px solid #007aff', boxShadow: '0 8px 22px -6px rgba(0, 122, 255, 0.4)', display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: '5px', px: 0.9, overflow: 'hidden' }}>
-                            <Stack direction="row" gap={0.5}>
-                              <Box sx={{ height: 4, width: '35%', borderRadius: 2, bgcolor: '#10b981' }} />
-                              <Box sx={{ height: 4, width: '65%', borderRadius: 2, bgcolor: '#007aff', opacity: 0.75 }} />
-                            </Stack>
-                            <Stack direction="row" gap={0.5}>
-                              <Box sx={{ height: 3.5, width: '45%', borderRadius: 2, bgcolor: isDarkMode ? '#475569' : '#cbd5e1' }} />
-                              <Box sx={{ height: 3.5, width: '55%', borderRadius: 2, bgcolor: '#10b981', opacity: 0.65 }} />
-                            </Stack>
-                            <Stack direction="row" gap={0.5}>
-                              <Box sx={{ height: 3.5, width: '30%', borderRadius: 2, bgcolor: isDarkMode ? '#475569' : '#cbd5e1' }} />
-                              <Box sx={{ height: 3.5, width: '70%', borderRadius: 2, bgcolor: isDarkMode ? '#475569' : '#cbd5e1' }} />
-                            </Stack>
-                            <Box sx={{ position: 'absolute', left: 0, right: 0, height: 2.5, bgcolor: '#007aff', boxShadow: '0 0 8px 2px rgba(0, 122, 255, 0.65)', animation: 'fwInterpretScan 1.7s ease-in-out infinite' }} />
-                          </Box>
-                        </Box>
+                        <WorkbookScanner isDarkMode={isDarkMode} />
 
                         <Typography sx={{ fontSize: 16.5, fontWeight: 600, letterSpacing: '-0.015em', color: normalizerTheme.text }}>
                           Analyzing patterns & generating FactWise interpretations
@@ -18620,7 +18759,7 @@ const BomNormalizer = () => {
                         hideBottomPagination={false}
                         onViewPatterns={() => { setFieldPatternReviewStage('patterns'); setFieldPatternReviewOpen(true); }}
                         onApplyPatterns={handleApplyFieldPatternReview}
-                        onBack={() => setConfigureSubStep('mapping')}
+                        onBack={returnToColumnMapping}
                         onConfigureMapping={() => setMappingDrawerOpen(true)}
                         mappedColumnCount={Object.values(roles).filter(Boolean).length}
                       />
@@ -18632,7 +18771,7 @@ const BomNormalizer = () => {
                 <Dialog
                   open={mappingDrawerOpen}
                   onClose={() => setMappingDrawerOpen(false)}
-                  maxWidth="lg"
+                  maxWidth="md"
                   fullWidth
                   PaperProps={{ sx: { borderRadius: '14px', bgcolor: normalizerTheme.paper, color: normalizerTheme.text, overflow: 'hidden', maxHeight: '88vh' } }}
                 >
@@ -18768,21 +18907,22 @@ const BomNormalizer = () => {
                     );
                   })}
                 </Grid>
-                <Box>
-                  <Grid container columnSpacing={2.25} rowSpacing={1.5}>
-                    <Grid item xs={12} sm={6}>
+                <Grid container spacing={2} sx={{ mb: 2 }}>
+                    <Grid item xs={12} md={6}>
                       <FormControl fullWidth size="small">
                         <InputLabel>Part identifiers are arranged</InputLabel>
                         <Select
                           disabled={bomLayoutActive}
                           value={currentIdentityLayout}
                           label="Part identifiers are arranged"
+                          onClose={() => setDetectedSetupPreview((current) => ({ ...current, option: null }))}
                           renderValue={(selected) => {
                             const opt = IDENTITY_LAYOUT_OPTIONS.find((o) => o.value === selected);
                             return opt?.label || selected;
                           }}
                           onChange={(event) => {
                             const identityLayout = event.target.value;
+                            setDetectedSetupPreview({ kind: 'identity', option: availableStructureOptions.find((option) => option.value === identityLayout) || null });
                             setParserTouched(true);
                             setConfig((prev) => ({
                               ...prev,
@@ -18795,6 +18935,7 @@ const BomNormalizer = () => {
                             <MenuItem
                               key={option.value}
                               value={option.value}
+                              onMouseEnter={() => setDetectedSetupPreview({ kind: 'identity', option })}
                               sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1 }}
                             >
                               <Box sx={{ flex: 1, minWidth: 0, whiteSpace: 'normal' }}>{option.label}</Box>
@@ -18818,27 +18959,38 @@ const BomNormalizer = () => {
                         </FormHelperText>
                       </FormControl>
                     </Grid>
-                    <Grid item xs={12} sm={6}>
+                    <Grid item xs={12} md={6}>
+                      <DetectedSetupLivePreview
+                        title="Part identifiers"
+                        option={(detectedSetupPreview.kind === 'identity' && detectedSetupPreview.option) || selectedStructureOption}
+                        normalizerTheme={normalizerTheme}
+                        isDarkMode={isDarkMode}
+                      />
+                    </Grid>
+                    <Grid item xs={12} md={6}>
                       <FormControl fullWidth size="small">
                         <InputLabel>How identifiers are grouped across rows</InputLabel>
                         <Select
                           disabled={bomLayoutActive}
                           value={config.rowPlacement || 'same_row'}
                           label="How identifiers are grouped across rows"
+                          onClose={() => setDetectedSetupPreview((current) => ({ ...current, option: null }))}
                           renderValue={(selected) => {
                             const opt = ROW_PLACEMENT_OPTIONS.find((o) => o.value === selected);
                             return getRowPlacementDisplayLabel(opt) || selected;
                           }}
                           onChange={(event) => {
+                            const rowPlacement = event.target.value;
+                            setDetectedSetupPreview({ kind: 'rows', option: ROW_PLACEMENT_OPTIONS.find((option) => option.value === rowPlacement) || null });
                             setParserTouched(true);
                             setConfig((prev) => ({
                               ...prev,
-                              rowPlacement: event.target.value,
+                              rowPlacement,
                             }));
                           }}
                         >
                           {ROW_PLACEMENT_OPTIONS.map((option) => (
-                            <MenuItem key={option.value} value={option.value}>
+                            <MenuItem key={option.value} value={option.value} onMouseEnter={() => setDetectedSetupPreview({ kind: 'rows', option })}>
                               <Typography sx={{ fontSize: 13.5, fontWeight: 500, whiteSpace: 'normal' }}>
                                 {getRowPlacementDisplayLabel(option)}
                               </Typography>
@@ -18853,46 +19005,29 @@ const BomNormalizer = () => {
                         </FormHelperText>
                       </FormControl>
                     </Grid>
-                    <Grid item xs={12}>
-                      {selectedRowPlacementOption?.example && (
-                        <Box sx={{ mt: 0.3, p: { xs: 1.25, sm: 1.6 }, border: `1px solid ${normalizerTheme.border}`, borderRadius: '12px', bgcolor: isDarkMode ? 'rgba(15, 23, 42, 0.32)' : '#f8fafc' }}>
-                          <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} alignItems={{ xs: 'stretch', sm: 'center' }} justifyContent="space-between">
-                            <Box sx={{ minWidth: 175, maxWidth: { sm: 255 } }}>
-                              <Typography sx={{ fontSize: 12.5, fontWeight: 600, color: normalizerTheme.text }}>Example: how rows are grouped</Typography>
-                              <Typography sx={{ mt: 0.35, fontSize: 11.5, lineHeight: 1.45, color: normalizerTheme.muted }}>{selectedRowPlacementOption.example.caption}</Typography>
-                            </Box>
-                            <Box sx={{ flex: 1, minWidth: 0, overflowX: 'auto' }}>
-                              <Box component="table" aria-label="Example source rows" sx={{ borderCollapse: 'separate', borderSpacing: 2, mx: 'auto', fontSize: 11.5, '& td': { border: `1px solid ${normalizerTheme.border}`, borderRadius: '6px', px: 1, py: 0.65, whiteSpace: 'nowrap', bgcolor: normalizerTheme.paper }, '& tr:first-of-type td': { fontWeight: 600, color: normalizerTheme.muted, bgcolor: isDarkMode ? 'rgba(51, 65, 85, .5)' : '#eef2f7' }, '& tr:not(:first-of-type) td:nth-of-type(2)': { animation: 'bomRowGuide 3.6s ease-in-out infinite', animationDelay: '0s' }, '& tr:not(:first-of-type) td:nth-of-type(3)': { animation: 'bomRowGuide 3.6s ease-in-out infinite', animationDelay: '.35s' }, '& tr:not(:first-of-type) td:nth-of-type(4)': { animation: 'bomRowGuide 3.6s ease-in-out infinite', animationDelay: '.7s' }, '@keyframes bomRowGuide': { '0%, 18%, 100%': { boxShadow: 'none', borderColor: normalizerTheme.border }, '7%, 13%': { boxShadow: `0 0 0 2px ${isDarkMode ? 'rgba(59,130,246,.4)' : 'rgba(0,122,255,.18)'}`, borderColor: isDarkMode ? '#60a5fa' : '#60a5fa' } }, '@media (prefers-reduced-motion: reduce)': { '& td': { animation: 'none !important' } } }}>
-                                <tbody>
-                                  {selectedRowPlacementOption.example.rows.map((row, rowIndex) => (
-                                    <tr key={`${selectedRowPlacementOption.value}-${rowIndex}`}>
-                                      {row.map((cell, cellIndex) => (
-                                        <Box component="td" key={`${cellIndex}-${cell.text}`} sx={{ color: cell.role === 'key' ? (isDarkMode ? '#93c5fd' : '#1d4ed8') : cell.role === 'primary' ? (isDarkMode ? '#6ee7b7' : '#047857') : normalizerTheme.text, fontWeight: cell.role === 'header' ? 600 : 400 }}>
-                                          {cell.text || '—'}
-                                        </Box>
-                                      ))}
-                                    </tr>
-                                  ))}
-                                </tbody>
-                              </Box>
-                            </Box>
-                          </Stack>
-                        </Box>
-                      )}
+                    <Grid item xs={12} md={6}>
+                      <DetectedSetupLivePreview
+                        title="Row grouping"
+                        option={(detectedSetupPreview.kind === 'rows' && detectedSetupPreview.option) || selectedRowPlacementOption}
+                        normalizerTheme={normalizerTheme}
+                        isDarkMode={isDarkMode}
+                      />
                     </Grid>
-                    <Grid item xs={12} sm={6}>
+                    <Grid item xs={12} md={6}>
                       <FormControl fullWidth size="small">
                         <InputLabel>How are alternate parts listed?</InputLabel>
                         <Select
                           disabled={bomLayoutActive}
                           value={config.alternateLayout}
                           label="How are alternate parts listed?"
+                          onClose={() => setDetectedSetupPreview((current) => ({ ...current, option: null }))}
                           renderValue={(selected) => {
                             const opt = ALTERNATE_LAYOUT_OPTIONS.find((o) => o.value === selected);
                             return opt?.label || selected;
                           }}
                           onChange={(event) => {
                             const nextLayout = event.target.value;
+                            setDetectedSetupPreview({ kind: 'alternates', option: ALTERNATE_LAYOUT_OPTIONS.find((option) => option.value === nextLayout) || null });
                             setParserTouched(true);
                             setConfig((prev) => ({
                               ...prev,
@@ -18928,7 +19063,7 @@ const BomNormalizer = () => {
                           }}
                         >
                           {ALTERNATE_LAYOUT_OPTIONS.map((option) => (
-                            <MenuItem key={option.value} value={option.value}>
+                            <MenuItem key={option.value} value={option.value} onMouseEnter={() => setDetectedSetupPreview({ kind: 'alternates', option })}>
                               <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1, width: '100%', minWidth: 0 }}>
                                 <Typography noWrap sx={{ fontSize: 14, fontWeight: 600 }}>
                                   {option.label}
@@ -18973,8 +19108,115 @@ const BomNormalizer = () => {
                         </Select>
                       </FormControl>
                     </Grid>
+                    <Grid item xs={12} md={6}>
+                      <DetectedSetupLivePreview
+                        title="Alternate parts"
+                        option={(detectedSetupPreview.kind === 'alternates' && detectedSetupPreview.option) || selectedAlternateOption}
+                        normalizerTheme={normalizerTheme}
+                        isDarkMode={isDarkMode}
+                      />
+                    </Grid>
+                </Grid>
+                <Box sx={{ minWidth: 0 }}>
+                  <Grid container columnSpacing={2} rowSpacing={1.5}>
+                    <Grid item xs={12} sx={{ display: 'none' }}>
+                      {selectedRowPlacementOption?.example && (
+                        <Box sx={{ mt: 0.3, p: { xs: 1.25, sm: 1.6 }, border: `1px solid ${normalizerTheme.border}`, borderRadius: '12px', bgcolor: isDarkMode ? 'rgba(15, 23, 42, 0.32)' : '#f8fafc' }}>
+                          <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} alignItems={{ xs: 'stretch', sm: 'center' }} justifyContent="space-between">
+                            <Box sx={{ minWidth: 175, maxWidth: { sm: 255 } }}>
+                              <Typography sx={{ fontSize: 12.5, fontWeight: 600, color: normalizerTheme.text }}>Example: how rows are grouped</Typography>
+                              <Typography sx={{ mt: 0.35, fontSize: 11.5, lineHeight: 1.45, color: normalizerTheme.muted }}>{selectedRowPlacementOption.example.caption}</Typography>
+                            </Box>
+                            <Box sx={{ flex: 1, minWidth: 0, overflowX: 'auto' }}>
+                              <Box component="table" aria-label="Example source rows" sx={{ borderCollapse: 'separate', borderSpacing: 2, mx: 'auto', fontSize: 11.5, '& td': { border: `1px solid ${normalizerTheme.border}`, borderRadius: '6px', px: 1, py: 0.65, whiteSpace: 'nowrap', bgcolor: normalizerTheme.paper }, '& tr:first-of-type td': { fontWeight: 600, color: normalizerTheme.muted, bgcolor: isDarkMode ? 'rgba(51, 65, 85, .5)' : '#eef2f7' }, '& tr:not(:first-of-type) td:nth-of-type(2)': { animation: 'bomRowGuide 3.6s ease-in-out infinite', animationDelay: '0s' }, '& tr:not(:first-of-type) td:nth-of-type(3)': { animation: 'bomRowGuide 3.6s ease-in-out infinite', animationDelay: '.35s' }, '& tr:not(:first-of-type) td:nth-of-type(4)': { animation: 'bomRowGuide 3.6s ease-in-out infinite', animationDelay: '.7s' }, '@keyframes bomRowGuide': { '0%, 18%, 100%': { boxShadow: 'none', borderColor: normalizerTheme.border }, '7%, 13%': { boxShadow: `0 0 0 2px ${isDarkMode ? 'rgba(59,130,246,.4)' : 'rgba(0,122,255,.18)'}`, borderColor: isDarkMode ? '#60a5fa' : '#60a5fa' } }, '@media (prefers-reduced-motion: reduce)': { '& td': { animation: 'none !important' } } }}>
+                                <tbody>
+                                  {selectedRowPlacementOption.example.rows.map((row, rowIndex) => (
+                                    <tr key={`${selectedRowPlacementOption.value}-${rowIndex}`}>
+                                      {row.map((cell, cellIndex) => (
+                                        <Box component="td" key={`${cellIndex}-${cell.text}`} sx={{ color: cell.role === 'key' ? (isDarkMode ? '#93c5fd' : '#1d4ed8') : cell.role === 'primary' ? (isDarkMode ? '#6ee7b7' : '#047857') : normalizerTheme.text, fontWeight: cell.role === 'header' ? 600 : 400 }}>
+                                          {cell.text || '—'}
+                                        </Box>
+                                      ))}
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </Box>
+                            </Box>
+                          </Stack>
+                        </Box>
+                      )}
+                    </Grid>
+                    {showAlternateInheritanceControl && (
+                      <Grid item xs={12}>
+                        <FormControl fullWidth size="small">
+                          <InputLabel>Autofill from primary</InputLabel>
+                          <Select
+                            multiple
+                            displayEmpty
+                            value={selectedAlternateInheritFields}
+                            label="Autofill from primary"
+                            renderValue={(selected) => {
+                              const labels = selected
+                                .map((field) => ALTERNATE_INHERIT_FIELD_OPTIONS.find((option) => option.value === field)?.label)
+                                .filter(Boolean);
+                              if (!labels.length) return 'None';
+                              if (labels.length <= 2) return labels.join(', ');
+                              return `${labels.slice(0, 2).join(', ')} +${labels.length - 2}`;
+                            }}
+                            onChange={(event) => {
+                              const rawFields = typeof event.target.value === 'string'
+                                ? event.target.value.split(',')
+                                : event.target.value;
+                              const shouldToggleAll = rawFields.includes(ALTERNATE_INHERIT_SELECT_ALL_VALUE);
+                              const nextFields = shouldToggleAll
+                                ? (allAlternateInheritFieldsSelected ? [] : allAlternateInheritFieldValues)
+                                : rawFields;
+                              setAlternateInheritFieldsTouched(true);
+                              setParserTouched(true);
+                              setConfig((prev) => ({
+                                ...prev,
+                                alternateInheritFields: nextFields,
+                              }));
+                            }}
+                          >
+                            <MenuItem value={ALTERNATE_INHERIT_SELECT_ALL_VALUE}>
+                              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, width: '100%', minWidth: 0 }}>
+                                <Checkbox
+                                  checked={allAlternateInheritFieldsSelected}
+                                  indeterminate={someAlternateInheritFieldsSelected}
+                                />
+                                <ListItemText
+                                  primary={allAlternateInheritFieldsSelected ? 'Clear all' : 'Select all'}
+                                  sx={{ minWidth: 0 }}
+                                />
+                              </Box>
+                            </MenuItem>
+                            {ALTERNATE_INHERIT_FIELD_OPTIONS.map((option) => (
+                              <MenuItem key={option.value} value={option.value}>
+                                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, width: '100%', minWidth: 0 }}>
+                                  <Checkbox checked={selectedAlternateInheritFields.includes(option.value)} />
+                                  <ListItemText primary={option.label} sx={{ minWidth: 0 }} />
+                                  <Tooltip
+                                    arrow
+                                    placement="right"
+                                    title="Alternate rows use the primary row value for this field."
+                                  >
+                                    <InfoOutlinedIcon
+                                      fontSize="small"
+                                      sx={{ color: 'text.secondary', opacity: 0.7, flexShrink: 0, '&:hover': { opacity: 1 } }}
+                                      onClick={(event) => event.stopPropagation()}
+                                      onMouseDown={(event) => event.stopPropagation()}
+                                    />
+                                  </Tooltip>
+                                </Box>
+                              </MenuItem>
+                            ))}
+                          </Select>
+                        </FormControl>
+                      </Grid>
+                    )}
                     {config.alternateLayout === 'same_group_rows' && !bomLayoutActive && (
-                      <Grid item xs={12} sm={6}>
+                      <Grid item xs={12}>
                         <FormControl fullWidth size="small" error={groupKeyRequired}>
                           <InputLabel>Group key column</InputLabel>
                           <Select
@@ -18997,7 +19239,7 @@ const BomNormalizer = () => {
                       </Grid>
                     )}
                     {config.alternateLayout === 'following_rows' && !bomLayoutActive && (
-                      <Grid item xs={12} sm={6}>
+                      <Grid item xs={12}>
                         <FormControl fullWidth size="small">
                           <InputLabel>Following-row alternate column</InputLabel>
                           <Select
@@ -19020,7 +19262,7 @@ const BomNormalizer = () => {
                       </Grid>
                     )}
                     {config.alternateLayout === 'following_rows' && followingRowsInsideCellAlternateInfo && !bomLayoutActive && (
-                      <Grid item xs={12} sm={6}>
+                      <Grid item xs={12}>
                         <Box
                           sx={{
                             height: '100%',
@@ -19086,82 +19328,16 @@ const BomNormalizer = () => {
                         </Box>
                       </Grid>
                     )}
-                    {showAlternateInheritanceControl && (
-                      <Grid item xs={12} sm={6}>
-                        <FormControl fullWidth size="small">
-                          <InputLabel>Autofill from primary</InputLabel>
-                          <Select
-                            multiple
-                            value={selectedAlternateInheritFields}
-                            label="Autofill from primary"
-                            renderValue={(selected) => {
-                              const labels = selected
-                                .map((field) => ALTERNATE_INHERIT_FIELD_OPTIONS.find((option) => option.value === field)?.label)
-                                .filter(Boolean);
-                              if (!labels.length) return 'None';
-                              if (labels.length <= 2) return labels.join(', ');
-                              return `${labels.slice(0, 2).join(', ')} +${labels.length - 2}`;
-                            }}
-                            onChange={(event) => {
-                              const rawFields = typeof event.target.value === 'string'
-                                ? event.target.value.split(',')
-                                : event.target.value;
-                              const shouldToggleAll = rawFields.includes(ALTERNATE_INHERIT_SELECT_ALL_VALUE);
-                              const nextFields = shouldToggleAll
-                                ? (allAlternateInheritFieldsSelected ? [] : allAlternateInheritFieldValues)
-                                : rawFields;
-                              setAlternateInheritFieldsTouched(true);
-                              setParserTouched(true);
-                              setConfig((prev) => ({
-                                ...prev,
-                                alternateInheritFields: nextFields,
-                              }));
-                            }}
-                          >
-                            <MenuItem value={ALTERNATE_INHERIT_SELECT_ALL_VALUE}>
-                              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, width: '100%', minWidth: 0 }}>
-                                <Checkbox
-                                  checked={allAlternateInheritFieldsSelected}
-                                  indeterminate={someAlternateInheritFieldsSelected}
-                                />
-                                <ListItemText
-                                  primary={allAlternateInheritFieldsSelected ? 'Clear all' : 'Select all'}
-                                  sx={{ minWidth: 0 }}
-                                />
-                              </Box>
-                            </MenuItem>
-                            {ALTERNATE_INHERIT_FIELD_OPTIONS.map((option) => (
-                              <MenuItem key={option.value} value={option.value}>
-                                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, width: '100%', minWidth: 0 }}>
-                                  <Checkbox checked={selectedAlternateInheritFields.includes(option.value)} />
-                                  <ListItemText primary={option.label} sx={{ minWidth: 0 }} />
-                                  <Tooltip
-                                    arrow
-                                    placement="right"
-                                    title="Alternate rows use the primary row value for this field."
-                                  >
-                                    <InfoOutlinedIcon
-                                      fontSize="small"
-                                      sx={{ color: 'text.secondary', opacity: 0.7, flexShrink: 0, '&:hover': { opacity: 1 } }}
-                                      onClick={(event) => event.stopPropagation()}
-                                      onMouseDown={(event) => event.stopPropagation()}
-                                    />
-                                  </Tooltip>
-                                </Box>
-                              </MenuItem>
-                            ))}
-                          </Select>
-                        </FormControl>
-                      </Grid>
-                    )}
-                    <Grid item xs={12} sm={6}>
+                    <Grid item xs={12} md={6}>
                       <FormControl fullWidth size="small">
                         <InputLabel>BOM layout</InputLabel>
                         <Select
                           value={config.bomLayout || 'none'}
                           label="BOM layout"
+                          onClose={() => setDetectedSetupPreview((current) => ({ ...current, option: null }))}
                           onChange={(event) => {
                             const nextLayout = event.target.value;
+                            setDetectedSetupPreview({ kind: 'bom', option: BOM_LAYOUT_OPTIONS.find((option) => option.value === nextLayout) || null });
                             setParserTouched(true);
                             setConfig((prev) => ({
                               ...prev,
@@ -19179,10 +19355,18 @@ const BomNormalizer = () => {
                           }}
                         >
                           {BOM_LAYOUT_OPTIONS.map((option) => (
-                            <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
+                            <MenuItem key={option.value} value={option.value} onMouseEnter={() => setDetectedSetupPreview({ kind: 'bom', option })}>{option.label}</MenuItem>
                           ))}
                         </Select>
                       </FormControl>
+                    </Grid>
+                    <Grid item xs={12} md={6}>
+                      <DetectedSetupLivePreview
+                        title="BOM layout"
+                        option={(detectedSetupPreview.kind === 'bom' && detectedSetupPreview.option) || selectedBomLayoutOption}
+                        normalizerTheme={normalizerTheme}
+                        isDarkMode={isDarkMode}
+                      />
                     </Grid>
                   </Grid>
                   {/* Shown when the rows say which file they came from and there is
@@ -19621,6 +19805,7 @@ const BomNormalizer = () => {
           </Stack>
         )}
       </Box>
+      {hasMappingFooter && <Box component="footer" ref={mappingFooterRef} sx={{ flexShrink: 0, zIndex: 2, bgcolor: normalizerTheme.paperSoft }} />}
       <Dialog
         open={sourceGridOpen}
         onClose={() => setSourceGridOpen(false)}
@@ -20686,6 +20871,7 @@ const BomNormalizer = () => {
               >
                 {[
                   {
+                    key: 'items',
                     label: 'Items detected',
                     value: fieldPatternReviewSummary.itemCount,
                     helper: 'Rows found in the source',
@@ -20693,6 +20879,7 @@ const BomNormalizer = () => {
                     Icon: InsertDriveFileOutlinedIcon,
                   },
                   {
+                    key: 'all',
                     label: 'Patterns detected',
                     value: fieldPatternReviewSummary.patternCount,
                     helper: 'Unique structures identified',
@@ -20700,6 +20887,7 @@ const BomNormalizer = () => {
                     Icon: GridViewOutlinedIcon,
                   },
                   {
+                    key: 'recognized',
                     label: 'Recognized',
                     value: fieldPatternReviewSummary.recognizedPatternCount,
                     helper: 'Ready for confirmation',
@@ -20707,32 +20895,63 @@ const BomNormalizer = () => {
                     Icon: CheckCircleOutlineIcon,
                   },
                   {
+                    key: 'review',
                     label: 'Need review',
                     value: fieldPatternReviewSummary.unrecognizedPatternCount,
                     helper: 'Requires your attention',
                     accent: isDarkMode ? '#f8bd52' : '#d97706',
                     Icon: WarningAmberOutlinedIcon,
                   },
-                ].map(({ label, value, helper, accent, Icon }) => (
+                ].map(({ key, label, value, helper, accent, Icon }) => {
+                  const isActive = key === 'items'
+                    ? fieldPatternReviewStage === 'rows'
+                    : fieldPatternReviewStage === 'patterns' && fieldPatternStatusFilter === key;
+                  return (
                   <Box
                     key={label}
+                    component="button"
+                    type="button"
+                    aria-pressed={isActive}
+                    onClick={() => {
+                      if (key === 'items') {
+                        setFieldPatternReviewStage('rows');
+                      } else {
+                        setFieldPatternReviewStage('patterns');
+                        setFieldPatternStatusFilter(key);
+                        if (key === 'all') setFieldPatternFieldFilter('all');
+                      }
+                      setFieldPatternExpandedPatternKey('');
+                      fieldPatternReviewContentRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+                    }}
                     sx={{
                       position: 'relative',
+                      display: 'block',
+                      width: '100%',
                       minHeight: 108,
                       overflow: 'hidden',
                       px: 1.5,
                       py: 1.35,
-                      border: `1px solid ${isDarkMode ? normalizerTheme.border : '#d9e2ef'}`,
+                      border: `1px solid ${isActive ? `${accent}99` : (isDarkMode ? normalizerTheme.border : '#d9e2ef')}`,
                       borderRadius: '14px',
                       bgcolor: isDarkMode ? normalizerTheme.paper : '#ffffff',
-                      boxShadow: isDarkMode ? 'none' : '0 10px 24px -20px rgba(15,23,42,0.35)',
-                      transition: 'border-color 150ms ease, box-shadow 150ms ease, transform 150ms ease',
+                      color: 'inherit',
+                      font: 'inherit',
+                      textAlign: 'left',
+                      cursor: 'pointer',
+                      boxShadow: isActive
+                        ? `0 0 0 2px ${accent}24, ${isDarkMode ? 'none' : '0 10px 24px -20px rgba(15,23,42,0.35)'}`
+                        : (isDarkMode ? 'none' : '0 10px 24px -20px rgba(15,23,42,0.35)'),
+                      transition: 'border-color 150ms ease, box-shadow 150ms ease, transform 150ms ease, background-color 150ms ease',
                       '&:hover': {
                         transform: 'translateY(-1px)',
                         borderColor: `${accent}66`,
                         boxShadow: isDarkMode
                           ? `0 14px 30px -26px ${accent}80`
                           : `0 16px 32px -24px ${accent}99`,
+                      },
+                      '&:focus-visible': {
+                        outline: `2px solid ${accent}`,
+                        outlineOffset: 2,
                       },
                     }}
                   >
@@ -20776,7 +20995,8 @@ const BomNormalizer = () => {
                       {helper}
                     </Typography>
                   </Box>
-                ))}
+                  );
+                })}
               </Box>
               <Paper
                 elevation={0}
@@ -21345,7 +21565,11 @@ const BomNormalizer = () => {
                     );
                   })}
                   {!filteredFieldPatternReviewPatterns.length && (
-                    <Alert severity="info">No detected patterns use the selected mapped field.</Alert>
+                    <Alert severity="info">
+                      {fieldPatternStatusFilter === 'all'
+                        ? 'No detected patterns use the selected mapped field.'
+                        : `No ${fieldPatternStatusFilter === 'recognized' ? 'recognized' : 'unreviewed'} patterns match the selected field.`}
+                    </Alert>
                   )}
                 </Stack>
               ) : (

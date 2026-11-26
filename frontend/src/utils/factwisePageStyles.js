@@ -432,6 +432,7 @@ export const factWiseSelectMenuProps = (tokens, options = {}) => ({
 export const buildFactWiseTableTone = (tokens = {}) => {
   const isDark = tokens.bg === '#09090b' || tokens.bg === '#090b10' || tokens.bg === '#0f131a';
   return {
+    isDark,
     bg: isDark ? '#171b23' : '#ffffff',
     header: isDark ? '#202938' : '#eaf2fb',
     row: isDark ? '#171b23' : '#ffffff',

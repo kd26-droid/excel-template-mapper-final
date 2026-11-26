@@ -1,5 +1,5 @@
 import React from 'react';
-import { Routes, Route } from 'react-router-dom';
+import { Routes, Route, useLocation } from 'react-router-dom';
 import { Box } from '@mui/material';
 import Header from './components/Header';
 import Dashboard from './pages/Dashboard';
@@ -15,19 +15,29 @@ import { useSyncFactwiseCredentials } from './hooks/useSyncFactwiseCredentials';
 import { buildFactWisePageTokens } from './utils/factwisePageStyles';
 import { useThemeContext } from './utils/ThemeContext';
 
-const AppRoutes = () => (
-  <Routes>
-    <Route path="/" element={<UploadFiles />} />
-    <Route path="/dashboard" element={<Dashboard />} />
-    <Route path="/upload" element={<UploadFiles />} />
-    <Route path="/mapping/:sessionId" element={<ColumnMapping />} />
-    <Route path="/editor/:sessionId" element={<EnhancedDataEditor />} />
-    <Route path="/pdf-zones/:sessionId" element={<PDFZoneSelection />} />
-    <Route path="/settings" element={<Settings />} />
-    <Route path="/bom-normalizer" element={<BomNormalizer />} />
-    <Route path="/bom-normaliser" element={<BomNormalizer />} />
-  </Routes>
-);
+const AppRoutes = () => {
+  const location = useLocation();
+
+  const routes = (routeLocation) => (
+    <Routes location={routeLocation}>
+      <Route path="/" element={<UploadFiles />} />
+      <Route path="/dashboard" element={<Dashboard />} />
+      <Route path="/upload" element={<UploadFiles />} />
+      <Route path="/mapping/:sessionId" element={<ColumnMapping />} />
+      <Route path="/editor/:sessionId" element={<EnhancedDataEditor />} />
+      <Route path="/pdf-zones/:sessionId" element={<PDFZoneSelection />} />
+      <Route path="/settings" element={<Settings />} />
+      <Route path="/bom-normalizer" element={<BomNormalizer />} />
+      <Route path="/bom-normaliser" element={<BomNormalizer />} />
+    </Routes>
+  );
+
+  return (
+    <>
+      {routes(location)}
+    </>
+  );
+};
 
 function App() {
   const { isDarkMode, tokens: themeTokens } = useThemeContext();
